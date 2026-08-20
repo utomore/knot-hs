@@ -159,7 +159,7 @@ locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 1 | scan-baseline | ProjectMeta DTO、檔案樹掃描、大寫尾綴 module 對映、路徑啟發式排除 | discovery、source-index | - | - |
+| 1 | scan-baseline | ProjectMeta DTO、檔案樹掃描、大寫尾綴 module 對映、路徑啟發式排除 | discovery、source-index | - | F001 |
 
 ### 階段二:S2 .cabal 整合
 
