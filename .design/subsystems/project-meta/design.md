@@ -49,7 +49,7 @@ data PackageMeta = PackageMeta
   }
 
 data ComponentMeta = ComponentMeta
-  { compName       :: Text             -- 如 "lib:magic-core"、"exe:particle-magic"
+  { compName       :: Text             -- 前綴比照 cabal target 語法:lib: / exe: / flib: / test: / bench:(A3)
   , compKind       :: ComponentKind
   , compSourceDirs :: [FilePath]       -- hs-source-dirs(repo 相對)
   , compExcluded   :: Bool             -- 依 kind 與 includeTests 判定
@@ -89,8 +89,8 @@ data MetaWarning = MetaWarning         -- (A2 裁決)
 
 1. **排除 kind**:`TestSuite`、`Benchmark` 預設 `compExcluded = True`,`includeTests = True` 時翻轉;其餘 kind 一律納入
 2. **一對多歸類**:檔案落在多個 component 的 `hs-source-dirs` 時,`sfOwners` 全列;**只要任一 owner 未排除即 `sfIncluded = True`**(例:particle-magic 的 `app/Main.hs` 同屬 executable 與 test-suite → 納入)
-3. **module 對映**:S2 起以「檔案路徑相對於所屬 component 的 hs-source-dirs」精確推導;S1(無 `.cabal` 解析)以**大寫路徑尾綴法**——取路徑中最長的、每段皆大寫開頭的尾綴(`src/MagicFarmer/Render/Core.hs` → `MagicFarmer.Render.Core`)。兩法對呼叫者透明,契約不變
-4. **S1 排除啟發式**:無 component 資訊時,頂層 `test/`、`tests/`、`bench/` 目錄下的檔案視為排除;S2 起由 component 判定取代
+3. **module 對映**:S2 起以「檔案路徑相對於所屬 component 的 hs-source-dirs」精確推導;S1(無 `.cabal` 解析)以**大寫路徑尾綴法**——取路徑中最長的、每段皆大寫開頭的尾綴(`src/MagicFarmer/Render/Core.hs` → `MagicFarmer.Render.Core`)。兩法對呼叫者透明,契約不變;不屬任何 component 的檔案退回大寫尾綴法(A5)
+4. **S1 排除啟發式**:無 component 資訊時,頂層 `test/`、`tests/`、`bench/` 目錄下的檔案視為排除;S2 起由 component 判定取代(無 owner 的檔案仍沿用本啟發式,A5)
 5. **`.hie` 發現順序**:`hieDirOverride` > 慣例位置 `<root>/.hie` > 遞迴掃 `dist-newstyle`;採用了哪層記錄在 `hieSource`
 6. **幽靈判定**:`.hie` 相對路徑對映的 module 在 `pmSources` 中無對應原始檔 → 列入 `hieGhosts`,附警告,不交給下游
 7. **決定性**:同樣輸入產生同樣輸出,所有清單排序穩定
@@ -196,7 +196,7 @@ locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
 - **負責模組**:discovery、cabal-model、source-index
 - **實作的 Level 2 介面**:模組介面 `resolvePackage`;DTO `PackageMeta`、`ComponentMeta`、`ComponentKind`、`ComponentRef`;強化 `indexSources` 落實判定規則 1(kind 排除)、規則 2(一對多歸類與納入判定)、規則 3 的精確 module 對映(取代大寫尾綴法);`findCabalFiles` 支援 `cabal.project` 的多套件列表
 - **資料流管線段落**:從 discovery 的 `.cabal` 清單進,經 cabal-model → source-index,出 owners/included/module 填實的 `[SourceFile]` 與 `pmPackages`
-- **驗收標準**:對 particle-magic(唯讀)執行——列出 9 個 component(named library 2、executable 4、foreign-library 1、test-suite 1、benchmark 1);`app/` 下檔案 `sfOwners` 同時含 executable 與 test-suite 且 `sfIncluded = True`;僅屬 test-suite 的 `test/` 檔案 `sfIncluded = False`;多套件 `cabal.project` 能列出多個 `PackageMeta`(以臨時 fixture 專案驗證,不得改動驗收標的專案)
+- **驗收標準**:對 particle-magic(唯讀)執行——列出 9 個 component(named library 2、executable 4、foreign-library 1、test-suite 1、benchmark 1);`app/` 下檔案 `sfOwners` 含 executable 與 test-suite(A9:實際亦含 benchmark,共三個 owner)且 `sfIncluded = True`;僅屬 test-suite 的 `test/` 檔案 `sfIncluded = False`;多套件 `cabal.project` 能列出多個 `PackageMeta`(以臨時 fixture 專案驗證,不得改動驗收標的專案)
 - **明確不做**:不做非預設 flag 組合的 conditional 求值(以預設 flag 攤平);不解析 build-depends 依賴圖;不讀 `.hie`;不掃 `dist-newstyle` 內的原始碼
 
 ### hie-discovery
