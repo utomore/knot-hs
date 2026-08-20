@@ -30,7 +30,8 @@ extract :: ExtractOptions -> ProjectMeta -> IO ExtractResult
 
 ```haskell
 data ExtractOptions = ExtractOptions
-  { backendChoice :: BackendChoice     -- 對應 CLI --backend
+  { rootDir       :: FilePath           -- 專案根目錄(sfPath、hieFiles 等 repo 相對路徑的錨點)
+  , backendChoice :: BackendChoice     -- 對應 CLI --backend
   , hiedbExe      :: Maybe FilePath    -- 覆寫 hiedb 執行檔(預設查 PATH)
   , dbPath        :: Maybe FilePath    -- 覆寫索引位置(預設 <root>/.knot/hiedb.sqlite)
   }
@@ -86,20 +87,27 @@ data DeclKind
 data BackendReport = BackendReport
   { brBackend :: Text                   -- "import-scan" | "hiedb"
   , brUsed    :: Bool
-  , brDetail  :: Text                   -- 未用時的降級原因(找不到執行檔/無 .hie/版本不合…)
+  , brDetail  :: Text                   -- 未用時的降級原因(找不到執行檔/無 .hie/版本不合…);成功時為空字串,即「非空 detail ⇔ 有降級原因」(F001 A8 裁決)
   }
 ```
 
-`ExtractWarning` 為帶來源(檔案或後端)的警告文字。
+```haskell
+data ExtractWarning = ExtractWarning   -- (批次澄清裁定,比照 MetaWarning 模式)
+  { ewSource  :: Text                  -- 來源:檔案路徑或後端名
+  , ewMessage :: Text
+  }
+```
+
+`ModuleName` 直接共用 project-meta 契約的定義(`Knot.Meta.Types`,批次澄清裁定)——同一型別沿管線流動,零轉換。
 
 ### 抽取規則(契約的一部分)
 
 1. **納入範圍**:只處理 `pmSources` 中 `sfIncluded = True` 的檔案;`.hie` 清單以 `pmHie.hieFiles` 為準(幽靈檔已被 project-meta 濾除)
-2. **後端職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強、與降級模式行為一致);hiedb 後端只產 `FactDecl` / `FactRef` / `FactInstance`;`FactModule` 由 import-scan 產出
+2. **後端職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強、與降級模式行為一致);hiedb 後端只產 `FactDecl` / `FactRef` / `FactInstance`;`FactModule` 由 import-scan 產出;無 module 標頭的檔案依 Haskell 語意視為 `Main`(多個 Main 以 fmFile 區分,批次澄清裁定)
 3. **auto 合成**:import-scan 必跑;hiedb 探測通過(執行檔存在、`pmHie` 存在、相容性檢查過)則加跑,`erLevel = DeclLevel`;任一條件不成立記入 `BackendReport` 並降為 `ModuleLevel`。`ImportsOnly` / `HiedbOnly` 只跑指定後端(後者供除錯)
 4. **fromDecl 由後端解析**:`FactRef.frFromDecl` 在事實產出時即填好(hiedb 後端以 span 包含關係 join 得出);graph-core 不做 span 比對
 5. **相容性探測**:hiedb-driver 需能區分並回報「執行檔不存在」「索引失敗/`.hie` 版本不合」兩類不可用(探測手段屬 Level 3 自主權);extraction 是全系統唯一允許讀 `.hie` 內容的子系統
-6. **索引快取**:預設 `<root>/.knot/hiedb.sqlite`(目標專案內**唯一允許新建**的路徑,`dbPath` 可改道);索引重用交給 `hiedb index` 自身的增量機制
+6. **索引快取**:預設 `<root>/.knot/hiedb.sqlite`(目標專案內**唯一允許新建**的路徑,`dbPath` 可改道,root 取自 `ExtractOptions.rootDir`);索引重用交給 `hiedb index` 自身的增量機制
 7. **best-effort**:單檔解析失敗、單表查詢失敗 → 警告 + 跳過;整個後端失敗 → 降級 + 報告,不中斷
 8. **決定性**:事實流排序穩定,同樣輸入產生同樣輸出
 
@@ -186,8 +194,8 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 1 | fact-contract | Fact DTO、後端抽象介面、能力分級、auto 選擇與降級合成 | backend-select | - | - |
-| 2 | import-scan | T0 後端:import 行解析、module 宣告事實 | import-scan | #1 | - |
+| 1 | fact-contract | Fact DTO、後端抽象介面、能力分級、auto 選擇與降級合成 | backend-select | - | F001 |
+| 2 | import-scan | T0 後端:import 行解析、module 宣告事實 | import-scan | #1 | F002 |
 
 ### 階段二:S3 函式級
 

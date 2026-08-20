@@ -12,6 +12,10 @@ library
                       Knot.Meta.CabalModel
                       Knot.Meta.SourceIndex
                       Knot.Meta.HieLocate
+                      Knot.Extract
+                      Knot.Extract.Types
+                      Knot.Extract.Backend
+                      Knot.Extract.ImportScan
     build-depends:    base ^>=4.22
                     , Cabal ^>=3.16
                     , Cabal-syntax ^>=3.16
@@ -39,6 +43,7 @@ test-suite knot-test
     main-is:          Main.hs
     other-modules:    Knot.App.Summary
     build-depends:    base ^>=4.22
+                    , bytestring
                     , directory
                     , filepath
                     , hedgehog
