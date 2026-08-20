@@ -6,12 +6,12 @@ description: 讀 Haskell 專案的 .hie 與 import 產出 dev-flow 相容程式�
 status: active
 created: 2026-08-20
 updated: 2026-08-20
-subsystems: []
+subsystems: [project-meta, extraction, graph-core, export-query]
 ---
 
-# knot-hs 系統主架構
+## knot-hs 系統主架構
 
-## 需求說明
+### 需求說明
 
 dev-flow 0.8.1 起支援「程式碼知識圖」整合層:專案根目錄有 `codegraph.json` 時,`/arch-audit` 能直接計算子系統依賴矩陣、循環依賴、跨界引用與架構 hub;`/feature-design`、`/enhance-design`、`/bugfix` 能用它定位。但目前唯一登記的產生器 graphify **不支援 Haskell**(`.hs` 完全不被分類,連 LLM 語意抽取都繞不過去)。
 
@@ -30,9 +30,9 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
 - 不做視覺化(`scan-graph.mjs` 的文字輸出就是消費端)
 - 不做多語言(只服務 Haskell)
 
-**使用者與體量**:長期維護的個人工具,服務使用者自己的 Haskell 專案。首個驗收標的為 MagicFarmer(`C:\Users\User\Documents\GameProjects\MagicFarmer`,4 個子系統);驗收過程對該專案**唯讀**,不得異動其任何程式碼。
+**使用者與體量**:長期維護的個人工具,服務使用者自己的 Haskell 專案。驗收標的兩個,不得異動其程式碼與既有檔案(唯一例外:允許新建 `.knot/` 索引快取目錄,`--db` 可改道):MagicFarmer(`C:\Users\User\Documents\GameProjects\MagicFarmer`,4 個子系統,驗 dev-flow 整合)、particle-magic(`C:\Users\User\Documents\GameProjects\particle-magic`,單套件 9 個 component 含具名 sub-library / foreign-library / 跨目錄 test-suite,驗 component 歸類與多套件 DTO)。
 
-## 技術棧與環境
+### 技術棧與環境
 
 - **語言 / 編譯器**:Haskell,GHC 9.14.1(base 4.22),`default-language: GHC2024`,cabal-install 3.16.1.0
 - **架構模式**:單一執行檔 `knot`,內部為四個 Bounded Context 的單向資料流管線
@@ -42,15 +42,15 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
   - 下游消費者:dev-flow `arch-audit/scripts/scan-graph.mjs`(非依賴,是契約對象;→ ADR-003)
 - **發佈形式**:`cabal install` 產生獨立執行檔;文件明載版本鎖要求,執行時檢查 `.hie` header 的 GHC 版本並對不合者告警
 
-## 系統對外介面(External I/O Contract)
+### 系統對外介面(External I/O Contract)
 
-### Input
+#### Input
 
 1. Haskell 專案根目錄(預設為目前目錄):`*.cabal`、`cabal.project`、Haskell 原始碼
 2. `.hie` 目錄(函式級抽取需要;由目標專案以 `-fwrite-ide-info -hiedir <dir>` 產生)
 3. `hiedb` 執行檔(函式級抽取需要,PATH 或指定路徑)
 
-### Output
+#### Output
 
 1. **`codegraph.json`**(預設寫到目標專案根目錄)——唯一的檔案輸出,格式由 dev-flow 定義(→ ADR-003):
    - `nodes[]`:必要 `id` / `label` / `source_file`(repo 相對路徑、正斜線);選填 `source_location`
@@ -60,9 +60,9 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
 2. 查詢結果(S4):stdout 文字輸出
 3. 警告與錯誤:stderr;best-effort 模式下跳檔仍 exit 0,`--strict` 時任何跳檔 exit 1
 
-### CLI 介面(頂層契約)
+#### CLI 介面(頂層契約)
 
-```
+```text
 knot extract [PATH]          產出 codegraph.json
   --output FILE              預設 <PATH>/codegraph.json
   --backend auto|imports|hiedb   預設 auto(hiedb 可用則兩層、否則 module 級)
@@ -76,46 +76,53 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 內部旗標細節(參數格式、預設值微調)屬 Level 2/3 自主權,此處只鎖定子命令劃分與語意。
 
-## 子系統劃分(Subsystems & Bounded Contexts)
+### 子系統劃分(Subsystems & Bounded Contexts)
 
 單一執行檔內的四個 Bounded Context,依單向資料流排列。design.md 均未建立,待 `/subsys-design` 逐一展開。
 
-### project-meta — 專案發現
+#### project-meta — 專案發現
 
-- **職責**:解析 `.cabal` 取得 component(library / executable / test-suite)與 `hs-source-dirs`,把每個原始碼檔歸類到 component;定位 `.hie` 目錄;過濾幽靈 `.hie`(對應原始檔已刪除者);產出 test 排除判定
+已建 Level 2:`.design/subsystems/project-meta/design.md`
+
+- **職責**:解析 `.cabal` / `cabal.project` 取得 component(library / executable / test-suite 等,支援多套件)與 `hs-source-dirs`,把每個原始碼檔歸類到 component(一對多);定位 `.hie` 目錄;過濾幽靈 `.hie`(對應原始檔已刪除者);產出 test 排除判定
 - **邊界(不做)**:不讀原始碼內容、不讀 `.hie` 內容、不建圖
 - **對外契約摘要**:輸入專案根目錄,輸出「專案描述」——檔案清單(含 module 名對映、component 歸屬、是否排除)與 `.hie` 目錄資訊
 
-### extraction — 事實抽取
+#### extraction — 事實抽取
 
-- **職責**:定義統一的抽取契約,把原始碼/`.hie` 轉成「事實流」(module import、頂層宣告、名稱引用、class/instance 關係);後端作為內部模組實現同一契約:import-scan(T0,零依賴掃 import 行)、hiedb-sqlite(T1,呼叫 `hiedb index` 後讀其 SQLite)
+已建 Level 2:`.design/subsystems/extraction/design.md`
+
+- **職責**:定義統一的抽取契約,把原始碼/`.hie` 轉成「事實流」(module import、頂層宣告、名稱引用、class/instance 關係);後端作為內部模組實現同一契約:import-scan(T0,零依賴掃 import 行)、hiedb-sqlite(T1,呼叫 `hiedb index` 後讀其 SQLite);auto 模式兩後端並用——imports 邊永遠來自 import-scan,hiedb 只出 decl 層
 - **邊界(不做)**:不決定節點 id、不組圖、不過濾 test(接受 project-meta 的判定)、不寫任何輸出檔
 - **對外契約摘要**:輸入專案描述,輸出事實流;後端能力分級(module 級 / 函式級)由呼叫端查詢,後端不可用時回報降級而非失敗
 
-### graph-core — 圖 IR
+#### graph-core — 圖 IR
 
-- **職責**:把事實流組裝成內部圖 IR:鑄造決定性節點 id(Module + OccName + namespace,絕不用 GHC `Unique`);組裝 module + decl 兩層節點與 `contains` 結構邊;過濾 TH/deriving 產生碼的異常 span;彙整警告
+已建 Level 2:`.design/subsystems/graph-core/design.md`
+
+- **職責**:把事實流組裝成內部圖 IR(純函數):鑄造決定性節點 id(Module + OccName + namespace,絕不用 GHC `Unique`);組裝 module + decl 兩層節點與 `contains` 結構邊;過濾 TH/deriving 產生碼的異常 span;外部目標丟棄與統計;彙整警告
 - **邊界(不做)**:不讀檔案、不認識 `.hie` 或 SQLite、不序列化
 - **對外契約摘要**:輸入事實流,輸出圖 IR(內部模型,非匯出格式)
 
-### export-query — 匯出與查詢
+#### export-query — 匯出與查詢
 
-- **職責**:把圖 IR 投影成 `codegraph.json`(欄位規格與 relation 分類遵守 ADR-003);S4 起提供查詢 CLI(關鍵字查節點、反向可達、兩點最短路徑、連通度排名)
+已建 Level 2:`.design/subsystems/export-query/design.md`
+
+- **職責**:把圖 IR 投影成 `codegraph.json`(欄位規格與 relation 分類遵守 ADR-003,`built_at_commit` 自動偵測);S4 起提供查詢 CLI(關鍵字查節點、反向可達、兩點最短路徑、連通度排名,只走依賴類邊)
 - **邊界(不做)**:不建圖、不改圖;查詢只讀不寫
 - **對外契約摘要**:輸入圖 IR(或既有 codegraph.json),輸出 JSON 檔與 stdout 查詢結果
 
-## 通訊拓撲與原則(Communication Topology)
+### 通訊拓撲與原則(Communication Topology)
 
 - **拓撲**:單向 in-memory 管線,無反向呼叫、無旁路:
 
   `project-meta → extraction → graph-core → export-query`
-
 - **全域錯誤處理**:best-effort——單一檔案讀不過(壞 `.hie`、版本不合、解析失敗)印警告到 stderr、跳過續跑,仍產出部分圖;有跳檔時 exit code 仍為 0,`--strict` 使任何跳檔變 exit 1。不認得的 relation 或資料一律列印,不靜默吞掉
 - **降級原則**:函式級後端(hiedb)不可用時自動降到 module 級並明確告知,而非整體失敗
 
-## 架構圖
+### 架構圖
 
-```
+```text
   Haskell 專案(唯讀)                 knot(單一執行檔)
  ┌──────────────────┐   ┌──────────────────────────────────────────────────┐
  │ *.cabal          │──▶│ project-meta                                     │
@@ -140,7 +147,7 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
                 (/arch-audit 等七個接點)        定位加速
 ```
 
-## 開發階段
+### 開發階段
 
 | 階段 | 涵蓋子系統 | 里程碑 |
 |---|---|---|
