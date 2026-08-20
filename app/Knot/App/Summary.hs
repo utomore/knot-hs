@@ -4,14 +4,24 @@
 --
 -- F002 擴充:package / component 區塊與檔案行尾的 owners 標示,
 -- 供 particle-magic 唯讀驗收觀察 component 清單與歸類結果。
+--
+-- extraction/F002 擴充:'renderFactSummary'——事實摘要輸出,
+-- 供 MagicFarmer / particle-magic 唯讀實跑對帳(假設 A6)。
 module Knot.App.Summary
   ( renderMetaSummary
+  , renderFactSummary
   ) where
 
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 
+import Knot.Extract.Types
+  ( BackendReport (..)
+  , ExtractResult (..)
+  , ExtractWarning (..)
+  , Fact (..)
+  )
 import Knot.Meta.Types
   ( ComponentMeta (..)
   , ComponentRef (..)
@@ -70,5 +80,44 @@ renderMetaSummary pm = T.unlines
   ownerText (ComponentRef (p, c)) = p <> T.pack "/" <> c
   warningLine w =
     T.concat [T.pack "  ! ", T.pack (mwPath w), T.pack ": ", mwMessage w]
+  tshow :: Show a => a -> Text
+  tshow = T.pack . show
+
+-- | 事實摘要:能力等級、後端報告、事實/警告筆數 + 逐筆 module/import 行,
+-- 供唯讀驗收比對。輸出順序完全依 'ExtractResult' 內清單順序(決定性)。
+renderFactSummary :: ExtractResult -> Text
+renderFactSummary er = T.unlines
+  (levelLine : backendLines <> countLines <> map factLine facts <> map warnLine warnings)
+ where
+  facts    = erFacts er
+  warnings = erWarnings er
+  nModules = length [() | FactModule{} <- facts]
+  nImports = length [() | FactImport{} <- facts]
+  levelLine = T.pack "level: " <> tshow (erLevel er)
+  backendLines =
+    (T.pack "backends: " <> tshow (length (erReports er)))
+      : map backendLine (erReports er)
+  backendLine br = T.concat
+    [ T.pack "  ", brBackend br
+    , T.pack " used=", tshow (brUsed br)
+    , if T.null (brDetail br) then T.empty else T.pack " (" <> brDetail br <> T.pack ")"
+    ]
+  countLines =
+    [ T.concat
+        [ T.pack "facts: ", tshow (length facts), T.pack " total, "
+        , tshow nModules, T.pack " modules, "
+        , tshow nImports, T.pack " imports"
+        ]
+    , T.pack "warnings: " <> tshow (length warnings)
+    ]
+  factLine f@FactModule{} = T.concat
+    [ T.pack "  M ", T.pack (fmFile f), T.pack "  [", unMod (fmModule f), T.pack "]" ]
+  factLine f@FactImport{} = T.concat
+    [ T.pack "  I ", T.pack (fiFile f), T.pack ":", tshow (fiLine f)
+    , T.pack "  ", unMod (fiFrom f), T.pack " -> ", unMod (fiTo f)
+    ]
+  factLine f = T.pack "  ? " <> tshow f
+  warnLine w = T.concat [T.pack "  ! ", ewSource w, T.pack ": ", ewMessage w]
+  unMod (ModuleName m) = m
   tshow :: Show a => a -> Text
   tshow = T.pack . show

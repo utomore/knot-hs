@@ -16,7 +16,7 @@ parent: extraction
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | fact-contract | impl-done |
-| 階段一:S1 骨架 | W2 | import-scan | design-done |
+| 階段一:S1 骨架 | W2 | import-scan | impl-done |
 | 階段二:S3 函式級 | W3 | hiedb-driver | 本次不跑 |
 | 階段二:S3 函式級 | W4 | hiedb-facts | 本次不跑 |
 
@@ -36,7 +36,7 @@ parent: extraction
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
 | fact-contract | F001 | F001-fact-contract.md | opus(Fable 誤判中斷改派) | 繼承 | impl-done |
-| import-scan | F002 | F002-import-scan.md | opus(預防 Fable 誤判) | 繼承 | design-done |
+| import-scan | F002 | F002-import-scan.md | opus(預防 Fable 誤判) | 繼承 | impl-done |
 | hiedb-driver | F003 | F003-hiedb-driver.md | 繼承 | 繼承 | 本次不跑 |
 | hiedb-facts | F004 | F004-hiedb-facts.md | 繼承 | 繼承 | 本次不跑 |
 
@@ -59,6 +59,7 @@ parent: extraction
 | F002 A6 | 驗收方式 | 以 knot 手動唯讀實跑,app 層加 renderFactSummary | 待裁決 |
 | F002 A7 | 去註解狀態機範圍 | 只追字串字面量與巢狀區塊註解,不追字元字面量 | 待裁決 |
 | F001 A8 | 後端成功時 brDetail 該填什麼(契約只定義未用時的原因) | brUsed=True 時 brDetail="",使「非空 detail ⇔ 有降級原因」 | 待裁決 |
+| F002 A8 | F001 的 T7 測試以「註冊表為空」為前提,與 F002 填實註冊表衝突 | 保留測試名,斷言改為驗證 extract 委派給 registeredBackends | 待裁決 |
 
 ## 階段結果
 

@@ -3,7 +3,7 @@ id: F002
 type: feature
 title: import-scan
 description: 掃描原始碼的 module 標頭與 import 行產出 module 級事實
-status: open
+status: done
 created: 2026-08-20
 updated: 2026-08-20
 depends-on: [F001, project-meta/F001]
@@ -254,14 +254,14 @@ renderFactSummary :: ExtractResult -> Text
 
 ## TodoList
 
-- [ ] T1: `Knot.Extract.ImportScan` 骨架與後端值(`bName` / `bLevel` / `bProbe`),加入 `exposed-modules`,並把 `Knot.Extract` 註冊表改為 `[importScanBackend]`,`cabal build all` 通過  `dep: F001`
-- [ ] T2: `stripCommentLines`——BOM / CRLF 前處理、`--`、巢狀 `{- -}`、`{-# #-}`、字串字面量,行號與行數保持  `dep: T1`
-- [ ] T3: `headerModuleOf`——module id 文法、跨行標頭、無標頭 → `Nothing`、解析失敗旗標  `dep: T2`
-- [ ] T4: `importsOf`——import 區邊界判定(空白/CPP/縮排/第 0 欄宣告)、`qualified` 與 package 字串跳過、多行 import、`{-# SOURCE #-}`、CPP 分支全抽  `dep: T2`
-- [ ] T5: `scanSource` 組裝——`FactModule`(無標頭 → `Main`,D3)、`FactImport`(`fiFrom` / `fiTo` / `fiLine`)、解析失敗轉警告、不去重  `dep: T3, T4`
-- [ ] T6: `bRun` 逐檔 IO——`rootDir </> sfPath` 讀取、`decodeUtf8'` 解碼、IO/編碼失敗轉警告並跳過該檔、事實依 `pmSources` 序串接;test-suite 加 `bytestring`  `dep: T5`
-- [ ] T7: 決定性驗證——同輸入連續兩次 `bRun` 完全相同;隨機生成 import 原始碼的 round-trip 性質  `dep: T6`
-- [ ] T8: 驗收 harness——`renderFactSummary` 與 `knot` 的事實摘要輸出路徑,對 MagicFarmer / particle-magic 唯讀實跑對帳(結果寫入「實作備註」)  `dep: T7`
+- [x] T1: `Knot.Extract.ImportScan` 骨架與後端值(`bName` / `bLevel` / `bProbe`),加入 `exposed-modules`,並把 `Knot.Extract` 註冊表改為 `[importScanBackend]`,`cabal build all` 通過  `dep: F001`
+- [x] T2: `stripCommentLines`——BOM / CRLF 前處理、`--`、巢狀 `{- -}`、`{-# #-}`、字串字面量,行號與行數保持  `dep: T1`
+- [x] T3: `headerModuleOf`——module id 文法、跨行標頭、無標頭 → `Nothing`、解析失敗旗標  `dep: T2`
+- [x] T4: `importsOf`——import 區邊界判定(空白/CPP/縮排/第 0 欄宣告)、`qualified` 與 package 字串跳過、多行 import、`{-# SOURCE #-}`、CPP 分支全抽  `dep: T2`
+- [x] T5: `scanSource` 組裝——`FactModule`(無標頭 → `Main`,D3)、`FactImport`(`fiFrom` / `fiTo` / `fiLine`)、解析失敗轉警告、不去重  `dep: T3, T4`
+- [x] T6: `bRun` 逐檔 IO——`rootDir </> sfPath` 讀取、`decodeUtf8'` 解碼、IO/編碼失敗轉警告並跳過該檔、事實依 `pmSources` 序串接;test-suite 加 `bytestring`  `dep: T5`
+- [x] T7: 決定性驗證——同輸入連續兩次 `bRun` 完全相同;隨機生成 import 原始碼的 round-trip 性質  `dep: T6`
+- [x] T8: 驗收 harness——`renderFactSummary` 與 `knot` 的事實摘要輸出路徑,對 MagicFarmer / particle-magic 唯讀實跑對帳(結果寫入「實作備註」)  `dep: T7`
 
 ## 1-to-1 測試對照表
 
@@ -285,7 +285,44 @@ renderFactSummary :: ExtractResult -> Text
 - A5: 重複 import(同檔同 module 多行)與自我 import(CPP 分支下可能出現 `fiFrom == fiTo`)如何處理未定 → 採取:全部照字面出事實(行號不同即不同筆),去重與自環處理留給 graph-core(承 `F001`「不做事實去重」)→ 影響:若裁定後端內收斂,在 `scanSource` 尾端加去重(需同時決定保留哪個行號)
 - A6: 契約卡要求對 MagicFarmer 與 particle-magic 執行驗收,但單元測試不得依賴這兩個外部專案存在(project-meta F001 已立此慣例)→ 採取:自動測試全部走 `test/fixtures/` 與暫存目錄,兩標的以 `knot` 執行檔手動唯讀實跑、結果記入「實作備註」;為此在 app 層加 `renderFactSummary` 與對應輸出路徑(T8),屬 executable 內部模組,不動 library 對外契約 → 影響:若編排者要求正式 CLI feature 才能動 app 層,改以一次性 ghci script 驗收,T8 只留 `renderFactSummary` 的單元測試
 - A7: 字元字面量(`'x'`)未納入去註解狀態機(TemplateHaskell 的 `'name` 與識別字尾的 `'` 難以無語法解析地區分)→ 採取:只追蹤字串字面量與區塊註解,並以 A4 的 import 區邊界把風險限縮在檔頭 → 影響:若實測有標的檔案因 `'"'`、`'{'` 類字面量出錯,補上「同行 4 字元內須有閉合 `'`」的啟發式
+- A8(實作階段新增): `F001` 的 T7 測試 `test_extract_entry_empty_registry` 以「註冊表為空」為斷言前提(`erReports == []`),而本 feature 的 T1 正是要把註冊表填實,兩者直接衝突 → 採取:**保留該測試的名稱**(維持 `F001` 1-to-1 對照表的可對帳性),把斷言改為「`extract` 確實委派給 `registeredBackends`」——每個註冊後端剛好一筆 `BackendReport`、`HiedbOnly` 下 import-scan 未選中故 `erFacts == []`;`extract` 的行為本身沒變,變的只是註冊表內容 → 影響:若編排者認為名稱必須跟著語意走,`F001` 文檔 T7 列與測試名同步改為 `test_extract_entry_registry`(純改名,斷言不動)
 
 ## 實作備註
 
-(撰寫時留空)
+### 產出與改動
+
+| 檔案 | 改動 |
+|---|---|
+| `src/Knot/Extract/ImportScan.hs` | 新增:`importScanBackend` + 純掃描核心(`scanSource` / `stripCommentLines` / `headerModuleOf` / `importsOf`)+ 單檔讀取解碼 IO |
+| `src/Knot/Extract.hs` | `registeredBackends` 由 `[]` 改為 `[importScanBackend]`(一行;`extract` 邏輯不動) |
+| `knot-hs.cabal` | library `exposed-modules` 加 `Knot.Extract.ImportScan`;test-suite `build-depends` 加 `bytestring`;`version` 維持 `0.0.1.0` |
+| `app/Knot/App/Summary.hs` | 新增 `renderFactSummary`(executable 內部模組,非 library 契約面) |
+| `app/Main.hs` | 新增 `--facts` 旗標:走 `extract` 印事實摘要;預設輸出不變 |
+| `test/Main.hs` | 新增 group `extraction/F002 import-scan`(T1–T8);另更新 `F001` T7 的斷言(見假設 A8) |
+
+### 內部實作決定(Level 3 自主權範圍)
+
+- 去註解狀態機以「消耗幾個字元就補幾個空白」取代文檔表格的「輸出一個空白」——文檔本身要求「保留行結構與欄位位置」,等寬補白同時滿足兩者,且行數/行號完全不受影響
+- `--` 註解判定改用「最大連續 dash run」而非固定兩字元:`---- 四個 dash` 仍是註解(固定兩字元寫法會誤判成運算子),`-->`、`<--` 因前/後接符號字元而正確判為運算子
+- token 切分統一走 `nextTok`,字串字面量整段為一個 token,`import "pkg" F.G` 的 package 名因此可整段跳過而不需另立規則
+
+### 驗收結果(A6:`knot <PATH> --facts` 唯讀實跑,2026-08-20)
+
+| 標的 | included 檔數 | `FactModule` | `FactImport` | 事實總數 | 警告 | 連跑兩次 |
+|---|---|---|---|---|---|---|
+| MagicFarmer | 58 | 58 | 523 | 581 | 0 | 輸出完全相同 |
+| particle-magic | 44 | 44 | 342 | 386 | 0 | 輸出完全相同 |
+
+機械性對帳(全部唯讀):
+
+- **驗收標準 1**:兩標的的 `FactModule` 筆數 == `sfIncluded = True` 檔數(58/58、44/44),逐檔一筆無遺漏
+- **module 名正確性**:102 個檔逐一比對「檔內 `module` 標頭 vs 抽出的 `fmModule`」,**0 筆不符**;無標頭檔(如 MagicFarmer `app/Main.hs`)正確落為 `Main`(D3 在真實專案驗證通過)
+- **import 筆數對帳**:102 個檔逐一比對「檔內第 0 欄 `^import` 行數 vs 抽出的 `FactImport` 筆數」,**0 筆不符**
+- **驗收標準 4**:兩標的皆 0 警告(無讀取/解碼失敗);失敗路徑改由 T6 的暫存目錄(非法 UTF-8 檔 + 不存在的檔)覆蓋
+- **唯讀性**:實跑後兩標的 `git status` 無新增改動,亦未建立 `.knot/`(hiedb 後端尚未註冊)
+
+已知未被真實標的觸及、僅由單元測試覆蓋的路徑:多行 `import`(關鍵字獨佔一行)、package-qualified import、CPP `#if` / `#else` 雙分支同時抽取、`{-# SOURCE #-}`——兩個標的的 header 區都沒有這些寫法。
+
+### 未偏離契約
+
+公開介面全部落在 Level 2 契約內(`Backend` 實例 + 既有 `Fact` 建構子);`ExtractOptions.rootDir` 已由階段一閘門裁決落為契約(假設 A1 已消解)。無新增 Level 2 契約變更需求。

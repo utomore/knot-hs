@@ -1,5 +1,8 @@
--- | knot 執行檔:極簡 getArgs 解析(委派決策 D1、F001 假設 A6)+ ProjectMeta 摘要。
+-- | knot 執行檔:極簡 getArgs 解析(委派決策 D1、F001 假設 A6)+ 摘要輸出。
 -- 完整 CLI 參數解析屬後續 feature。
+--
+-- extraction/F002 擴充:@--facts@ 走 extraction 管線印事實摘要
+-- (唯讀驗收路徑,假設 A6);預設仍印 ProjectMeta 摘要。
 module Main (main) where
 
 import qualified Data.Text.IO as TIO
@@ -7,9 +10,17 @@ import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
-import Knot.App.Summary (renderMetaSummary)
+import Knot.App.Summary (renderFactSummary, renderMetaSummary)
+import Knot.Extract (extract)
+import Knot.Extract.Types (BackendChoice (..), ExtractOptions (..))
 import Knot.Meta (loadProjectMeta)
 import Knot.Meta.Types (MetaOptions (..))
+
+-- | CLI 選項:ProjectMeta 選項 + 輸出模式。
+data CliOptions = CliOptions
+  { cliMeta  :: MetaOptions
+  , cliFacts :: Bool          -- ^ --facts:改印事實摘要
+  }
 
 main :: IO ()
 main = do
@@ -17,19 +28,36 @@ main = do
   case parseArgs args of
     Left err -> do
       hPutStrLn stderr err
-      hPutStrLn stderr "usage: knot [PATH] [--include-tests]"
+      hPutStrLn stderr "usage: knot [PATH] [--include-tests] [--facts]"
       exitFailure
-    Right opts -> do
-      meta <- loadProjectMeta opts
-      TIO.putStr (renderMetaSummary meta)
+    Right cli -> do
+      let metaOpts = cliMeta cli
+      meta <- loadProjectMeta metaOpts
+      if cliFacts cli
+        then do
+          result <- extract (extractOpts (root metaOpts)) meta
+          TIO.putStr (renderFactSummary result)
+        else TIO.putStr (renderMetaSummary meta)
 
--- | 位置參數 PATH(預設 ".")與旗標 --include-tests;其餘一律拒絕。
-parseArgs :: [String] -> Either String MetaOptions
-parseArgs = go (MetaOptions { root = ".", includeTests = False, hieDirOverride = Nothing }) False
+-- | 抽取選項:rootDir 沿用 PATH,其餘為預設(階段一只有 import-scan 註冊)。
+extractOpts :: FilePath -> ExtractOptions
+extractOpts r = ExtractOptions
+  { rootDir       = r
+  , backendChoice = Auto
+  , hiedbExe      = Nothing
+  , dbPath        = Nothing
+  }
+
+-- | 位置參數 PATH(預設 ".")與旗標 --include-tests / --facts;其餘一律拒絕。
+parseArgs :: [String] -> Either String CliOptions
+parseArgs = go (CliOptions defMeta False) False
  where
-  go opts _seenPath [] = Right opts
-  go opts seenPath (a : rest)
-    | a == "--include-tests" = go opts { includeTests = True } seenPath rest
-    | take 2 a == "--"       = Left ("unknown flag: " <> a)
-    | seenPath               = Left ("unexpected extra argument: " <> a)
-    | otherwise              = go opts { root = a } True rest
+  defMeta = MetaOptions { root = ".", includeTests = False, hieDirOverride = Nothing }
+  go cli _seenPath [] = Right cli
+  go cli seenPath (a : rest)
+    | a == "--include-tests" =
+        go cli { cliMeta = (cliMeta cli) { includeTests = True } } seenPath rest
+    | a == "--facts"   = go cli { cliFacts = True } seenPath rest
+    | take 2 a == "--" = Left ("unknown flag: " <> a)
+    | seenPath         = Left ("unexpected extra argument: " <> a)
+    | otherwise        = go cli { cliMeta = (cliMeta cli) { root = a } } True rest
