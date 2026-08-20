@@ -105,6 +105,7 @@ id 只由 `QualName`(module、occ、namespace)、instance 標頭與(碰撞時的
    | `FactInstance` | instance 節點 + `RContains`(module → instance)+ `RImplements`(instance → class,class 為內部節點時) |
 
 3. **產生碼過濾**:事實指向的檔案不在 `pmSources`、或行號 ≤ 0 → 濾除並計入 `gsFilteredGenerated`
+4a. **消歧組的 import 目標**:`FactImport` 的目標 module 屬 D1 消歧組時,無從判定指向組內哪個節點 → 丟棄該邊並發 `GraphWarning`,**不**計入 `gsDroppedExternal`(它不是外部目標;A4 裁決)
 4. **自環丟棄**:source 與 target 相同的邊(遞迴呼叫、module 自引)不產出,不計警告
 5. **去重**:相同 `(source, target, relation)` 的邊合併為一條,保留最早的 `geLine` 證據行,合併數計入 `gsDedupedEdges`
 6. **`moduleOnly`**:只輸出 module 節點與 `RImports` 邊(decl 層事實直接忽略,不計入統計)
