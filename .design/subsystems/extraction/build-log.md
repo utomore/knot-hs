@@ -15,7 +15,7 @@ parent: extraction
 
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
-| 階段一:S1 骨架 | W1 | fact-contract | pending |
+| 階段一:S1 骨架 | W1 | fact-contract | design-done |
 | 階段一:S1 骨架 | W2 | import-scan | pending |
 | 階段二:S3 函式級 | W3 | hiedb-driver | 本次不跑 |
 | 階段二:S3 函式級 | W4 | hiedb-facts | 本次不跑 |
@@ -35,7 +35,7 @@ parent: extraction
 
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
-| fact-contract | F001 | F001-fact-contract.md | 繼承 | 繼承 | pending |
+| fact-contract | F001 | F001-fact-contract.md | opus(Fable 誤判中斷改派) | 繼承 | design-done |
 | import-scan | F002 | F002-import-scan.md | 繼承 | 繼承 | pending |
 | hiedb-driver | F003 | F003-hiedb-driver.md | 繼承 | 繼承 | 本次不跑 |
 | hiedb-facts | F004 | F004-hiedb-facts.md | 繼承 | 繼承 | 本次不跑 |
@@ -44,6 +44,13 @@ parent: extraction
 
 | 來源 | 假設 | 採取的判斷 | 閘門裁決 |
 |---|---|---|---|
+| F001 A1 | 規則 1 落實位置 | backend-select 調度前窄化 pmSources,後端只見 included 檔 | 待裁決 |
+| F001 A2 | BackendChoice → 後端辨識 | 以 bName 比對契約字串常數 import-scan/hiedb | 待裁決 |
+| F001 A3 | 規則 8 排序手段 | Fact 及成員 DTO derive Ord,合成後全序排序 | 待裁決 |
+| F001 A4 | 無後端成功時 erLevel | 取 ModuleLevel(能力下限),真相由 erReports 表達 | 待裁決 |
+| F001 A5 | 未選中的後端是否進 erReports | 進,brUsed=False + 未選中原因 | 待裁決 |
+| F001 A6 | 調度引擎需為測試匯出 | 比照 project-meta 慣例,haddock 註明非契約面 | 待裁決 |
+| F001 A7 | 本階段註冊表空,extract 回空事實流 | 視為階段一預期語意,T7 測試釘住 | 待裁決 |
 
 ## 階段結果
 
