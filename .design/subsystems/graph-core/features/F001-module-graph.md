@@ -3,7 +3,7 @@ id: F001
 type: feature
 title: module-graph
 description: 由事實流組出 module 節點與 imports 邊的決定性 CodeGraph
-status: open
+status: done
 created: 2026-08-20
 updated: 2026-08-20
 depends-on: [project-meta/F001, extraction/F001, extraction/F002]
@@ -53,7 +53,7 @@ graph-core 的**第一個實體**:把 extraction 的事實流(本階段實際只
 |---|---|
 | 對外契約 `buildGraph :: BuildOptions -> ProjectMeta -> ExtractResult -> CodeGraph` | `Knot.Graph.buildGraph`,純函數簽名一字不差 |
 | DTO `BuildOptions` / `CodeGraph` / `NodeId` / `GraphNode` / `NodeKind` / `GraphEdge` / `Relation` / `GraphStats` / `GraphWarning` | 全部定義於 `Knot.Graph.Types`,欄位名與型別依契約原文;本階段只**產生** `ModuleNode` 與 `RImports`,其餘建構子先行定義(零邏輯,比照 project-meta `F001` 假設 A5 的既有慣例) |
-| 鑄造規則表 · module 列(裸名 / `<module>@<source_file>`) | `mintModuleId`(裸名)+ 內部 `mintModuleIdAt`(消歧,見假設 A2);值/型別/instance 三列屬 `F002`,本階段不實作 |
+| 鑄造規則表 · module 列(裸名 / `<module>@<source_file>`) | `mintModuleId :: ModuleName -> Maybe FilePath -> NodeId`(**A2 裁決後的契約簽名**:`Nothing` = 未碰撞鑄裸名、`Just file` = 碰撞組鑄消歧名);值/型別/instance 三列屬 `F002`,本階段不實作 |
 | 同名 module 消歧(D1) | 判定依 `FactModule.fmFile` 的**相異數**:同名 >1 檔 → 該組全部改用 `<module>@<file>`;=1 檔 → 裸名;碰撞事實彙整為 `GraphWarning` |
 | 組裝規則 1(內部才實化) | 內部集合 = 事實流所有 `FactModule.fmModule`(D2,**非** `pmSources.sfModule`);外部目標丟棄並計入 `gsDroppedExternal` / `gsTopExternalTargets`(D4:前 10、次數降序、同次數依名字典序) |
 | 組裝規則 2 · `FactModule` 列 | `FactModule` → module 節點(`mintNodes`) |
@@ -62,13 +62,18 @@ graph-core 的**第一個實體**:把 extraction 的事實流(本階段實際只
 | 組裝規則 5(去重) | 相同 `(source, target, relation)` 合併為一條,`geLine` 保留最小行號,合併掉的條數計入 `gsDedupedEdges` |
 | 組裝規則 7(決定性) | `cgNodes` 依 `NodeId` 字典序、`cgEdges` 依 `(source, relation, target)` 字典序(D5);全程純函數 |
 | 模組介面 `gateFacts` / `GatedFacts` | `Knot.Graph.FactGate`,簽名依契約;`gfInternal` 由 D2 建立;`gfFiltered` 本階段恆 0(規則 3 屬 `F002`,見假設 A6) |
-| 模組介面 `mintModuleId` / `mintNodes` | `Knot.Graph.NodeMint`,簽名依契約(另有非契約面的內部函式,見「新增的介面」) |
-| 模組介面 `deriveEdges` / `EdgeStats` | `Knot.Graph.EdgeDerive`,簽名依契約(警告通道缺口見假設 A3) |
+| 模組介面 `mintModuleId` / `mintNodes` | `Knot.Graph.NodeMint`,簽名一字不差依 A2 裁決後的契約;另匯出非契約面的 `moduleFiles`(D1 判定面,供 graph-assemble 彙整碰撞警告與 1-to-1 測試) |
+| 模組介面 `deriveEdges` / `EdgeStats` | `Knot.Graph.EdgeDerive`,簽名一字不差依 **A3 裁決後的契約**(三元組,警告通道已補進契約) |
 | 組裝規則 6(`moduleOnly`) | graph-assemble 於進 fact-gate 前把事實窄化為 module 層建構子(`FactModule` / `FactImport`);本階段兩個取值輸出相同(驗收標準 5) |
 | 資料流管線 | `fact-gate → node-mint → edge-derive → graph-assemble` 四段全部走到,順序與 design.md 圖一致 |
 | 組裝規則 3(產生碼過濾)、鑄造規則的 decl / instance 列 | **不觸碰**(`F002` / `F003` 的範圍) |
 
-超出 Level 2 契約的部分:**無**。但發現三處契約**缺口**(不是偏離),已於「待確認假設」記錄並列入回報請編排者裁決:`NodeId` 建構子封裝(A1)、`mintModuleId` 簽名無法表達 D1 消歧(A2)、`deriveEdges` 無警告通道(A3)。三處皆以「契約簽名原封不動 + 另加非契約面內部函式」處理,不改 Level 2。
+超出 Level 2 契約的部分:**無**。撰寫時發現的三處契約**缺口**(不是偏離)中,**A2 與 A3 已由編排者於階段一閘門裁決並回填 Level 2**(`design.md`「模組間公開介面」,commit `b2a2be3`),實作直接依新簽名落地,**未**另建 `mintModuleIdAt` / `deriveEdgesWithWarnings` 包裝:
+
+- **A2 裁決**:`mintModuleId :: ModuleName -> Maybe FilePath -> NodeId`(`Nothing` = 該 module 未碰撞,鑄裸名;`Just file` = 碰撞組,鑄 `<module>@<file>`)
+- **A3 裁決**:`deriveEdges :: GatedFacts -> [GraphNode] -> ([GraphEdge], EdgeStats, [GraphWarning])`(三元組,補上警告通道)
+
+`NodeId` 建構子封裝(A1)未裁決,維持文檔既採判斷(`Knot.Graph.Types` 匯出 `NodeId (..)`,以 haddock 標明唯一鑄造入口在 node-mint;edge-derive 全程只從 `gnId` 取值,不鑄任何 id)。
 
 ## 實作方式
 
@@ -101,7 +106,7 @@ BuildOptions + ProjectMeta + ExtractResult
    │                     mintNodes ──▶ [GraphNode]  (module 節點,已依 NodeId 去重)
    │                          │
    ▼                          ▼
- deriveEdgesWithWarnings gated nodes ──▶ ([GraphEdge], EdgeStats, [GraphWarning])
+ deriveEdges gated nodes ──▶ ([GraphEdge], EdgeStats, [GraphWarning])   (A3 裁決)
    │
    ▼
  graph-assemble:統計彙整(GraphStats)+ 警告彙整(碰撞 + 邊解析)+ 穩定排序(D5)
@@ -133,8 +138,8 @@ id 鑄造:
 
 | 情形 | id |
 |---|---|
-| 該 module 名只有 1 個相異 `fmFile` | `mintModuleId m` = 裸 module 名 |
-| 該 module 名有 ≥2 個相異 `fmFile` | `mintModuleIdAt m file` = `<module>@<file>`(`file` 為 `fmFile` 原文:repo 相對、正斜線) |
+| 該 module 名只有 1 個相異 `fmFile` | `mintModuleId m Nothing` = 裸 module 名 |
+| 該 module 名有 ≥2 個相異 `fmFile` | `mintModuleId m (Just file)` = `<module>@<file>`(`file` 為 `fmFile` 原文:repo 相對、正斜線) |
 
 `mintNodes` 對每筆 `FactModule` 產一個節點:
 
@@ -182,7 +187,7 @@ facts0  = erFacts result
 facts   = if moduleOnly opts then [ f | f <- facts0, isModuleLayer f ] else facts0   (規則 6)
 gated   = gateFacts pm facts
 nodes   = mintNodes gated
-(edges, estats, edgeWarns) = deriveEdgesWithWarnings gated nodes
+(edges, estats, edgeWarns) = deriveEdges gated nodes
 ```
 
 - **統計彙整**:`gsDroppedExternal = esDroppedExternal`、`gsTopExternalTargets = esTopExternal`、`gsDedupedEdges = esDeduped`、`gsFilteredGenerated = gfFiltered`(本階段 0)
@@ -306,16 +311,14 @@ data GatedFacts = GatedFacts
 **`Knot.Graph.NodeMint`**
 
 ```haskell
--- | 裸名鑄造(無同名碰撞時的 module id)。
-mintModuleId :: ModuleName -> NodeId
+-- | module 節點 id 鑄造(A2 裁決的契約簽名)。
+--   Nothing = 該 module 未碰撞,鑄裸名;Just file = 碰撞組,鑄 <module>@<file>。
+mintModuleId :: ModuleName -> Maybe FilePath -> NodeId
 
 -- | 事實流 → module 節點(已依 gnId 去重);非 FactModule 的事實略過。
 mintNodes :: GatedFacts -> [GraphNode]
 
--- * 非契約面(供 graph-assemble 彙整警告與 1-to-1 測試)
-
--- | 消歧鑄造:<module>@<source_file>(假設 A2)。
-mintModuleIdAt :: ModuleName -> FilePath -> NodeId
+-- * 非契約面(供 graph-assemble 彙整碰撞警告與 1-to-1 測試)
 
 -- | D1 判定面:module 名 → 宣告它的相異來源檔集合(Set 大小 > 1 即碰撞組)。
 moduleFiles :: [Fact] -> Map ModuleName (Set FilePath)
@@ -324,8 +327,9 @@ moduleFiles :: [Fact] -> Map ModuleName (Set FilePath)
 **`Knot.Graph.EdgeDerive`**
 
 ```haskell
--- | 邊推導(契約簽名):deriveEdgesWithWarnings 的丟警告版本。
-deriveEdges :: GatedFacts -> [GraphNode] -> ([GraphEdge], EdgeStats)
+-- | 邊推導(A3 裁決的契約簽名):第三個分量是來源/目標解析失敗的警告,
+--   由 graph-assemble 彙整。edge-derive 不鑄造任何 id,只從既有節點取 gnId。
+deriveEdges :: GatedFacts -> [GraphNode] -> ([GraphEdge], EdgeStats, [GraphWarning])
 
 data EdgeStats = EdgeStats
   { esDroppedExternal :: Int
@@ -333,12 +337,6 @@ data EdgeStats = EdgeStats
   , esDeduped         :: Int
   }
   deriving (Eq, Show)
-
--- * 非契約面(Level 2 的 EdgeStats 沒有警告通道,見假設 A3)
-
--- | 同 'deriveEdges',另回傳來源/目標解析失敗的警告,由 graph-assemble 彙整。
-deriveEdgesWithWarnings
-  :: GatedFacts -> [GraphNode] -> ([GraphEdge], EdgeStats, [GraphWarning])
 ```
 
 **`Knot.Graph`**(graph-assemble 進入點)
@@ -357,14 +355,14 @@ renderGraphSummary :: CodeGraph -> Text
 
 ## TodoList
 
-- [ ] T1: `Knot.Graph.Types`——契約 DTO 全套與 deriving(`NodeId` / `Relation` / `NodeKind` 需 `Ord` 供 D5 排序);`knot-hs.cabal` 加五個 `exposed-modules`、test-suite 加 `containers`,`cabal build all` 通過 `dep: -`
-- [ ] T2: `Knot.Graph.FactGate`——`gateFacts` / `GatedFacts`:內部集合由 `FactModule.fmModule`(D2)、decl 層事實原樣通過不 crash、`gfFiltered = 0` `dep: T1`
-- [ ] T3: `Knot.Graph.NodeMint`——`moduleFiles` 碰撞分組、`mintModuleId` / `mintModuleIdAt`(D1)、`mintNodes` 產 module 節點(五個欄位)並依 `gnId` 去重 `dep: T2`
-- [ ] T4: `Knot.Graph.EdgeDerive` 主線——節點索引、`FactImport` → `RImports`、規則 1 外部丟棄與 `esDroppedExternal` / `esTopExternal`(D4 前 10 與排序)、來源/目標解析失敗轉警告 `dep: T3`
-- [ ] T5: edge-derive 收斂——規則 4 自環丟棄(不計統計不發警告)、規則 5 去重(合併鍵、`geLine` 取最小、`esDeduped` 計數) `dep: T4`
-- [ ] T6: `Knot.Graph.buildGraph`——四模組調度、`moduleOnly` 事實窄化(規則 6)、`GraphStats` 四欄彙整、警告彙整(碰撞 + 邊解析,去重與排序)、D5 穩定排序 `dep: T5`
-- [ ] T7: 決定性與端到端——`test/fixtures/proj` 經 `loadProjectMeta` → `extract` → `buildGraph`;同輸入兩次結果相等;`moduleOnly` True/False 輸出相同;hedgehog property 以隨機事實流驗證排序與純函數性 `dep: T6`
-- [ ] T8: 驗收 harness——`renderGraphSummary` + `--graph` 旗標,對 MagicFarmer / particle-magic 唯讀實跑對帳(結果寫入「實作備註」) `dep: T7`
+- [x] T1: `Knot.Graph.Types`——契約 DTO 全套與 deriving(`NodeId` / `Relation` / `NodeKind` 需 `Ord` 供 D5 排序);`knot-hs.cabal` 加五個 `exposed-modules`、test-suite 加 `containers`,`cabal build all` 通過 `dep: -`
+- [x] T2: `Knot.Graph.FactGate`——`gateFacts` / `GatedFacts`:內部集合由 `FactModule.fmModule`(D2)、decl 層事實原樣通過不 crash、`gfFiltered = 0` `dep: T1`
+- [x] T3: `Knot.Graph.NodeMint`——`moduleFiles` 碰撞分組、`mintModuleId`(D1 的 Nothing/Just 兩分支)、`mintNodes` 產 module 節點(五個欄位)並依 `gnId` 去重 `dep: T2`
+- [x] T4: `Knot.Graph.EdgeDerive` 主線——節點索引、`FactImport` → `RImports`、規則 1 外部丟棄與 `esDroppedExternal` / `esTopExternal`(D4 前 10 與排序)、來源/目標解析失敗轉警告 `dep: T3`
+- [x] T5: edge-derive 收斂——規則 4 自環丟棄(不計統計不發警告)、規則 5 去重(合併鍵、`geLine` 取最小、`esDeduped` 計數) `dep: T4`
+- [x] T6: `Knot.Graph.buildGraph`——四模組調度、`moduleOnly` 事實窄化(規則 6)、`GraphStats` 四欄彙整、警告彙整(碰撞 + 邊解析,去重與排序)、D5 穩定排序 `dep: T5`
+- [x] T7: 決定性與端到端——`test/fixtures/proj`(另加 `test/fixtures/graph`,見 A9)經 `loadProjectMeta` → `extract` → `buildGraph`;同輸入兩次結果相等;`moduleOnly` True/False 輸出相同;hedgehog property 以隨機事實流驗證排序與純函數性 `dep: T6`
+- [x] T8: 驗收 harness——`renderGraphSummary` + `--graph` 旗標,對 MagicFarmer / particle-magic 唯讀實跑對帳(結果寫入「實作備註」) `dep: T7`
 
 ## 1-to-1 測試對照表
 
@@ -376,20 +374,45 @@ renderGraphSummary :: CodeGraph -> Text
 | T4 | test_imports_edges_external | fixture 事實流:內部 `A → B` 產一條 `RImports`(`geLine == Just` 該行);`A → Data.Text` / `A → Data.Map` / `B → Data.Text`(皆非內部)全數丟棄且 `esDroppedExternal == 3`;`esTopExternal` 對 12 個相異外部目標驗證只取前 10、依次數降序、同次數依 module 名字典序(D4);來源檔沒有對應 `FactModule` 的 import → 0 條邊 + 1 則警告;目標落在同名消歧組 → 0 條邊 + 1 則警告(假設 A4) |
 | T5 | test_selfloop_and_dedupe | 同一 module 自 import(`fiFrom == fiTo`)→ 不產邊、`esDroppedExternal` 與 `esDeduped` 皆不變、無警告(規則 4);同一對 module 的 3 條 import(行號 40、12、25,含亂序)→ 合併為 1 條、`geLine == Just 12`、`esDeduped == 2`(規則 5);不同 relation 或不同端點不被誤併 |
 | T6 | test_build_graph_assemble | 綜合事實流一次驗證 graph-assemble:`GraphStats` 四欄值(`gsFilteredGenerated == 0`)、`cgWarnings` 含碰撞警告(`gwSource` 為 module 名、訊息含兩個排序後的檔案路徑)且整體依 `(gwSource, gwMessage)` 去重排序、`cgNodes` 依 `NodeId` 遞增、`cgEdges` 依 `(geSource, geRelation, geTarget)` 遞增;把輸入事實流反轉後重跑 → `CodeGraph` 完全相同(釘住排序而非輸入序);`moduleOnly = True` 時含 `FactDecl` 的事實流輸出與 `False` 相同 |
-| T7 | test_build_graph_deterministic | `loadProjectMeta` + `extract` 取 `test/fixtures/proj` 的真實事實流 → `buildGraph`:節點數 == 該 fixture 成功讀取的 included 檔數(每檔一個 module 節點)、邊全為 `RImports` 且兩端皆為內部節點、外部 import 全數落進 `gsDroppedExternal`;同輸入連續兩次 `buildGraph` 結果 `==`(驗收標準 4);`moduleOnly` 兩取值輸出 `==`(驗收標準 5);hedgehog property:隨機生成 module 名與 import 對(混內部/外部、含重複與自環)→ 產出的 `cgNodes` / `cgEdges` 已排序、邊數 == 相異非自環內部對數、`gsDroppedExternal` == 外部 import 筆數 |
+| T7 | test_build_graph_deterministic | (實作時另加 `test/fixtures/graph` 端到端子測試,見假設 A9:驗非空邊集、外部丟棄、去重與自環)`loadProjectMeta` + `extract` 取 `test/fixtures/proj` 的真實事實流 → `buildGraph`:節點數 == 該 fixture 成功讀取的 included 檔數(每檔一個 module 節點)、邊全為 `RImports` 且兩端皆為內部節點、外部 import 全數落進 `gsDroppedExternal`;同輸入連續兩次 `buildGraph` 結果 `==`(驗收標準 4);`moduleOnly` 兩取值輸出 `==`(驗收標準 5);hedgehog property:隨機生成 module 名與 import 對(混內部/外部、含重複與自環)→ 產出的 `cgNodes` / `cgEdges` 已排序、邊數 == 相異非自環內部對數、`gsDroppedExternal` == 外部 import 筆數 |
 | T8 | test_render_graph_summary | 對已知 `CodeGraph` 值驗證摘要文字(節點/邊/警告筆數、四項統計行、逐筆節點與邊行格式、外部 Top 清單行);MagicFarmer / particle-magic 的實跑屬階段閘門手動唯讀驗收(承 project-meta F001 / extraction F002 慣例),結果記入「實作備註」 |
 
 ## 待確認假設
 
 - A1: Level 2 寫「`NodeId` 的唯一構造入口在 node-mint」,但 `GraphNode` 持有 `NodeId`、`mintNodes` 又回傳 `GraphNode`,Haskell 無法在不新增第三個模組的前提下讓 `Knot.Graph.Types` 匯出抽象型別而 node-mint 仍能建構(會形成 import 環)→ 採取:`Knot.Graph.Types` 匯出 `NodeId (..)`,以 haddock 標明唯一使用點是 node-mint,其他模組一律從 `gnId` 取值(edge-derive 的設計即照此,不鑄任何 id)→ 影響:若要求結構性強制,把 newtype 移進 library `other-modules` 的內部模組,`Knot.Graph.Types` 只再匯出型別本身;測試改由 `mintModuleId` 取值,`app` / export-query 需要一個 `nodeIdText :: NodeId -> Text` 取值函式
-- A2: 契約的 `mintModuleId :: ModuleName -> NodeId` 早於 D1 寫定,單靠 `ModuleName` 無法鑄出 `<module>@<source_file>`(缺 file 參數)→ 採取:契約簽名原封不動(語意窄化為「無碰撞時的裸名鑄造」),另加非契約面的 `mintModuleIdAt :: ModuleName -> FilePath -> NodeId`,由 `mintNodes` 依 `moduleFiles` 的碰撞分組選用 → 影響:若編排者裁定要在 Level 2 更新簽名(例如 `mintModuleId :: Map ModuleName (Set FilePath) -> ModuleName -> FilePath -> NodeId`),只動 node-mint 的對外那一層與 `F002` 的引用;鑄造出的 id 字面值不受影響
-- A3: 契約的 `deriveEdges` 與 `EdgeStats` 沒有警告通道,但系統原則要求「不認得的資料一律列印,不靜默吞掉」,而來源/目標解析失敗必須可見 → 採取:契約函式維持原簽名,另加非契約面 `deriveEdgesWithWarnings`(三元組),graph-assemble 走後者 → 影響:`F003` decl-edges 的驗收標準明載「目標解析不到內部節點的 ref 彙整為警告」,屆時建議 Level 2 為 `EdgeStats` 補 `esWarnings :: [GraphWarning]` 或把 `deriveEdges` 改為三元組;真改了的話本 feature 只需刪掉包裝函式
+- A2: **已由編排者裁決(階段一閘門,`design.md` commit `b2a2be3`),不再待確認**。裁決結果:契約簽名改為 `mintModuleId :: ModuleName -> Maybe FilePath -> NodeId`(`Nothing` = 該 module 未碰撞鑄裸名;`Just file` = 碰撞組鑄 `<module>@<file>`)。實作依此落地,**未**另建 `mintModuleIdAt` 非契約面函式;`mintNodes` 依 `moduleFiles` 的碰撞分組決定傳 `Nothing` 還是 `Just`
+- A3: **已由編排者裁決(同上)**。裁決結果:契約簽名改為 `deriveEdges :: GatedFacts -> [GraphNode] -> ([GraphEdge], EdgeStats, [GraphWarning])`(三元組,警告通道直接進契約)。實作依此落地,**未**另建 `deriveEdgesWithWarnings` 包裝;`EdgeStats` 維持三欄不變,`F003` decl-edges 可直接沿用第三個分量彙整 ref 解析失敗警告
 - A4: `import` 的目標落在 D1 消歧組(例:專案有兩個 `Main`,某檔 `import Main`)時,無從判定指向哪一個節點 → 採取:丟棄該邊並發 `GraphWarning`,**不**計入 `gsDroppedExternal`(它不是外部目標)→ 影響:若裁定應對整組每個節點各連一條邊(寧可多報),改 edge-derive 的目標解析分支;下游依賴矩陣會多出偽邊
 - A5: 消歧節點的 `gnLabel` 未明定 → 採取:維持**裸 module 名**(契約寫「人類可讀名(module 名)」),消歧只反映在 `gnId` 與 `gnFile`;edge-derive 的節點索引也因此以 `gnLabel` 為鍵 → 影響:若下游查詢輸出要求兩個 `Main` 可辨識,改為 `<module> (<file>)`,同時 edge-derive 的索引鍵要改回從事實重建
 - A6: 契約卡未把規則 3(產生碼過濾)列入本 feature,但 `GatedFacts.gfFiltered` / `GraphStats.gsFilteredGenerated` 兩個欄位屬本 feature 的 DTO → 採取:欄位定義齊備但恆為 0,規則 3 留給 `F002` decl-nodes(其契約卡明列規則 3);`gateFacts` 的 `ProjectMeta` 參數本階段不讀取 → 影響:若裁定 module 層也要套規則 3(`fmFile` 不在 `pmSources` 就不建 module 節點),在 fact-gate 加一層過濾,並須先確認 `fmFile` 與 `sfPath` 的路徑正規化完全一致(目前兩者同源,風險低但未驗)
 - A7: `cgWarnings` 的排序與去重未在契約定義,而規則 7 要求整體決定性 → 採取:碰撞警告與邊解析警告合併後依 `(gwSource, gwMessage)` 去重並依該鍵字典序輸出(對事實流重排序也穩定)→ 影響:若要求保留事實序以便對照行號,改為穩定排序不去重(同一筆壞 import 會重複出現)
 - A8: 契約卡「不印任何輸出」與驗收要在 MagicFarmer / particle-magic 實跑對帳衝突 → 採取:比照 `extraction/F002` 假設 A6 的既有裁決,library 全程不印,改在 executable 內部模組加 `renderGraphSummary` 與 `--graph` 旗標;自動測試一律走 `test/fixtures/` 不依賴外部專案 → 影響:若編排者要求 CLI 相關改動一律等 export-query 的 CLI feature,改以一次性 ghci script 驗收,T8 只留 `renderGraphSummary` 的單元測試
+- A9(實作階段新增): T7 原訂以 `test/fixtures/proj` 做端到端,但實測該 fixture 的三個 included 檔**全部沒有 module 標頭也沒有 import**——經 extraction D3(無標頭一律視為 `Main`)後,三檔同名 `Main` 形成一個三元碰撞組、事實流零 `FactImport`,端到端只驗得到「節點數 == included 檔數 + 全部消歧」而驗不到任何邊 → 採取:`proj` 端到端保留(它反而是 D1 消歧的真實樣本),**另新增 `test/fixtures/graph`**(一個 library + 一個 executable,含內部 import、外部 import、重複 import 與自 import),用它驗「非空邊集 + 外部丟棄 + 去重 + 自環」;兩者都跑 → 影響:若編排者不接受新增 fixture,改以既有 `comps` / `multi` fixture 補 import 行,或把邊的端到端驗證退回純事實流的 T6 覆蓋
+- A10(實作階段新增): edge-derive 警告的 `gwSource` 未在契約明定用哪一種來源(契約允許「module 名、節點 id 或檔案路徑」)→ 採取:邊解析失敗的警告一律用**來源檔路徑**(`FactImport.fiFile`)當 `gwSource`、行號寫進 `gwMessage`(格式 `…; import edge dropped at line N`),碰撞警告則用 **module 名**當 `gwSource` → 影響:若下游要求所有警告的 `gwSource` 同型別(例如一律節點 id),改 edge-derive 的 `warnAt` 與 graph-assemble 的 `collisionWarnings` 兩處組字,A7 的排序鍵語意不變
 
 ## 實作備註
 
-(撰寫時留空)
+**契約簽名(A2 / A3 裁決)已落地**:`mintModuleId :: ModuleName -> Maybe FilePath -> NodeId` 與 `deriveEdges :: GatedFacts -> [GraphNode] -> ([GraphEdge], EdgeStats, [GraphWarning])` 一字不差實作於 `Knot.Graph.NodeMint` / `Knot.Graph.EdgeDerive`;文檔撰寫期規劃的 `mintModuleIdAt` 與 `deriveEdgesWithWarnings` 兩個非契約面包裝**未建立**(契約簽名本身已表達得了消歧與警告通道)。node-mint 仍匯出非契約面的 `moduleFiles`(D1 判定面),供 graph-assemble 組碰撞警告與 T3 測試。
+
+**產出檔案**:`src/Knot/Graph/Types.hs`、`src/Knot/Graph/FactGate.hs`、`src/Knot/Graph/NodeMint.hs`、`src/Knot/Graph/EdgeDerive.hs`、`src/Knot/Graph.hs`(library);`app/Knot/App/Summary.hs`(加 `renderGraphSummary`)、`app/Main.hs`(加 `--graph`);`knot-hs.cabal`(library `exposed-modules` +5、test-suite `build-depends` +`containers`,`version` 維持 `0.0.1.0` 未動);`test/fixtures/graph/`(新 fixture,見假設 A9);`test/Main.hs`(新增 `graph-core/F001 module-graph` group)。全部新程式碼在 `-Wall` 下**零警告**(既有 `test/Main.hs` 與 extraction 模組原有的 `-Wincomplete-record-selectors` 警告未被本 feature 觸碰)。
+
+**測試**:`cabal test` 全綠,`All 63 tests passed`(既有 53 條全部維持通過,本 feature 新增 10 條:T1–T6 各 1、T7 三條子測試、T8 一條;T7 的 hedgehog property 100 例通過)。
+
+**A8 唯讀實跑對帳**(`knot <path> --graph`,GHC 9.14.1;兩個標的皆只讀不寫,連續兩次輸出以 `diff` 驗證位元相同):
+
+| 標的 | 節點 | 邊 | 警告 | `gsDroppedExternal` | `gsDedupedEdges` | `gsFilteredGenerated` | Top-1 外部 |
+|---|---|---|---|---|---|---|---|
+| MagicFarmer | 58 | 239 | 0 | 283 | 1 | 0 | `Data.Text` 49 |
+| particle-magic | 45 | 125 | 1 | 222 | 2 | 0 | `Data.Vector.Unboxed` 16 |
+
+- 兩標的的 `gsTopExternalTargets` 皆恰 10 筆、次數降序(MagicFarmer:`Data.Text` 49 / `Data.Map.Strict` 37 / `GHC.Generics` 30 / `Data.Aeson` 26 / `Control.DeepSeq` 14 …;particle-magic:`Data.Vector.Unboxed` 16 / `Data.Word` 14 / `Data.ByteString` 12 / `Data.List` 12 …),`Data.ByteString` 與 `Data.List` 同為 12 次時依 module 名字典序排列,**D4 在真實資料上成立**
+- particle-magic 的唯一警告正是 **D1 碰撞**:`Main` 由 5 個來源檔宣告(`app/Main.hs`、`examples/haskell/Main.hs`、`tools/InspectMain.hs`、`tools/Main.hs`、`tools/SchemaMain.hs`),整組鑄成 `Main@app/Main.hs` … `Main@tools/SchemaMain.hs` 五個節點,無裸名 `Main` 節點,亦無任何「ambiguous import target」警告(該專案沒有檔案 `import Main`)。這是 D1 在真實多 executable 專案上的第一次實證
+- MagicFarmer 零警告 → 該專案無同名 module、亦無來源/目標解析失敗
+- 兩標的皆 `gsFilteredGenerated == 0`,符合 A6(規則 3 留給 `F002`)
+
+**實作細節備忘**(不影響契約,供 `F002` / `F003` 接手):
+
+- 去重以 `Map (NodeId, NodeId, Relation) (Maybe Int, Int)` 一次完成「最小行號 + 組大小」累積,`esDeduped = Σ(組大小 − 1)`;`geLine` 取極小值而非輸入序第一筆,故對事實流重排序不敏感(T6 的「反轉輸入」與 T7 的 `Gen.shuffle` property 都釘住這點)
+- edge-derive 的來源解析先查 `(gnLabel, gnFile)` 精確索引,未命中才退回「該名恰一個節點」;目標解析只走 `gnLabel` 索引(D1 消歧組 >1 時依 A4 丟棄 + 警告)
+- `gateFacts` 的 `ProjectMeta` 參數目前以 `_pm` 忽略,haddock 已註明是階段性狀態;`F002` 接手規則 3 時直接在此讀 `pmSources`
+- `Knot.Graph.Types` 的 `NodeKind` / `Relation` / `NodeId` / `GraphWarning` 都有 `Ord`,D5 與 A7 的排序鍵全部由 deriving 提供,無自訂 `compare`

@@ -1,13 +1,17 @@
--- | project-meta(F001 scan-baseline、F002 cabal-components、F003 hie-discovery)
--- 與 extraction(F001 fact-contract)的 1-to-1 測試。
+-- | project-meta(F001 scan-baseline、F002 cabal-components、F003 hie-discovery)、
+-- extraction(F001 fact-contract、F002 import-scan)與 graph-core(F001
+-- module-graph)的 1-to-1 測試。
 module Main (main) where
 
 import Control.Exception (throwIO)
 import Control.Monad (forM_)
 import qualified Data.ByteString as BS
 import Data.Char (isSpace)
+import Data.Containers.ListUtils (nubOrd)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (find, isInfixOf, isPrefixOf, sort)
+import Data.List (find, isInfixOf, isPrefixOf, sort, sortOn)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
@@ -25,7 +29,7 @@ import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 import Test.Tasty.Hedgehog (testProperty)
 
-import Knot.App.Summary (renderFactSummary, renderMetaSummary)
+import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummary)
 import Knot.Extract (extract)
 import Knot.Extract.Backend
   ( Backend (..)
@@ -53,6 +57,21 @@ import Knot.Extract.Types
   , NameSpace (..)
   , QualName (..)
   )
+import Knot.Graph (buildGraph)
+import Knot.Graph.EdgeDerive (EdgeStats (..), deriveEdges)
+import Knot.Graph.FactGate (GatedFacts (..), gateFacts)
+import Knot.Graph.NodeMint (mintModuleId, mintNodes, moduleFiles)
+import Knot.Graph.Types
+  ( BuildOptions (..)
+  , CodeGraph (..)
+  , GraphEdge (..)
+  , GraphNode (..)
+  , GraphStats (..)
+  , GraphWarning (..)
+  , NodeId (..)
+  , NodeKind (..)
+  , Relation (..)
+  )
 import Knot.Meta (loadProjectMeta)
 import Knot.Meta.CabalModel (resolvePackage)
 import Knot.Meta.Discovery (findCabalFiles)
@@ -79,6 +98,11 @@ compsFixture   = "test/fixtures/comps"
 condFixture    = "test/fixtures/cond"
 multiFixture   = "test/fixtures/multi"
 brokenFixture  = "test/fixtures/broken"
+
+-- | graph-core/F001 端到端用:含真實內部 import、外部 import、重複 import
+-- 與自 import 的專案樹。
+graphFixture :: FilePath
+graphFixture = "test/fixtures/graph"
 
 hieConvFixture, hieDistFixture :: FilePath
 hieConvFixture = "test/fixtures/hie-conv"
@@ -119,7 +143,10 @@ main = defaultMain tests
 
 tests :: TestTree
 tests = testGroup "knot-hs"
-  [f001Tests, f002Tests, f003Tests, extractionF001Tests, extractionF002Tests]
+  [ f001Tests, f002Tests, f003Tests
+  , extractionF001Tests, extractionF002Tests
+  , graphCoreF001Tests
+  ]
 
 f001Tests :: TestTree
 f001Tests = testGroup "F001 scan-baseline"
@@ -1317,3 +1344,445 @@ testRenderFactSummary = testCase "test_render_fact_summary" $ do
     (T.pack "  ! src/Bad.hs: cannot read file: nope" `T.isInfixOf` out)
   -- 輸出順序固定(決定性)
   renderFactSummary res @?= out
+
+--------------------------------------------------------------------------------
+-- graph-core/F001 module-graph
+--------------------------------------------------------------------------------
+
+graphCoreF001Tests :: TestTree
+graphCoreF001Tests = testGroup "graph-core/F001 module-graph"
+  [ testGraphTypesConstruct     -- T1
+  , testGateFacts               -- T2
+  , testMintModuleNodes         -- T3
+  , testImportsEdgesExternal    -- T4
+  , testSelfLoopAndDedupe       -- T5
+  , testBuildGraphAssemble      -- T6
+  , testBuildGraphDeterministic -- T7
+  , testRenderGraphSummary      -- T8
+  ]
+
+nid :: String -> NodeId
+nid = NodeId . T.pack
+
+defBuildOpts :: BuildOptions
+defBuildOpts = BuildOptions { moduleOnly = False }
+
+-- | 事實流 → CodeGraph 的測試捷徑(ProjectMeta 在階段一不被 fact-gate 讀取)。
+graphOf :: BuildOptions -> [Fact] -> CodeGraph
+graphOf opts facts = buildGraph opts emptyMeta
+  ExtractResult { erFacts = facts, erLevel = ModuleLevel, erReports = [], erWarnings = [] }
+
+-- | 事實流 → (邊, 統計, 警告) 的測試捷徑。
+edgesOf :: [Fact] -> ([GraphEdge], EdgeStats, [GraphWarning])
+edgesOf facts = deriveEdges gated (mintNodes gated)
+ where gated = gateFacts emptyMeta facts
+
+-- | 邊的可比對三元組(不含證據行)。
+edgeTriple :: GraphEdge -> (NodeId, Relation, NodeId)
+edgeTriple e = (geSource e, geRelation e, geTarget e)
+
+-- graph-core T1: 逐一建構 DTO、驗證欄位讀取與 Ord 序
+testGraphTypesConstruct :: TestTree
+testGraphTypesConstruct = testCase "test_graph_types_construct" $ do
+  let bo = BuildOptions { moduleOnly = True }
+  moduleOnly bo @?= True
+  moduleOnly defBuildOpts @?= False
+  let node = GraphNode
+        { gnId = nid "Demo.Core", gnKind = ModuleNode
+        , gnLabel = T.pack "Demo.Core", gnFile = "src/Demo/Core.hs", gnLine = Nothing }
+  gnId node    @?= nid "Demo.Core"
+  gnKind node  @?= ModuleNode
+  gnLabel node @?= T.pack "Demo.Core"
+  gnFile node  @?= "src/Demo/Core.hs"
+  gnLine node  @?= Nothing
+  -- NodeKind 三個建構子(DeclNode 依 DeclKind 區辨)
+  length (nubOrd [ModuleNode, DeclNode ValueDecl, InstanceNode]) @?= 3
+  assertBool "DeclNode distinguishes DeclKind" (DeclNode ValueDecl /= DeclNode DataDecl)
+  let edge = GraphEdge
+        { geSource = nid "Main", geTarget = nid "Demo.Core"
+        , geRelation = RImports, geLine = Just 7 }
+  geSource edge   @?= nid "Main"
+  geTarget edge   @?= nid "Demo.Core"
+  geRelation edge @?= RImports
+  geLine edge     @?= Just 7
+  -- Relation 五個建構子與 Ord 序(D5 的 relation 鍵序)
+  sort [RContains, RImplements, RUses, RCalls, RImports]
+    @?= [RImports, RCalls, RUses, RImplements, RContains]
+  -- NodeId 依內含 Text 字典序
+  assertBool "NodeId lexicographic" (nid "Demo.Core" < nid "Main")
+  sort [nid "Main", nid "Demo.Core", nid "Main@app/Main.hs"]
+    @?= [nid "Demo.Core", nid "Main", nid "Main@app/Main.hs"]
+  let st = GraphStats
+        { gsDroppedExternal = 3, gsTopExternalTargets = [(mn "Data.Text", 2)]
+        , gsFilteredGenerated = 0, gsDedupedEdges = 1 }
+  gsDroppedExternal st    @?= 3
+  gsTopExternalTargets st @?= [(mn "Data.Text", 2)]
+  gsFilteredGenerated st  @?= 0
+  gsDedupedEdges st       @?= 1
+  let w = GraphWarning { gwSource = T.pack "Main", gwMessage = T.pack "collision" }
+  gwSource w  @?= T.pack "Main"
+  gwMessage w @?= T.pack "collision"
+  -- GraphWarning 的 Ord = (gwSource, gwMessage) 字典序(假設 A7 的排序鍵)
+  assertBool "GraphWarning Ord on (source, message)"
+    (w < GraphWarning (T.pack "Main") (T.pack "zzz")
+      && w < GraphWarning (T.pack "Zed") (T.pack "aaa"))
+  -- CodeGraph 的 Eq(T7 依賴它)
+  let cg = CodeGraph { cgNodes = [node], cgEdges = [edge], cgStats = st, cgWarnings = [w] }
+  cgNodes cg    @?= [node]
+  cgEdges cg    @?= [edge]
+  cgStats cg    @?= st
+  cgWarnings cg @?= [w]
+  cg @?= CodeGraph { cgNodes = [node], cgEdges = [edge], cgStats = st, cgWarnings = [w] }
+  assertBool "CodeGraph Eq discriminates" (cg /= cg { cgEdges = [] })
+
+-- | T2/T3 共用:三個 FactModule(其中兩筆同名不同檔)+ FactImport + FactDecl。
+gateFixtureFacts :: [Fact]
+gateFixtureFacts =
+  [ FactModule "app/Main.hs" (mn "Main")
+  , FactModule "test/Main.hs" (mn "Main")
+  , FactModule "src/Demo/Core.hs" (mn "Demo.Core")
+  , FactImport (mn "Demo.Core") (mn "Data.Text") "src/Demo/Core.hs" 3
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
+  ]
+
+-- | 只在 pmSources 出現、不在事實流的 module(釘住 D2)。
+ghostMeta :: ProjectMeta
+ghostMeta = ProjectMeta
+  { pmPackages = []
+  , pmSources  = [SourceFile "src/Ghost.hs" (Just (mn "Ghost")) [] True]
+  , pmHie      = Nothing
+  , pmWarnings = []
+  }
+
+-- graph-core T2: fact-gate 的內部集合(D2)、原樣通過、gfFiltered 恆 0
+testGateFacts :: TestTree
+testGateFacts = testCase "test_gate_facts" $ do
+  let g = gateFacts ghostMeta gateFixtureFacts
+  -- 內部集合恰為事實流的 fmModule(Main 兩筆同名 → 集合兩個元素)
+  Set.toList (gfInternal g) @?= sort [mn "Demo.Core", mn "Main"]
+  assertBool "Main is internal"      (mn "Main" `Set.member` gfInternal g)
+  assertBool "Demo.Core is internal" (mn "Demo.Core" `Set.member` gfInternal g)
+  -- D2:pmSources.sfModule 的 Ghost 不得進內部集合
+  assertBool "pmSources-only module stays out (D2)"
+    (mn "Ghost" `Set.notMember` gfInternal g)
+  -- 事實原樣通過(含 FactDecl,不 crash)
+  gfFacts g @?= gateFixtureFacts
+  assertBool "FactDecl passes through"
+    (any (\f -> case f of FactDecl{} -> True; _ -> False) (gfFacts g))
+  gfFiltered g @?= 0
+
+-- graph-core T3: id 鑄造(D1)與 module 節點
+testMintModuleNodes :: TestTree
+testMintModuleNodes = testCase "test_mint_module_nodes" $ do
+  -- 契約簽名兩個分支(A2 裁決)
+  mintModuleId (mn "Demo.Core") Nothing @?= nid "Demo.Core"
+  mintModuleId (mn "Main") (Just "app/Main.hs") @?= nid "Main@app/Main.hs"
+  let g = gateFacts emptyMeta gateFixtureFacts
+      nodes = mintNodes g
+  -- 單一來源檔 → 裸名;同名兩檔 → 整組消歧
+  map gnId nodes @?=
+    [nid "Main@app/Main.hs", nid "Main@test/Main.hs", nid "Demo.Core"]
+  forM_ nodes $ \n -> do
+    gnKind n @?= ModuleNode
+    gnLine n @?= Nothing   -- FactModule 無行號欄位
+  -- 消歧只反映在 id 與 gnFile;gnLabel 維持裸名(假設 A5)
+  map gnLabel nodes @?= map T.pack ["Main", "Main", "Demo.Core"]
+  map gnFile nodes @?= ["app/Main.hs", "test/Main.hs", "src/Demo/Core.hs"]
+  -- 重複 FactModule 只產一個節點;FactDecl 不產節點
+  let dup = gateFacts emptyMeta
+        [ FactModule "src/A.hs" (mn "A")
+        , FactModule "src/A.hs" (mn "A")
+        , FactDecl (qn "A" "x" ValueNs) ValueDecl "src/A.hs" 4
+        ]
+  map gnId (mintNodes dup) @?= [nid "A"]
+  -- moduleFiles:同名組有兩個相異檔
+  let files = moduleFiles gateFixtureFacts
+  fmap Set.toList (Map.lookup (mn "Main") files) @?= Just ["app/Main.hs", "test/Main.hs"]
+  fmap Set.size (Map.lookup (mn "Demo.Core") files) @?= Just 1
+
+-- | T4 的 D4 樣本:12 個相異外部目標,次數 3/2/1 各四個(輸入序刻意反排)。
+extPlan :: [(String, Int)]
+extPlan =
+  [ ("E01", 3), ("E02", 3), ("E03", 3), ("E04", 3)
+  , ("E05", 2), ("E06", 2), ("E07", 2), ("E08", 2)
+  , ("E09", 1), ("E10", 1), ("E11", 1), ("E12", 1)
+  ]
+
+topExternalFacts :: [Fact]
+topExternalFacts = FactModule "src/A.hs" (mn "A")
+  : zipWith (\ln nm -> FactImport (mn "A") (mn nm) "src/A.hs" ln) [1 ..]
+      (reverse (concat [replicate c nm | (nm, c) <- extPlan]))
+
+-- graph-core T4: imports 邊主線、外部丟棄與 D4、解析失敗轉警告
+testImportsEdgesExternal :: TestTree
+testImportsEdgesExternal = testCase "test_imports_edges_external" $ do
+  -- 內部 A -> B 產一條 RImports;三筆外部全數丟棄
+  let (edges, st, ws) = edgesOf
+        [ FactModule "src/A.hs" (mn "A")
+        , FactModule "src/B.hs" (mn "B")
+        , FactImport (mn "A") (mn "B") "src/A.hs" 5
+        , FactImport (mn "A") (mn "Data.Text") "src/A.hs" 6
+        , FactImport (mn "A") (mn "Data.Map") "src/A.hs" 7
+        , FactImport (mn "B") (mn "Data.Text") "src/B.hs" 3
+        ]
+  edges @?= [GraphEdge (nid "A") (nid "B") RImports (Just 5)]
+  esDroppedExternal st @?= 3
+  esTopExternal st @?= [(mn "Data.Text", 2), (mn "Data.Map", 1)]
+  esDeduped st @?= 0
+  ws @?= []
+  -- D4:前 10、次數降序、同次數依 module 名字典序
+  let (_, stTop, wsTop) = edgesOf topExternalFacts
+  esDroppedExternal stTop @?= sum (map snd extPlan)
+  esTopExternal stTop @?= [(mn nm, c) | (nm, c) <- take 10 extPlan]
+  length (esTopExternal stTop) @?= 10
+  wsTop @?= []
+  -- 來源檔沒有對應 FactModule 的 import → 0 條邊 + 1 則警告
+  let (e2, st2, ws2) = edgesOf
+        [ FactModule "src/B.hs" (mn "B")
+        , FactImport (mn "Zed") (mn "B") "src/Z.hs" 4
+        ]
+  e2 @?= []
+  esDroppedExternal st2 @?= 0   -- 不是外部目標,不計入統計
+  case ws2 of
+    [w] -> do
+      gwSource w @?= T.pack "src/Z.hs"
+      assertBool "message names the unresolved source"
+        (T.pack "Zed" `T.isInfixOf` gwMessage w)
+    _ -> assertFailure ("expected exactly one warning, got: " <> show ws2)
+  -- 目標落在同名消歧組 → 0 條邊 + 1 則警告(假設 A4)
+  let (e3, st3, ws3) = edgesOf
+        [ FactModule "app/Main.hs" (mn "Main")
+        , FactModule "test/Main.hs" (mn "Main")
+        , FactModule "src/A.hs" (mn "A")
+        , FactImport (mn "A") (mn "Main") "src/A.hs" 3
+        ]
+  e3 @?= []
+  esDroppedExternal st3 @?= 0
+  case ws3 of
+    [w] -> do
+      gwSource w @?= T.pack "src/A.hs"
+      assertBool "message flags ambiguity"
+        (T.pack "ambiguous" `T.isInfixOf` gwMessage w)
+    _ -> assertFailure ("expected exactly one warning, got: " <> show ws3)
+
+-- graph-core T5: 規則 4(自環)與規則 5(去重、證據行)
+testSelfLoopAndDedupe :: TestTree
+testSelfLoopAndDedupe = testCase "test_selfloop_and_dedupe" $ do
+  -- 自 import:不產邊、不計統計、不發警告
+  let (e1, st1, ws1) = edgesOf
+        [ FactModule "src/A.hs" (mn "A")
+        , FactImport (mn "A") (mn "A") "src/A.hs" 2
+        ]
+  e1 @?= []
+  esDroppedExternal st1 @?= 0
+  esDeduped st1 @?= 0
+  ws1 @?= []
+  -- 去重:亂序三條合併為一,geLine 取最小
+  let (e2, st2, ws2) = edgesOf
+        [ FactModule "src/A.hs" (mn "A")
+        , FactModule "src/B.hs" (mn "B")
+        , FactModule "src/C.hs" (mn "C")
+        , FactImport (mn "A") (mn "B") "src/A.hs" 40
+        , FactImport (mn "A") (mn "B") "src/A.hs" 12
+        , FactImport (mn "A") (mn "B") "src/A.hs" 25
+        , FactImport (mn "A") (mn "C") "src/A.hs" 30
+        ]
+  ws2 @?= []
+  esDeduped st2 @?= 2
+  map edgeTriple e2 @?=
+    [(nid "A", RImports, nid "B"), (nid "A", RImports, nid "C")]
+  map geLine e2 @?= [Just 12, Just 30]   -- 不同端點不被誤併
+  -- 不同來源端不被誤併
+  let (e3, st3, _) = edgesOf
+        [ FactModule "src/A.hs" (mn "A")
+        , FactModule "src/B.hs" (mn "B")
+        , FactModule "src/C.hs" (mn "C")
+        , FactImport (mn "A") (mn "C") "src/A.hs" 3
+        , FactImport (mn "B") (mn "C") "src/B.hs" 3
+        ]
+  length e3 @?= 2
+  esDeduped st3 @?= 0
+
+-- | T6 的綜合事實流(碰撞組 + 內部邊 + 重複 import + 外部 + 消歧目標 + decl)。
+assembleFacts :: [Fact]
+assembleFacts =
+  [ FactModule "app/Main.hs" (mn "Main")
+  , FactModule "test/Main.hs" (mn "Main")
+  , FactModule "src/Demo/Core.hs" (mn "Demo.Core")
+  , FactModule "src/Demo/Render.hs" (mn "Demo.Render")
+  , FactImport (mn "Demo.Render") (mn "Demo.Core") "src/Demo/Render.hs" 9
+  , FactImport (mn "Demo.Render") (mn "Demo.Core") "src/Demo/Render.hs" 4
+  , FactImport (mn "Demo.Render") (mn "Data.Text") "src/Demo/Render.hs" 5
+  , FactImport (mn "Demo.Core") (mn "Data.Text") "src/Demo/Core.hs" 3
+  , FactImport (mn "Main") (mn "Demo.Core") "app/Main.hs" 6
+  , FactImport (mn "Main") (mn "Main") "app/Main.hs" 7
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
+  ]
+
+-- graph-core T6: graph-assemble 的統計、警告彙整與 D5 穩定排序
+testBuildGraphAssemble :: TestTree
+testBuildGraphAssemble = testCase "test_build_graph_assemble" $ do
+  let g = graphOf defBuildOpts assembleFacts
+  -- 節點依 NodeId 遞增
+  map gnId (cgNodes g) @?=
+    [ nid "Demo.Core", nid "Demo.Render"
+    , nid "Main@app/Main.hs", nid "Main@test/Main.hs" ]
+  assertBool "cgNodes sorted by NodeId"
+    (let ids = map gnId (cgNodes g) in and (zipWith (<) ids (drop 1 ids)))
+  -- 邊依 (source, relation, target) 遞增;重複 import 合併且取最早行
+  map edgeTriple (cgEdges g) @?=
+    [ (nid "Demo.Render", RImports, nid "Demo.Core")
+    , (nid "Main@app/Main.hs", RImports, nid "Demo.Core")
+    ]
+  map geLine (cgEdges g) @?= [Just 4, Just 6]
+  assertBool "cgEdges sorted by (source, relation, target)"
+    (let ks = map edgeTriple (cgEdges g) in and (zipWith (<) ks (drop 1 ks)))
+  -- GraphStats 四欄
+  cgStats g @?= GraphStats
+    { gsDroppedExternal    = 2
+    , gsTopExternalTargets = [(mn "Data.Text", 2)]
+    , gsFilteredGenerated  = 0
+    , gsDedupedEdges       = 1
+    }
+  -- 警告:碰撞警告(含兩個排序後檔案路徑)+ 邊解析警告,去重且排序
+  cgWarnings g @?= nubOrd (sort (cgWarnings g))
+  case find ((== T.pack "Main") . gwSource) (cgWarnings g) of
+    Nothing -> assertFailure ("no collision warning: " <> show (cgWarnings g))
+    Just w  -> do
+      assertBool "collision message names both files in sorted order"
+        (T.pack "app/Main.hs, test/Main.hs" `T.isInfixOf` gwMessage w)
+      assertBool "collision message carries the distinct file count"
+        (T.pack "2 source files" `T.isInfixOf` gwMessage w)
+  assertBool "ambiguous import target warned"
+    (any ((T.pack "ambiguous" `T.isInfixOf`) . gwMessage) (cgWarnings g))
+  length (cgWarnings g) @?= 2
+  -- 反轉輸入事實序 → 結果完全相同(釘住排序而非輸入序)
+  graphOf defBuildOpts (reverse assembleFacts) @?= g
+  -- moduleOnly True/False 輸出相同(本階段尚無 decl 事實邏輯)
+  graphOf (BuildOptions { moduleOnly = True }) assembleFacts @?= g
+
+-- | graph fixture 的期望節點 id(依 NodeId 遞增)。
+graphFixtureNodeIds :: [NodeId]
+graphFixtureNodeIds = [nid "Demo.Core", nid "Demo.Render", nid "Main"]
+
+-- graph-core T7: 決定性與端到端
+testBuildGraphDeterministic :: TestTree
+testBuildGraphDeterministic = testGroup "test_build_graph_deterministic"
+  [ testCase "proj fixture: one module node per included file, pure" $ do
+      pm <- loadProjectMeta (defOpts projFixture)
+      r <- extract ((extOpts Auto) { rootDir = projFixture }) pm
+      let included = filter sfIncluded (pmSources pm)
+          g = buildGraph defBuildOpts pm r
+      assertBool "fixture yields a non-empty fact stream" (not (null (erFacts r)))
+      length (cgNodes g) @?= length included
+      assertBool "cgNodes sorted by NodeId"
+        (let ids = map gnId (cgNodes g) in and (zipWith (<) ids (drop 1 ids)))
+      forM_ (cgNodes g) $ \n -> gnKind n @?= ModuleNode
+      -- 驗收標準 4:同輸入兩次呼叫結果完全相等
+      buildGraph defBuildOpts pm r @?= g
+      -- 驗收標準 5:moduleOnly 兩取值輸出相同
+      buildGraph (BuildOptions { moduleOnly = True }) pm r @?= g
+  , testCase "graph fixture: internal edges, external drops, dedupe, self-loop" $ do
+      pm <- loadProjectMeta (defOpts graphFixture)
+      r <- extract ((extOpts Auto) { rootDir = graphFixture }) pm
+      let g = buildGraph defBuildOpts pm r
+      erWarnings r @?= []
+      map gnId (cgNodes g) @?= graphFixtureNodeIds
+      -- 邊全為 RImports 且兩端皆為內部節點
+      forM_ (cgEdges g) $ \e -> do
+        geRelation e @?= RImports
+        assertBool "source is an existing node" (geSource e `elem` map gnId (cgNodes g))
+        assertBool "target is an existing node" (geTarget e `elem` map gnId (cgNodes g))
+      map edgeTriple (cgEdges g) @?=
+        [ (nid "Demo.Render", RImports, nid "Demo.Core")
+        , (nid "Main", RImports, nid "Demo.Core")
+        , (nid "Main", RImports, nid "Demo.Render")
+        ]
+      map geLine (cgEdges g) @?= [Just 3, Just 4, Just 3]
+      -- 外部 import 全數落進 gsDroppedExternal;自 import 不產邊也不計統計
+      cgStats g @?= GraphStats
+        { gsDroppedExternal    = 3
+        , gsTopExternalTargets = [(mn "Data.Text", 2), (mn "Data.Map", 1)]
+        , gsFilteredGenerated  = 0
+        , gsDedupedEdges       = 1
+        }
+      cgWarnings g @?= []
+      buildGraph defBuildOpts pm r @?= g
+      buildGraph (BuildOptions { moduleOnly = True }) pm r @?= g
+  , testProperty "random fact streams stay sorted and order-insensitive" $ property $ do
+      rawNames <- forAll (Gen.list (Range.linear 1 5) genModName)
+      rawExts  <- forAll (Gen.list (Range.linear 0 4) genModName)
+      let names    = nubOrd rawNames
+          -- 小寫前綴保證外部名絕不與內部名相等(genModName 恆大寫開頭)
+          extNames = nubOrd (map (T.pack "z" <>) rawExts)
+          intMods  = map ModuleName names
+          extMods  = map ModuleName extNames
+          fileOf (ModuleName t) = "src/" <> T.unpack t <> ".hs"
+          modFacts = [FactModule (fileOf m) m | m <- intMods]
+      pairs <- forAll (Gen.list (Range.linear 0 12) (genImportPair intMods extMods))
+      let impFacts = [FactImport from to (fileOf from) ln | (from, to, ln) <- pairs]
+          facts    = modFacts <> impFacts
+          internal = Set.fromList intMods
+          expectedEdges = Set.fromList
+            [(from, to) | (from, to, _) <- pairs, to `Set.member` internal, from /= to]
+          expectedExternal = length [() | (_, to, _) <- pairs, to `Set.notMember` internal]
+          g = graphOf defBuildOpts facts
+      -- 節點:每個內部 module 一個(名字互異 → 全部裸名)
+      map gnId (cgNodes g) === sort (map (\m -> mintModuleId m Nothing) intMods)
+      -- 邊數 == 相異非自環內部對數;外部 import 全數計入
+      length (cgEdges g) === Set.size expectedEdges
+      gsDroppedExternal (cgStats g) === expectedExternal
+      -- D5:輸出已排序
+      cgNodes g === sortOn gnId (cgNodes g)
+      cgEdges g === sortOn edgeTriple (cgEdges g)
+      -- 純函數 + 對事實序不敏感
+      shuffled <- forAll (Gen.shuffle facts)
+      graphOf defBuildOpts shuffled === g
+      graphOf (BuildOptions { moduleOnly = True }) facts === g
+  ]
+
+-- | 隨機 import:來源必為內部 module,目標為內部或外部。
+genImportPair :: [ModuleName] -> [ModuleName] -> Gen (ModuleName, ModuleName, Int)
+genImportPair intMods extMods = do
+  from <- Gen.element intMods
+  to   <- Gen.element (intMods <> extMods)
+  ln   <- Gen.int (Range.linear 1 50)
+  pure (from, to, ln)
+
+-- graph-core T8: 圖摘要輸出(驗收 harness 的比對面)
+testRenderGraphSummary :: TestTree
+testRenderGraphSummary = testCase "test_render_graph_summary" $ do
+  let g = CodeGraph
+        { cgNodes =
+            [ GraphNode (nid "Demo.Core") ModuleNode (T.pack "Demo.Core")
+                "src/Demo/Core.hs" Nothing
+            , GraphNode (nid "Main@app/Main.hs") ModuleNode (T.pack "Main")
+                "app/Main.hs" (Just 1)
+            ]
+        , cgEdges =
+            [GraphEdge (nid "Main@app/Main.hs") (nid "Demo.Core") RImports (Just 6)]
+        , cgStats = GraphStats
+            { gsDroppedExternal    = 4
+            , gsTopExternalTargets = [(mn "Data.Text", 3), (mn "Data.Map", 1)]
+            , gsFilteredGenerated  = 0
+            , gsDedupedEdges       = 2
+            }
+        , cgWarnings = [GraphWarning (T.pack "Main") (T.pack "declared in 2 source files")]
+        }
+      out = renderGraphSummary g
+  assertBool "count line"   (T.pack "graph: 2 nodes, 1 edges, 1 warnings" `T.isInfixOf` out)
+  assertBool "stats line"
+    (T.pack "stats: dropped-external=4, filtered-generated=0, deduped-edges=2, top-external=2"
+       `T.isInfixOf` out)
+  assertBool "external top line" (T.pack "  X Data.Text 3" `T.isInfixOf` out)
+  assertBool "external tail line" (T.pack "  X Data.Map 1" `T.isInfixOf` out)
+  assertBool "node line without line number"
+    (T.pack "  N Demo.Core [module] src/Demo/Core.hs" `T.isInfixOf` out)
+  assertBool "node line with line number"
+    (T.pack "  N Main@app/Main.hs [module] app/Main.hs:1" `T.isInfixOf` out)
+  assertBool "edge line"
+    (T.pack "  E Main@app/Main.hs -imports-> Demo.Core  L6" `T.isInfixOf` out)
+  assertBool "warning line"
+    (T.pack "  ! Main: declared in 2 source files" `T.isInfixOf` out)
+  -- 輸出順序固定(決定性)
+  renderGraphSummary g @?= out

@@ -16,6 +16,11 @@ library
                       Knot.Extract.Types
                       Knot.Extract.Backend
                       Knot.Extract.ImportScan
+                      Knot.Graph
+                      Knot.Graph.Types
+                      Knot.Graph.FactGate
+                      Knot.Graph.NodeMint
+                      Knot.Graph.EdgeDerive
     build-depends:    base ^>=4.22
                     , Cabal ^>=3.16
                     , Cabal-syntax ^>=3.16
@@ -44,6 +49,7 @@ test-suite knot-test
     other-modules:    Knot.App.Summary
     build-depends:    base ^>=4.22
                     , bytestring
+                    , containers
                     , directory
                     , filepath
                     , hedgehog

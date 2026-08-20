@@ -15,7 +15,7 @@ parent: graph-core
 
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
-| 階段一:S1 骨架 | W1 | module-graph | design-done |
+| 階段一:S1 骨架 | W1 | module-graph | impl-done |
 | 階段二:S3 decl 層 | W2 | decl-nodes | 本次不跑 |
 | 階段二:S3 decl 層 | W3 | decl-edges | 本次不跑 |
 
@@ -36,7 +36,7 @@ parent: graph-core
 
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
-| module-graph | F001 | F001-module-graph.md | opus(預防 Fable 誤判) | 繼承 | design-done |
+| module-graph | F001 | F001-module-graph.md | opus(預防 Fable 誤判) | 繼承 | impl-done |
 | decl-nodes | F002 | F002-decl-nodes.md | 繼承 | 繼承 | 本次不跑 |
 | decl-edges | F003 | F003-decl-edges.md | 繼承 | 繼承 | 本次不跑 |
 
@@ -52,6 +52,8 @@ parent: graph-core
 | F001 A6 | 規則 3 不在本卡範圍但 gfFiltered/gsFilteredGenerated 欄位屬本卡 | 欄位齊備恆 0,規則 3 留階段二 | 待裁決 |
 | F001 A7 | cgWarnings 的排序與去重未定義,但規則 7 要求決定性 | 依 (gwSource, gwMessage) 去重並字典序輸出 | 待裁決 |
 | F001 A8 | 契約卡「不印任何輸出」vs 兩標的實跑驗收 | library 不印;app 層加 renderGraphSummary + --graph | 待裁決 |
+| F001 A9 | test/fixtures/proj 三個 included 檔全無標頭也無 import,端到端驗不到邊 | 保留 proj(D1 真實樣本),另建 test/fixtures/graph 驗邊集/丟棄/去重/自環 | 待裁決 |
+| F001 A10 | edge-derive 警告的 gwSource 該填什麼 | 邊警告用來源檔路徑(行號進 gwMessage);碰撞警告用 module 名 | 待裁決 |
 
 ## 階段結果
 
