@@ -143,13 +143,13 @@ data GatedFacts = GatedFacts
   }
 
 -- node-mint:鑄造
-mintModuleId   :: ModuleName -> NodeId
+mintModuleId   :: ModuleName -> Maybe FilePath -> NodeId   -- Nothing = 該 module 未碰撞,鑄裸名(A2 裁決)
 mintDeclId     :: QualName -> NodeId
 mintInstanceId :: ModuleName -> Text -> NodeId   -- instance 標頭
 mintNodes      :: GatedFacts -> [GraphNode]
 
 -- edge-derive:推導
-deriveEdges :: GatedFacts -> [GraphNode] -> ([GraphEdge], EdgeStats)
+deriveEdges :: GatedFacts -> [GraphNode] -> ([GraphEdge], EdgeStats, [GraphWarning])   -- (A3 裁決)
 data EdgeStats = EdgeStats
   { esDroppedExternal :: Int
   , esTopExternal     :: [(ModuleName, Int)]

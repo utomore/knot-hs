@@ -45,8 +45,8 @@ parent: graph-core
 | 來源 | 假設 | 採取的判斷 | 閘門裁決 |
 |---|---|---|---|
 | F001 A1 | NodeId 唯一構造入口在 Haskell 無法不新增模組地強制(會成 import 環) | Types 匯出 NodeId(..) + haddock 紀律;edge-derive 一律從 gnId 取值不鑄 id | 待裁決 |
-| F001 A2 | mintModuleId 簽名早於 D1 寫定,缺 file 參數無法鑄 <module>@<file> | 契約簽名不動,另加非契約面 mintModuleIdAt | **開工前裁決** |
-| F001 A3 | deriveEdges/EdgeStats 無警告通道,但解析失敗不得靜默 | 契約函式不動,另加非契約面 deriveEdgesWithWarnings | **開工前裁決** |
+| F001 A2 | mintModuleId 簽名早於 D1 寫定,缺 file 參數無法鑄 <module>@<file> | 契約簽名不動,另加非契約面 mintModuleIdAt | 接受:改契約簽名(已回寫) |
+| F001 A3 | deriveEdges/EdgeStats 無警告通道,但解析失敗不得靜默 | 契約函式不動,另加非契約面 deriveEdgesWithWarnings | 接受:改回三元組(已回寫) |
 | F001 A4 | import 目標落在同名消歧組時無從判定指向哪個節點 | 丟棄該邊 + 警告,不計入 gsDroppedExternal | 待裁決 |
 | F001 A5 | 消歧節點的 gnLabel | 維持裸 module 名,消歧只在 gnId/gnFile | 待裁決 |
 | F001 A6 | 規則 3 不在本卡範圍但 gfFiltered/gsFilteredGenerated 欄位屬本卡 | 欄位齊備恆 0,規則 3 留階段二 | 待裁決 |
