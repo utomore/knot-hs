@@ -967,7 +967,7 @@ genFact = Gen.choice
 --  registeredBackends——每個註冊後端剛好一筆報告、能力等級由實際跑的後端決定。
 --  空註冊表語意本身已隨 F002 消失,見 F002「實作備註」)
 testExtractEntryEmptyRegistry :: TestTree
-testExtractEntryEmptyRegistry = testCase "test_extract_entry_empty_registry" $ do
+testExtractEntryEmptyRegistry = testCase "test_extract_entry_registry" $ do
   pm <- loadProjectMeta (defOpts projFixture)
   forM_ [Auto, ImportsOnly, HiedbOnly] $ \c -> do
     r <- extract (extOpts c) pm

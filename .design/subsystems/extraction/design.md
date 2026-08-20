@@ -87,7 +87,7 @@ data DeclKind
 data BackendReport = BackendReport
   { brBackend :: Text                   -- "import-scan" | "hiedb"
   , brUsed    :: Bool
-  , brDetail  :: Text                   -- 未用時的降級原因(找不到執行檔/無 .hie/版本不合…)
+  , brDetail  :: Text                   -- 未用時的降級原因(找不到執行檔/無 .hie/版本不合…);成功時為空字串,即「非空 detail ⇔ 有降級原因」(F001 A8 裁決)
   }
 ```
 

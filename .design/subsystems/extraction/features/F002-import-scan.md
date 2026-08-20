@@ -285,7 +285,7 @@ renderFactSummary :: ExtractResult -> Text
 - A5: 重複 import(同檔同 module 多行)與自我 import(CPP 分支下可能出現 `fiFrom == fiTo`)如何處理未定 → 採取:全部照字面出事實(行號不同即不同筆),去重與自環處理留給 graph-core(承 `F001`「不做事實去重」)→ 影響:若裁定後端內收斂,在 `scanSource` 尾端加去重(需同時決定保留哪個行號)
 - A6: 契約卡要求對 MagicFarmer 與 particle-magic 執行驗收,但單元測試不得依賴這兩個外部專案存在(project-meta F001 已立此慣例)→ 採取:自動測試全部走 `test/fixtures/` 與暫存目錄,兩標的以 `knot` 執行檔手動唯讀實跑、結果記入「實作備註」;為此在 app 層加 `renderFactSummary` 與對應輸出路徑(T8),屬 executable 內部模組,不動 library 對外契約 → 影響:若編排者要求正式 CLI feature 才能動 app 層,改以一次性 ghci script 驗收,T8 只留 `renderFactSummary` 的單元測試
 - A7: 字元字面量(`'x'`)未納入去註解狀態機(TemplateHaskell 的 `'name` 與識別字尾的 `'` 難以無語法解析地區分)→ 採取:只追蹤字串字面量與區塊註解,並以 A4 的 import 區邊界把風險限縮在檔頭 → 影響:若實測有標的檔案因 `'"'`、`'{'` 類字面量出錯,補上「同行 4 字元內須有閉合 `'`」的啟發式
-- A8(實作階段新增): `F001` 的 T7 測試 `test_extract_entry_empty_registry` 以「註冊表為空」為斷言前提(`erReports == []`),而本 feature 的 T1 正是要把註冊表填實,兩者直接衝突 → 採取:**保留該測試的名稱**(維持 `F001` 1-to-1 對照表的可對帳性),把斷言改為「`extract` 確實委派給 `registeredBackends`」——每個註冊後端剛好一筆 `BackendReport`、`HiedbOnly` 下 import-scan 未選中故 `erFacts == []`;`extract` 的行為本身沒變,變的只是註冊表內容 → 影響:若編排者認為名稱必須跟著語意走,`F001` 文檔 T7 列與測試名同步改為 `test_extract_entry_registry`(純改名,斷言不動)
+- A8(實作階段新增): `F001` 的 T7 測試 `test_extract_entry_registry` 以「註冊表為空」為斷言前提(`erReports == []`),而本 feature 的 T1 正是要把註冊表填實,兩者直接衝突 → 採取:**保留該測試的名稱**(維持 `F001` 1-to-1 對照表的可對帳性),把斷言改為「`extract` 確實委派給 `registeredBackends`」——每個註冊後端剛好一筆 `BackendReport`、`HiedbOnly` 下 import-scan 未選中故 `erFacts == []`;`extract` 的行為本身沒變,變的只是註冊表內容 → 影響:若編排者認為名稱必須跟著語意走,`F001` 文檔 T7 列與測試名同步改為 `test_extract_entry_registry`(純改名,斷言不動)
 
 ## 實作備註
 

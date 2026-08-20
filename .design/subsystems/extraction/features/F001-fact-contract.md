@@ -255,7 +255,7 @@ runBackends :: [Backend] -> ExtractOptions -> ProjectMeta -> IO ExtractResult
 | T4 | test_probe_and_select | (a) auto + 一個探測失敗的假後端 → 該後端在 `erReports` 中 `brUsed = False` 且 `brDetail` 為指定原因,另一後端照跑;(b) `HiedbOnly` + 不可用 hiedb 假後端 → `erFacts = []`、`erLevel = ModuleLevel`、報告有原因、不 crash;(c) `ImportsOnly` → hiedb 假後端不被呼叫且以「未選中」列入報告 |
 | T5 | test_best_effort_run | 假後端的 `bRun` 抛例外 → 不 crash:該後端 `brUsed = False` 且 `brDetail` 含例外文字、`erWarnings` 有一則 `ewSource = 後端名` 的警告、另一個正常後端的事實完整保留;後端自報的警告原樣出現在 `erWarnings` |
 | T6 | test_fact_synthesis | 兩個假後端(一 `ModuleLevel`、一 `DeclLevel`)各回一組刻意亂序的事實 → `erFacts` 為全序排序結果、連續兩次執行完全相等;`erLevel = DeclLevel`;只有 `ModuleLevel` 成功時 `erLevel = ModuleLevel`;hedgehog property:任意事實清單經任意打亂後合成結果不變 |
-| T7 | test_extract_entry_empty_registry | 對 fixture 專案呼叫 `extract`(三種 `BackendChoice` 各一次)→ 皆回 `erFacts = []`、`erReports = []`、`erWarnings = []`、`erLevel = ModuleLevel`,不抛例外 |
+| T7 | test_extract_entry_registry | 對 fixture 專案呼叫 `extract`(三種 `BackendChoice` 各一次)→ 皆回 `erFacts = []`、`erReports = []`、`erWarnings = []`、`erLevel = ModuleLevel`,不抛例外 |
 
 ## 待確認假設
 
