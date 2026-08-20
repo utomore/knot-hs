@@ -63,28 +63,35 @@ data Relation = RImports | RCalls | RUses | RImplements | RContains
 
 data GraphStats = GraphStats
   { gsDroppedExternal    :: Int                    -- 指向外部目標而丟棄的邊數
-  , gsTopExternalTargets :: [(ModuleName, Int)]    -- 被指最多的外部 module(報告用)
+  , gsTopExternalTargets :: [(ModuleName, Int)]    -- 被指最多的外部 module(報告用);取前 10,依次數降序、同次數依 module 名字典序
   , gsFilteredGenerated  :: Int                    -- TH/產生碼過濾掉的事實數
   , gsDedupedEdges       :: Int                    -- 去重合併的邊數
   }
 ```
 
-`GraphWarning` 為警告文字(如「FactRef 目標無法解析到任何內部節點」的彙整)。
+```haskell
+data GraphWarning = GraphWarning        -- (批次澄清裁決,比照 MetaWarning / ExtractWarning)
+  { gwSource  :: Text                   -- 來源:module 名、節點 id 或檔案路徑
+  , gwMessage :: Text
+  }
+```
 
 ### 節點 id 鑄造規則(契約的一部分,一經發佈不可變)
 
 | 節點 | id 格式 | 例 |
 |---|---|---|
-| module | 裸 module 名 | `Demo.Core` |
+| module | 裸 module 名;同名碰撞時整組改用 `<module>@<source_file>` | `Demo.Core`、`Main@app/Main.hs` |
 | 值宣告 | `<module>.<occ>` | `Demo.Core.render` |
 | 型別宣告 | `<module>.<occ>#t` | `Demo.Core.Foo#t`(與建構子 `Demo.Core.Foo` 不碰撞) |
 | instance | `<module>#i:<instance 標頭>` | `Demo.Core#i:Renderable Sprite` |
 
-id 只由 `QualName`(module、occ、namespace)與 instance 標頭決定——同一份原始碼在任何機器、任何次編譯都鑄出相同 id。
+id 只由 `QualName`(module、occ、namespace)、instance 標頭與(碰撞時的)`source_file` 決定——同一份原始碼在任何機器、任何次編譯都鑄出相同 id。
+
+**同名 module 消歧(批次澄清裁決)**:多個來源檔宣告同一 module 名時(例:多個 executable 各有自己的 `Main`;extraction 的 D3 讓無標頭檔一律視為 `Main`),該組**全部**改用 `<module>@<source_file>` 形式,並將碰撞事實彙整進 `GraphWarning`;同名只有一個來源檔時維持裸名。判定依 `FactModule.fmFile` 的相異數,結果對同一輸入恆定。decl 層節點(階段二)沿用其所屬 module 節點的消歧結果。
 
 ### 組裝規則(契約的一部分)
 
-1. **內部節點才實化**:只為「在 `pmSources` 有對應檔案」的 module 及其宣告建節點;指向外部(base、第三方套件)的邊**丟棄**,彙整進 `gsDroppedExternal` 與 `gsTopExternalTargets`,不靜默吞掉
+1. **內部節點才實化**:內部 module 集合 = 事實流中所有 `FactModule` 的 `fmModule`(批次澄清裁決:與節點來源同一樣本,避免「節點存在卻被當外部丟邊」;非 `pmSources` 的 `sfModule`,後者為路徑推導且可能與檔內標頭不符)。只為內部 module 及其宣告建節點;指向外部(base、第三方套件)的邊**丟棄**,彙整進 `gsDroppedExternal` 與 `gsTopExternalTargets`,不靜默吞掉
 2. **邊推導表**:
 
    | 事實 | 產出 |
@@ -101,7 +108,7 @@ id 只由 `QualName`(module、occ、namespace)與 instance 標頭決定——同
 4. **自環丟棄**:source 與 target 相同的邊(遞迴呼叫、module 自引)不產出,不計警告
 5. **去重**:相同 `(source, target, relation)` 的邊合併為一條,保留最早的 `geLine` 證據行,合併數計入 `gsDedupedEdges`
 6. **`moduleOnly`**:只輸出 module 節點與 `RImports` 邊(decl 層事實直接忽略,不計入統計)
-7. **決定性**:`cgNodes`、`cgEdges` 排序穩定
+7. **決定性**:`cgNodes` 依 `NodeId` 字典序、`cgEdges` 依 `(source, relation, target)` 字典序(批次澄清裁決);同輸入必同輸出
 
 ## 內部模組劃分(Internal Modules)
 
