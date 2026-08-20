@@ -74,7 +74,16 @@ data HieInfo = HieInfo
   }
 ```
 
-`MetaWarning` 為帶來源路徑的警告;`ComponentRef` 為 `(pkgName, compName)` 的參照。
+```haskell
+newtype ModuleName = ModuleName Text   -- 點分形式,如 "MagicFarmer.Render.Camera"(A1 裁決)
+
+data MetaWarning = MetaWarning         -- (A2 裁決)
+  { mwPath    :: FilePath              -- 警告來源路徑
+  , mwMessage :: Text
+  }
+```
+
+`ComponentRef` 為 `(pkgName, compName)` 的參照。
 
 ### 判定規則(契約的一部分)
 
@@ -178,7 +187,7 @@ locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
 - **負責模組**:discovery、source-index
 - **實作的 Level 2 介面**:`loadProjectMeta` 進入點;DTO `MetaOptions`、`ProjectMeta`、`SourceFile`、`MetaWarning`(首次定義,`pmPackages` 恆為空、`sfOwners` 恆為空、`pmHie` 恆為 Nothing);模組介面 `findCabalFiles`(本階段僅定位、不解析)、`indexSources`(判定規則 3 的大寫尾綴法、規則 4 的路徑啟發式、規則 7 的決定性)
 - **資料流管線段落**:從 `MetaOptions` 進,經 discovery → source-index,出 `ProjectMeta`(僅 `pmSources` 與 `pmWarnings` 填實)
-- **驗收標準**:對 particle-magic 與 MagicFarmer(皆唯讀)執行——列出全部 `.hs` 且 `dist-newstyle`、`.git` 內容不出現;`src/MagicFarmer/Render/Core.hs` 對映 `MagicFarmer.Render.Core`;`test/`、`bench/` 檔案 `sfIncluded = False` 且 `includeTests = True` 可翻轉;連續執行兩次輸出完全相同
+- **驗收標準**:對 particle-magic 與 MagicFarmer(皆唯讀)執行——列出全部 `.hs` 且 `dist-newstyle`、`.git` 內容不出現;`src/MagicFarmer/Render/Camera.hs` 對映 `MagicFarmer.Render.Camera`(以驗收標的實存檔案為準);`test/`、`bench/` 檔案 `sfIncluded = False` 且 `includeTests = True` 可翻轉;連續執行兩次輸出完全相同
 - **明確不做**:不解析 `.cabal` 內容(cabal-components 的事);不碰 `.hie`(hie-discovery 的事);不讀任何檔案內容;不處理多套件語意(僅回報找到的 `.cabal` 路徑)
 
 ### cabal-components
