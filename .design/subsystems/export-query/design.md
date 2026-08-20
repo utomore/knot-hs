@@ -52,7 +52,7 @@ data ExportReport = ExportReport
 
 1. **relation 對映**:`RImports → "imports"`、`RCalls → "calls"`、`RUses → "uses"`、`RImplements → "implements"`、`RContains → "contains"`
 2. **節點欄位**:`id`(NodeId 原文)、`label`、`source_file`(`gnFile`,已是 repo 相對正斜線)、`source_location`(`gnLine` 有值時輸出 `L<行>`)
-3. **邊欄位**:`source` / `target` / `relation` / `confidence: "EXTRACTED"`(GHC 事實,全部同值)
+3. **邊欄位**:`source` / `target` / `relation` / `confidence: "EXTRACTED"`(GHC 事實,全部同值);`source_location`(`geLine` 有值時輸出 `L<行>`)——下游 `scan-graph.mjs` 以「邊優先、來源節點 fallback」取循環依賴與跨子系統引用的證據行,S1 的 module 節點 `gnLine` 恆為 `Nothing`,不由邊供給就取不到
 4. **頂層欄位**:`directed: true`;`built_at_commit` 依 `CommitPolicy`
 5. **決定性**:同一 `CodeGraph` 序列化結果 byte 級相同(欄位順序、清單順序固定)
 
@@ -176,7 +176,7 @@ commit 偵測呼叫 `git rev-parse HEAD`(在 `rootDir` 執行,對目標專案唯
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 1 | json-export | codegraph.json 投影、寫檔、commit 欄位、匯出報告 | export-writer | - | - |
+| 1 | json-export | codegraph.json 投影、寫檔、commit 欄位、匯出報告 | export-writer | - | F001 |
 
 ### 階段二:S4 查詢 CLI
 
@@ -196,7 +196,7 @@ commit 偵測呼叫 `git rev-parse HEAD`(在 `rootDir` 執行,對目標專案唯
 - **負責模組**:export-writer
 - **實作的 Level 2 介面**:`writeCodegraph` 進入點;DTO `ExportOptions`、`CommitPolicy`、`ExportReport`;投影規則 1–5 全部
 - **資料流管線段落**:從 `CodeGraph` 進,經投影與 commit 偵測,出寫到磁碟的 `codegraph.json` 與 `ExportReport`
-- **驗收標準**:輸出的 JSON 含 `directed: true`、每個節點有 `id`/`label`/`source_file`、每條邊有 `source`/`target`/`relation`/`confidence: "EXTRACTED"`;`gnLine` 有值的節點輸出 `source_location: "L<行>"`;在 git repo 內執行時頂層有 `built_at_commit` 且等於 `git rev-parse HEAD`,非 repo 時該欄位不存在且無警告;同一 `CodeGraph` 兩次序列化 byte 級相同;`xrNotes` 含 `GraphStats` 的丟棄/過濾/去重摘要;測試直接呼叫 `writeCodegraph` 寫出真實檔案,該檔以 dev-flow 的 `scan-graph.mjs` 驗證可解析(CLI 入口在 F004,故兩個驗收標的的實跑順延至 F004)
+- **驗收標準**:輸出的 JSON 含 `directed: true`、每個節點有 `id`/`label`/`source_file`、每條邊有 `source`/`target`/`relation`/`confidence: "EXTRACTED"`;`gnLine` 有值的節點與 `geLine` 有值的邊都輸出 `source_location: "L<行>"`;在 git repo 內執行時頂層有 `built_at_commit` 且等於 `git rev-parse HEAD`,非 repo 時該欄位不存在且無警告;同一 `CodeGraph` 兩次序列化 byte 級相同;`xrNotes` 含 `GraphStats` 的丟棄/過濾/去重摘要;測試直接呼叫 `writeCodegraph` 寫出真實檔案,該檔以 dev-flow 的 `scan-graph.mjs` 驗證可解析(CLI 入口在 F004,故兩個驗收標的的實跑順延至 F004)
 - **明確不做**:不讀 JSON(graph-load 的事);不印 stdout/stderr(報告由 CLI 層印);不改 `CodeGraph` 內容;不輸出 IR 的額外欄位(型別等擴充留給未來)
 
 ### graph-load

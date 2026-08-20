@@ -15,7 +15,7 @@ parent: export-query
 
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
-| 階段一:S1 骨架 | W1 | json-export | pending |
+| 階段一:S1 骨架 | W1 | json-export | design-done |
 | 階段二:S4 查詢 CLI | W2 | graph-load | pending |
 | 階段二:S4 查詢 CLI | W3 | query-commands | pending |
 | 階段二:S4 查詢 CLI | W4 | cli-wiring | pending |
@@ -53,7 +53,7 @@ parent: export-query
 
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
-| json-export | F001 | F001-json-export.md | 繼承 | 繼承 | pending |
+| json-export | F001 | F001-json-export.md | 繼承 | 繼承 | design-done |
 | graph-load | F002 | F002-graph-load.md | 繼承 | 繼承 | pending |
 | query-commands | F003 | F003-query-commands.md | 繼承 | 繼承 | pending |
 | cli-wiring | F004 | F004-cli-wiring.md | 繼承 | 繼承 | pending |
@@ -64,7 +64,13 @@ parent: export-query
 
 | 來源 | 假設 | 採取的判斷 | 閘門裁決 |
 |---|---|---|---|
-| — | (待各 feature 回報後填入) | — | — |
+| F001 A1 | Level 2 只列單一 `export-writer` 模組,但純函數投影 / IO 偵測 / 寫檔混一檔難測 | 拆 `Knot.Export` / `.Types` / `.Encode` / `.Commit` 四個 Haskell 模組 | **開工前接受**:Level 2 的 export-writer 是邏輯模組不等於單一檔案,比照 graph-core 拆 FactGate/NodeMint/EdgeDerive 的前例,屬實作自主權 |
+| F001 A2 | `outputPath` 非 `Maybe`,預設值由誰算未定 | `writeCodegraph` 視為權威值;另出非契約面 `defaultOutputPath :: FilePath -> FilePath` 給 F004 用 | 待閘門 |
+| F001 A3 | `cgWarnings` 若不進 `xrNotes` 就沒有通道被印出 | `xrNotes` 嚴守契約只放 `GraphStats`;警告由 F004 直接從 `CodeGraph` 取來印 | 待閘門 |
+| F001 A4 | `xrNotes` 行文格式未定 | 固定五種英文小寫行,對齊 `Summary.hs` 風格 | 待閘門 |
+| F001 A5 | 投影規則 3 不輸出 `geLine`,但下游 `scan-graph.mjs:265` 以 `e.source_location ?? src.source_location` 取循環依賴證據行;S1 的 module 節點 `gnLine` 恆為 `Nothing`,兩層皆空 | 嚴守契約不輸出,列為建議修訂 Level 2 | **開工前裁決:輸出**。編排者複驗下游程式碼屬實,判定為契約起草漏欄(ADR-003 本就寫明 `source_location` 供循環依賴證據行用,IR 的 `geLine` 也已備好資料)。投影規則 3 與 json-export 契約卡已回寫 |
+| F001 A6 | git sha 驗證強度未定 | 去空白後要求字元全落在 `0-9a-f` 且長度 40 或 64 | 待閘門 |
+| F001 A7 | `ExportOptions.rootDir` 與既有 `ExtractOptions.rootDir` 同名 | 實測 GHC2024 內含 `DisambiguateRecordFields`:記錄建構語法可消歧、裸選擇器不行;一律用記錄建構語法,不新增擴充 | 待閘門 |
 
 ## 階段結果
 
