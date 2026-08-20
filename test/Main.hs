@@ -2,7 +2,7 @@
 module Main (main) where
 
 import Control.Monad (forM_)
-import Data.List (find, isInfixOf, isPrefixOf)
+import Data.List (find, isInfixOf, isPrefixOf, sort)
 import qualified Data.Text as T
 
 import Hedgehog (forAll, property, (===))
@@ -16,11 +16,14 @@ import Knot.App.Summary (renderMetaSummary)
 import Knot.Meta (loadProjectMeta)
 import Knot.Meta.CabalModel (resolvePackage)
 import Knot.Meta.Discovery (findCabalFiles)
+import Knot.Meta.HieLocate (locateHie, moduleNameFromHiePath)
 import Knot.Meta.SourceIndex (indexSources, moduleNameFromPath)
 import Knot.Meta.Types
   ( ComponentKind (..)
   , ComponentMeta (..)
   , ComponentRef (..)
+  , HieDirSource (..)
+  , HieInfo (..)
   , MetaOptions (..)
   , MetaWarning (..)
   , ModuleName (..)
@@ -36,6 +39,10 @@ compsFixture   = "test/fixtures/comps"
 condFixture    = "test/fixtures/cond"
 multiFixture   = "test/fixtures/multi"
 brokenFixture  = "test/fixtures/broken"
+
+hieConvFixture, hieDistFixture :: FilePath
+hieConvFixture = "test/fixtures/hie-conv"
+hieDistFixture = "test/fixtures/hie-dist"
 
 defOpts :: FilePath -> MetaOptions
 defOpts r = MetaOptions { root = r, includeTests = False, hieDirOverride = Nothing }
@@ -71,7 +78,7 @@ main :: IO ()
 main = defaultMain tests
 
 tests :: TestTree
-tests = testGroup "knot-hs" [f001Tests, f002Tests]
+tests = testGroup "knot-hs" [f001Tests, f002Tests, f003Tests]
 
 f001Tests :: TestTree
 f001Tests = testGroup "F001 scan-baseline"
@@ -426,3 +433,156 @@ testRenderSummaryComponents = testCase "test_render_summary_components" $ do
   assertBool "excluded marker"    (T.pack "excluded" `T.isInfixOf` out)
   assertBool "owners on file line" (T.pack "{demo/lib:demo}" `T.isInfixOf` out)
   assertBool "package count line" (T.pack "packages: 1" `T.isInfixOf` out)
+
+--------------------------------------------------------------------------------
+-- F003 hie-discovery
+--------------------------------------------------------------------------------
+
+-- | hie-conv fixture 的 [SourceFile](幽靈判定母集來源)。
+hieConvSources :: IO [SourceFile]
+hieConvSources = fst <$> indexSources (defOpts hieConvFixture) []
+
+-- | hie-conv fixture 的期望 .hie 清單(碼位序)。
+allHieConvPaths, validHieConvPaths :: [FilePath]
+allHieConvPaths =
+  [".hie/Deep/Mod.hie", ".hie/Foo.hie", ".hie/Gone.hie", ".hie/lowercase/util.hie"]
+validHieConvPaths =
+  [".hie/Deep/Mod.hie", ".hie/Foo.hie", ".hie/lowercase/util.hie"]
+
+hieDistFooHie :: FilePath
+hieDistFooHie =
+  "dist-newstyle/build/x86_64-windows/ghc-9.14.1/pkg-0.1/build/extra-compilation-artifacts/hie/Foo.hie"
+
+f003Tests :: TestTree
+f003Tests = testGroup "F003 hie-discovery"
+  [ testLocateNone          -- T1
+  , testHieEnumerate        -- T2
+  , testThreeTierSource     -- T3
+  , testHieModuleMap        -- T4
+  , testGhostFilter         -- T5
+  , testLocateDeterministic -- T6
+  , testLoadMetaHie         -- T7
+  ]
+
+-- F003 T1: 三層皆未命中 → (Nothing, []);骨架與未命中路徑成立
+testLocateNone :: TestTree
+testLocateNone = testCase "test_locate_none" $ do
+  (srcs, _) <- indexSources (defOpts noCabalFixture) []
+  r <- locateHie (defOpts noCabalFixture) srcs
+  r @?= (Nothing, [])
+
+-- F003 T2: .hie/ 下全部 .hie 入列(含巢狀)、repo 相對正斜線、非 .hie 不入列
+testHieEnumerate :: TestTree
+testHieEnumerate = testCase "test_hie_enumerate" $ do
+  srcs <- hieConvSources
+  (mh, _) <- locateHie (defOpts hieConvFixture) srcs
+  case mh of
+    Nothing -> assertFailure "expected Just HieInfo"
+    Just h  -> do
+      let everything = hieFiles h ++ hieGhosts h
+      sort everything @?= allHieConvPaths
+      forM_ everything $ \p -> do
+        assertBool ("forward slashes only: " <> p) ((toEnum 92 :: Char) `notElem` p)
+        assertBool ("repo relative: " <> p) (".hie/" `isPrefixOf` p)
+      assertBool "non-.hie decoy not enumerated"
+        (".hie/readme.txt" `notElem` everything)
+
+-- F003 T3: 三層發現順序與 hieSource 標記(四例)
+testThreeTierSource :: TestTree
+testThreeTierSource = testGroup "test_three_tier_source"
+  [ testCase "override adopts FromFlag" $ do
+      srcs <- hieConvSources
+      (mh, ws) <- locateHie ((defOpts hieConvFixture) { hieDirOverride = Just ".hie" }) srcs
+      fmap hieSource mh @?= Just FromFlag
+      fmap hieDir mh @?= Just ".hie"
+      length ws @?= 2   -- 僅幽靈 + 無法對映警告,無層級警告
+  , testCase "convention layer" $ do
+      srcs <- hieConvSources
+      (mh, _) <- locateHie (defOpts hieConvFixture) srcs
+      fmap hieSource mh @?= Just FromConvention
+      fmap hieDir mh @?= Just ".hie"
+  , testCase "dist-newstyle layer with common-ancestor hieDir" $ do
+      (srcs, _) <- indexSources (defOpts hieDistFixture) []
+      (mh, ws) <- locateHie (defOpts hieDistFixture) srcs
+      fmap hieSource mh @?= Just FromDistNewstyle
+      fmap hieDir mh @?= Just
+        "dist-newstyle/build/x86_64-windows/ghc-9.14.1/pkg-0.1/build/extra-compilation-artifacts/hie"
+      fmap hieFiles mh @?= Just [hieDistFooHie]
+      fmap hieGhosts mh @?= Just []
+      ws @?= []
+  , testCase "missing override yields Nothing plus warning, no fallback" $ do
+      srcs <- hieConvSources
+      (mh, ws) <- locateHie ((defOpts hieConvFixture) { hieDirOverride = Just "no-such-dir" }) srcs
+      mh @?= Nothing   -- hie-conv 有 .hie 慣例層,Nothing 證明未 fallback
+      case ws of
+        [w] -> do
+          mwPath w @?= "no-such-dir"
+          assertBool "message mentions not found"
+            (T.pack "not found" `T.isInfixOf` mwMessage w)
+        _ -> assertFailure ("expected exactly one warning, got: " <> show ws)
+  ]
+
+-- F003 T4: 去 .hie 副檔名 + 大寫尾綴法例 + property(小寫前綴段不改變推導)
+testHieModuleMap :: TestTree
+testHieModuleMap = testGroup "test_hie_module_map"
+  [ testCase "examples" $ do
+      moduleNameFromHiePath "Foo.hie" @?= Just (ModuleName (T.pack "Foo"))
+      moduleNameFromHiePath "Deep/Mod.hie" @?= Just (ModuleName (T.pack "Deep.Mod"))
+      moduleNameFromHiePath "lowercase/util.hie" @?= Nothing
+      moduleNameFromHiePath hieDistFooHie @?= Just (ModuleName (T.pack "Foo"))
+  , testProperty "lowercase prefix segments do not change result" $ property $ do
+      prefix <- forAll (Gen.list (Range.linear 0 4) (Gen.string (Range.linear 1 8) Gen.lower))
+      let path = concatMap (<> "/") prefix <> "Deep/Mod.hie"
+      moduleNameFromHiePath path === Just (ModuleName (T.pack "Deep.Mod"))
+  ]
+
+-- F003 T5: 幽靈入 hieGhosts + 警告不進 hieFiles;無法對映者留置 + 警告;
+-- 有效檔無警告(恰兩則警告即證明)
+testGhostFilter :: TestTree
+testGhostFilter = testCase "test_ghost_filter" $ do
+  srcs <- hieConvSources
+  (mh, ws) <- locateHie (defOpts hieConvFixture) srcs
+  case mh of
+    Nothing -> assertFailure "expected Just HieInfo"
+    Just h  -> do
+      hieGhosts h @?= [".hie/Gone.hie"]
+      hieFiles h @?= validHieConvPaths
+      assertBool "ghost not in hieFiles" (".hie/Gone.hie" `notElem` hieFiles h)
+      case ws of
+        [wGhost, wUnmap] -> do
+          mwPath wGhost @?= ".hie/Gone.hie"
+          assertBool "ghost message mentions module"
+            (T.pack "Gone" `T.isInfixOf` mwMessage wGhost)
+          mwPath wUnmap @?= ".hie/lowercase/util.hie"
+        _ -> assertFailure ("expected exactly two warnings, got: " <> show ws)
+
+-- F003 T6: 連續兩次結果完全相等;hieFiles 與 hieGhosts 各自嚴格遞增
+testLocateDeterministic :: TestTree
+testLocateDeterministic = testCase "test_locate_deterministic" $ do
+  srcs <- hieConvSources
+  r1 <- locateHie (defOpts hieConvFixture) srcs
+  r2 <- locateHie (defOpts hieConvFixture) srcs
+  r2 @?= r1
+  case fst r1 of
+    Nothing -> assertFailure "expected Just HieInfo"
+    Just h  -> do
+      let inc xs = and (zipWith (<) xs (drop 1 xs))
+      assertBool "hieFiles strictly increasing" (inc (hieFiles h))
+      assertBool "hieGhosts strictly increasing" (inc (hieGhosts h))
+
+-- F003 T7: loadProjectMeta 接線——pmHie 填實、警告殿後;no-cabal 既有行為不變
+testLoadMetaHie :: TestTree
+testLoadMetaHie = testCase "test_load_meta_hie" $ do
+  pm <- loadProjectMeta (defOpts hieConvFixture)
+  fmap hieSource (pmHie pm) @?= Just FromConvention
+  fmap hieGhosts (pmHie pm) @?= Just [".hie/Gone.hie"]
+  fmap hieFiles (pmHie pm) @?= Just validHieConvPaths
+  case pmWarnings pm of
+    [wCabal, wGhost, wUnmap] -> do
+      mwPath wCabal @?= hieConvFixture        -- discovery 警告在前
+      mwPath wGhost @?= ".hie/Gone.hie"       -- hie-locate 警告殿後
+      mwPath wUnmap @?= ".hie/lowercase/util.hie"
+    ws -> assertFailure ("expected exactly three warnings, got: " <> show ws)
+  pm2 <- loadProjectMeta (defOpts noCabalFixture)
+  pmHie pm2 @?= Nothing
+  map mwPath (pmWarnings pm2) @?= [noCabalFixture]

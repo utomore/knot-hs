@@ -11,6 +11,7 @@ library
                       Knot.Meta.Discovery
                       Knot.Meta.CabalModel
                       Knot.Meta.SourceIndex
+                      Knot.Meta.HieLocate
     build-depends:    base ^>=4.22
                     , Cabal ^>=3.16
                     , Cabal-syntax ^>=3.16

@@ -16,7 +16,7 @@ parent: project-meta
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | scan-baseline | impl-done |
-| 階段二:S2 .cabal 整合 | W2 | cabal-components, hie-discovery | design-done |
+| 階段二:S2 .cabal 整合 | W2 | cabal-components, hie-discovery | impl-done |
 
 無跨子系統依賴;開發者決定兩階段連貫跑完(各階段閘門照停)。
 
@@ -36,7 +36,7 @@ parent: project-meta
 |---|---|---|---|---|---|
 | scan-baseline | F001 | F001-scan-baseline.md | 繼承 | 繼承 | impl-done |
 | cabal-components | F002 | F002-cabal-components.md | opus(Fable 誤判三連中斷後改派) | 繼承 | impl-done |
-| hie-discovery | F003 | F003-hie-discovery.md | 繼承 | 繼承 | design-done |
+| hie-discovery | F003 | F003-hie-discovery.md | 繼承 | 繼承 | impl-done |
 
 ## 待確認假設彙總
 

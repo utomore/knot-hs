@@ -3,7 +3,7 @@ id: F003
 type: feature
 title: hie-discovery
 description: 三層 .hie 目錄發現、檔案列舉與幽靈 .hie 過濾
-status: open
+status: done
 created: 2026-08-20
 updated: 2026-08-20
 depends-on: [F001]
@@ -186,13 +186,13 @@ moduleNameFromHiePath :: FilePath -> Maybe ModuleName
 
 ## TodoList
 
-- [ ] T1: 模組骨架——`Knot.Meta.HieLocate` 建檔、cabal `exposed-modules` 接線;`locateHie` 簽名就位,三層皆未命中時回 `(Nothing, [])`  `dep: -`
-- [ ] T2: `.hie` 檔列舉走訪——遞迴、每層排序、僅收 `.hie`、repo 相對正斜線、讀不到降級警告  `dep: T1`
-- [ ] T3: 三層發現順序與 `hieSource` 標記——override 存在採用/不存在回 `Nothing`+警告不 fallback、慣例層 `<root>/.hie`、`dist-newstyle` 遞迴掃描與共同祖先 `hieDir`  `dep: T2`
-- [ ] T4: `moduleNameFromHiePath` 純函數——去 `.hie` 副檔名 + 大寫尾綴法  `dep: T1`
-- [ ] T5: 幽靈判定——`sfModule` 母集比對、幽靈入 `hieGhosts` + 警告不進 `hieFiles`、無法對映者留置 + 警告  `dep: T2, T4`
-- [ ] T6: `locateHie` 組裝與決定性——`hieFiles`/`hieGhosts` 碼位序排序、警告順序固定、連續執行結果相同  `dep: T3, T5`
-- [ ] T7: `loadProjectMeta` 接線——`pmHie` 接上 `locateHie`、警告彙整殿後(整合序:與 F002 同階段序列實作,於當時最新版 `loadProjectMeta` 上整合,見 A8)  `dep: T6`
+- [x] T1: 模組骨架——`Knot.Meta.HieLocate` 建檔、cabal `exposed-modules` 接線;`locateHie` 簽名就位,三層皆未命中時回 `(Nothing, [])`  `dep: -`
+- [x] T2: `.hie` 檔列舉走訪——遞迴、每層排序、僅收 `.hie`、repo 相對正斜線、讀不到降級警告  `dep: T1`
+- [x] T3: 三層發現順序與 `hieSource` 標記——override 存在採用/不存在回 `Nothing`+警告不 fallback、慣例層 `<root>/.hie`、`dist-newstyle` 遞迴掃描與共同祖先 `hieDir`  `dep: T2`
+- [x] T4: `moduleNameFromHiePath` 純函數——去 `.hie` 副檔名 + 大寫尾綴法  `dep: T1`
+- [x] T5: 幽靈判定——`sfModule` 母集比對、幽靈入 `hieGhosts` + 警告不進 `hieFiles`、無法對映者留置 + 警告  `dep: T2, T4`
+- [x] T6: `locateHie` 組裝與決定性——`hieFiles`/`hieGhosts` 碼位序排序、警告順序固定、連續執行結果相同  `dep: T3, T5`
+- [x] T7: `loadProjectMeta` 接線——`pmHie` 接上 `locateHie`、警告彙整殿後(整合序:與 F002 同階段序列實作,於當時最新版 `loadProjectMeta` 上整合,見 A8)  `dep: T6`
 
 ## 1-to-1 測試對照表
 
@@ -219,4 +219,7 @@ moduleNameFromHiePath :: FilePath -> Maybe ModuleName
 
 ## 實作備註
 
-(撰寫時留空)
+- 2026-08-20 實作完成:T1–T7 全數完成,F003 新增 11 條測試案例(含 hedgehog property),全套件 31 tests 全綠;F001/F002 既有期望值零改動。
+- 介面表原列 `System.Directory.doesFileExist`,實作沿 F001 source-index 走訪前例以「非目錄即為檔案候選」判定,實際未用到(內部實作自主權,非契約偏離)。
+- fixture 依 D5 新建 `test/fixtures/hie-conv/`、`test/fixtures/hie-dist/`(`.hie` 皆空檔);另加 `.hie/readme.txt` 誘餌驗證非 `.hie` 檔不入列。
+- 決定性細節:幽靈/無法對映警告採「排序後清單的單趟掃描序」(兩類依路徑碼位序交錯),符合「依排序後清單序」的規格文字。
