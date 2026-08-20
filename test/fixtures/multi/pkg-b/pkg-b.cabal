@@ -1,0 +1,10 @@
+cabal-version:      3.4
+name:               pkg-b
+version:            0.1.0.0
+build-type:         Simple
+
+executable pkg-b-exe
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    build-depends:    base
+    default-language: GHC2024

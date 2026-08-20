@@ -1,0 +1,3 @@
+name: broken
+version: not.a.version
+{ this is deliberately invalid cabal syntax

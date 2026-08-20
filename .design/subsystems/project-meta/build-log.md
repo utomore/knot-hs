@@ -35,7 +35,7 @@ parent: project-meta
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
 | scan-baseline | F001 | F001-scan-baseline.md | 繼承 | 繼承 | impl-done |
-| cabal-components | F002 | F002-cabal-components.md | opus(Fable 誤判三連中斷後改派) | 繼承 | design-done |
+| cabal-components | F002 | F002-cabal-components.md | opus(Fable 誤判三連中斷後改派) | 繼承 | impl-done |
 | hie-discovery | F003 | F003-hie-discovery.md | 繼承 | 繼承 | design-done |
 
 ## 待確認假設彙總

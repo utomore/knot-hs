@@ -3,7 +3,7 @@ id: F002
 type: feature
 title: cabal-components
 description: 以 Cabal boot lib 解析多套件 component 並落實檔案歸類與精確 module 對映
-status: open
+status: done
 created: 2026-08-20
 updated: 2026-08-20
 depends-on: [F001]
@@ -348,16 +348,16 @@ renderMetaSummary :: ProjectMeta -> Text   -- 簽名不變,擴充輸出內容
 
 ## TodoList
 
-- [ ] T1: 相依與模組骨架——`knot-hs.cabal` library 加 `Cabal`、`Cabal-syntax`、`bytestring`;新建 `Knot.Meta.CabalModel` 並列入 `exposed-modules`;`resolvePackage` 以 `parseGenericPackageDescription` + `runParseResult` 取得 `GenericPackageDescription` 並回 `Right`(component 先留空);`cabal build all` 通過  `dep: -`
-- [ ] T2: 解析失敗路徑——讀檔 `IOException` 與 `runParseResult` 的 `Left` 皆轉成 `Left MetaWarning`(`mwPath` = `.cabal` 路徑,訊息取 `showPError`)  `dep: T1`
-- [ ] T3: 預設 flag 攤平與 component 抽取——`finalizePD mempty (tests+benchmarks requested) (const Satisfied) buildPlatform ghc9141 []`;六種 `ComponentKind` 對映、`compName` 前綴命名、`compSourceDirs` 取 `hsSourceDirs` 並正斜線化;固定的 kind 分段序  `dep: T2`
-- [ ] T4: 規則 1 的 `compExcluded` 判定——`TestSuite` / `Benchmark` 依 `includeTests` 翻轉、其餘恆 `False`(於組裝層依 `MetaOptions` 套用到 `pkgComponents`)  `dep: T3`
-- [ ] T5: `findCabalFiles` 支援 `cabal.project`——`readFields` 取 `packages` / `optional-packages`、entry 切分與展開(目錄 / `.cabal` / glob 略過警告)、去重排序、無 `cabal.project` 與解析失敗時退回 S1 行為  `dep: T1`
-- [ ] T6: 規則 2 的一對多歸類——`ownerIndex` 建立、段層級 `hs-source-dirs` 前綴比對、`sfOwners` 保序去重、`sfIncluded = any (not . excluded)`、無 owner 時退回 S1 啟發式  `dep: T4`
-- [ ] T7: 規則 3 的精確 module 對映——取最長命中 `hs-source-dirs` 去前綴、段合法性檢查、無 owner 時退回 `moduleNameFromPath`  `dep: T6`
-- [ ] T8: `loadProjectMeta` 接線與 root 錨定——`resolvePackage (root </> rel)`、`partitionEithers`、`pkgCabalFile` / `compSourceDirs` 錨定為 repo 相對、`pmPackages` 填實、警告順序 discovery → cabal-model → source-index  `dep: T5, T7`
-- [ ] T9: 決定性與 F001 回歸——`pmPackages` / `pkgComponents` / `sfOwners` / `pmSources` 全序穩定;更新 `test/Main.hs` T8 中 `pmPackages pm @?= []` 的斷言(其餘 F001 期望值不變)  `dep: T8`
-- [ ] T10: `renderMetaSummary` 擴充——印出 package / component 區塊與每檔 owners,供 particle-magic 唯讀驗收觀察 9 個 component 與歸類結果  `dep: T8`
+- [x] T1: 相依與模組骨架——`knot-hs.cabal` library 加 `Cabal`、`Cabal-syntax`、`bytestring`;新建 `Knot.Meta.CabalModel` 並列入 `exposed-modules`;`resolvePackage` 以 `parseGenericPackageDescription` + `runParseResult` 取得 `GenericPackageDescription` 並回 `Right`(component 先留空);`cabal build all` 通過  `dep: -`
+- [x] T2: 解析失敗路徑——讀檔 `IOException` 與 `runParseResult` 的 `Left` 皆轉成 `Left MetaWarning`(`mwPath` = `.cabal` 路徑,訊息取 `showPError`)  `dep: T1`
+- [x] T3: 預設 flag 攤平與 component 抽取——`finalizePD mempty (tests+benchmarks requested) (const Satisfied) buildPlatform ghc9141 []`;六種 `ComponentKind` 對映、`compName` 前綴命名、`compSourceDirs` 取 `hsSourceDirs` 並正斜線化;固定的 kind 分段序  `dep: T2`
+- [x] T4: 規則 1 的 `compExcluded` 判定——`TestSuite` / `Benchmark` 依 `includeTests` 翻轉、其餘恆 `False`(於組裝層依 `MetaOptions` 套用到 `pkgComponents`)  `dep: T3`
+- [x] T5: `findCabalFiles` 支援 `cabal.project`——`readFields` 取 `packages` / `optional-packages`、entry 切分與展開(目錄 / `.cabal` / glob 略過警告)、去重排序、無 `cabal.project` 與解析失敗時退回 S1 行為  `dep: T1`
+- [x] T6: 規則 2 的一對多歸類——`ownerIndex` 建立、段層級 `hs-source-dirs` 前綴比對、`sfOwners` 保序去重、`sfIncluded = any (not . excluded)`、無 owner 時退回 S1 啟發式  `dep: T4`
+- [x] T7: 規則 3 的精確 module 對映——取最長命中 `hs-source-dirs` 去前綴、段合法性檢查、無 owner 時退回 `moduleNameFromPath`  `dep: T6`
+- [x] T8: `loadProjectMeta` 接線與 root 錨定——`resolvePackage (root </> rel)`、`partitionEithers`、`pkgCabalFile` / `compSourceDirs` 錨定為 repo 相對、`pmPackages` 填實、警告順序 discovery → cabal-model → source-index  `dep: T5, T7`
+- [x] T9: 決定性與 F001 回歸——`pmPackages` / `pkgComponents` / `sfOwners` / `pmSources` 全序穩定;更新 `test/Main.hs` T8 中 `pmPackages pm @?= []` 的斷言(其餘 F001 期望值不變)  `dep: T8`
+- [x] T10: `renderMetaSummary` 擴充——印出 package / component 區塊與每檔 owners,供 particle-magic 唯讀驗收觀察 9 個 component 與歸類結果  `dep: T8`
 
 ## 1-to-1 測試對照表
 
@@ -388,4 +388,14 @@ renderMetaSummary :: ProjectMeta -> Text   -- 簽名不變,擴充輸出內容
 
 ## 實作備註
 
-(撰寫時留空)
+2026-08-20 實作完成(委派模式),無契約偏離、無新增假設(A1–A9 之外);全數 20 條測試(F001 既有 9 + F002 新增 10,tasty 計 20 個 case)通過,`cabal build all` 於 `GHC2024` + `-Wall` 零警告。
+
+- fixture 與文檔規劃的差異(皆為測試對照表所需,不影響介面):
+  - `test/fixtures/comps/examples/Demo.hs`:T6 的「無 owner 檔案走啟發式」案例需要一個不落在任何 `hs-source-dirs` 下的檔案,fixture 樹原稿未列
+  - `test/fixtures/broken/cabal.project`(故意寫壞):T5 的「壞 `cabal.project` → 警告 + 退回根目錄掃描」案例;同一 fixture 兼作 T8 的警告順序驗證(discovery 的 cabal.project 警告在前、cabal-model 的 broken.cabal 警告在後)
+- `sfOwners` 去重用 `Data.List.nub` 而非文檔虛擬碼的 `nubOrd`:`ComponentRef` 未派生 `Ord`,`nub` 行為相同(保序去重)且不必動 F001 的 DTO 定義(內部實作自主權)
+- `loadProjectMeta` 以 `zip cabalRels results` 取代虛擬碼的 `partitionEithers`,使錨定所需的 rel ↔ 結果配對更直接;`wsP` 順序仍 = `cabalRels` 序
+- 驗收(標的絕對唯讀,以 `knot` 執行檔手動執行):
+  - particle-magic:9 個 component(NamedLibrary 2、Executable 4、ForeignLibrary 1、TestSuite 1、Benchmark 1)✅;`app/` 檔案 owners = exe + test + bench 三者(A9)且 `+`(included)✅;`test/` 148 檔僅屬 `test:spec` 且 `-`(excluded)✅;`src/core/Magic/Types.hs → Magic.Types`、`tools/*` 四 owner(exe ×3 + test)、193 檔全數推得 module、0 警告
+  - MagicFarmer:3 component、117 檔全數推得 module、0 警告(sanity)
+  - 多套件(驗收標準 4)由 `multi` fixture 的 T5/T8/T9 自動測試覆蓋

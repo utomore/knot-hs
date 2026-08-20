@@ -1,0 +1,43 @@
+cabal-version:      3.4
+name:               comps
+version:            0.1.0.0
+build-type:         Simple
+
+library
+    hs-source-dirs:   src
+    exposed-modules:  Comps.Core
+    build-depends:    base
+    default-language: GHC2024
+
+library sub
+    hs-source-dirs:   src/sub
+    exposed-modules:  Comps.Sub
+    build-depends:    base
+    default-language: GHC2024
+
+executable comps-exe
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    build-depends:    base
+    default-language: GHC2024
+
+foreign-library comps-ffi
+    type:             native-shared
+    hs-source-dirs:   src/ffi
+    other-modules:    Comps.FFI
+    build-depends:    base
+    default-language: GHC2024
+
+test-suite comps-test
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test, app
+    main-is:          Spec.hs
+    build-depends:    base
+    default-language: GHC2024
+
+benchmark comps-bench
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   bench, app
+    main-is:          Bench.hs
+    build-depends:    base
+    default-language: GHC2024

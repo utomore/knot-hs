@@ -1,0 +1,2 @@
+-- multi-package fixture (F002 T5/T8)
+packages: pkg-a, ./pkg-b/

@@ -1,0 +1,20 @@
+cabal-version:      3.4
+name:               cond
+version:            0.1.0.0
+build-type:         Simple
+
+flag extra
+    default:     False
+    manual:      True
+    description: Extra sources.
+
+library
+    hs-source-dirs:   src
+    build-depends:    base
+    default-language: GHC2024
+    if flag(extra)
+        hs-source-dirs: src-extra
+    if os(windows)
+        hs-source-dirs: src-win
+    else
+        hs-source-dirs: src-posix

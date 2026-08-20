@@ -9,8 +9,12 @@ library
     exposed-modules:  Knot.Meta
                       Knot.Meta.Types
                       Knot.Meta.Discovery
+                      Knot.Meta.CabalModel
                       Knot.Meta.SourceIndex
     build-depends:    base ^>=4.22
+                    , Cabal ^>=3.16
+                    , Cabal-syntax ^>=3.16
+                    , bytestring
                     , containers
                     , directory
                     , filepath
