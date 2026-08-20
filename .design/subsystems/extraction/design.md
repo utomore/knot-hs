@@ -10,9 +10,9 @@ parent: system
 related-adr: [ADR-002]
 ---
 
-## extraction 子系統架構
+# extraction 子系統架構
 
-### 定位與範圍
+## 定位與範圍
 
 管線第二站(見 system.md「子系統劃分 › extraction」):吃 project-meta 的 `ProjectMeta`,把原始碼與 `.hie` 轉成**事實流**——module 宣告、字面 import、頂層宣告、名稱引用、class/instance 關係——交給 graph-core 組圖。
 
@@ -20,7 +20,7 @@ related-adr: [ADR-002]
 
 **明確不做**:不決定節點 id(只提供 `QualName` 原料)、不組圖、不過濾 test(只處理 `sfIncluded = True` 的檔案,接受 project-meta 的判定)、不寫任何輸出檔(`.knot/` 索引快取除外)。
 
-### 對外契約(Public Interface & DTOs)
+## 對外契約(Public Interface & DTOs)
 
 唯一進入點,呼叫者為 CLI 組裝層(結果轉交 graph-core):
 
@@ -47,7 +47,7 @@ data ExtractResult = ExtractResult
 data CapabilityLevel = ModuleLevel | DeclLevel
 ```
 
-#### 事實流 DTO
+### 事實流 DTO
 
 `QualName` 是 graph-core 鑄造決定性節點 id 的原料(Module + OccName + namespace,對齊 system.md graph-core 的職責);行號供下游 `source_location`(`L<行>`)。
 
@@ -92,7 +92,7 @@ data BackendReport = BackendReport
 
 `ExtractWarning` 為帶來源(檔案或後端)的警告文字。
 
-#### 抽取規則(契約的一部分)
+### 抽取規則(契約的一部分)
 
 1. **納入範圍**:只處理 `pmSources` 中 `sfIncluded = True` 的檔案;`.hie` 清單以 `pmHie.hieFiles` 為準(幽靈檔已被 project-meta 濾除)
 2. **後端職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強、與降級模式行為一致);hiedb 後端只產 `FactDecl` / `FactRef` / `FactInstance`;`FactModule` 由 import-scan 產出
@@ -103,7 +103,7 @@ data BackendReport = BackendReport
 7. **best-effort**:單檔解析失敗、單表查詢失敗 → 警告 + 跳過;整個後端失敗 → 降級 + 報告,不中斷
 8. **決定性**:事實流排序穩定,同樣輸入產生同樣輸出
 
-### 內部模組劃分(Internal Modules)
+## 內部模組劃分(Internal Modules)
 
 | 模組 | 單一職責 |
 |---|---|
@@ -112,7 +112,7 @@ data BackendReport = BackendReport
 | **hiedb-driver** | hiedb 執行檔探測、相容性檢查、執行 `hiedb index`、`.knot/` 索引檔管理 → 就緒的索引 |
 | **hiedb-facts** | 讀索引 SQLite(mods/decls/defs/refs/exports 表)→ `FactDecl` / `FactRef` / `FactInstance`,含 fromDecl 解析 |
 
-### 資料流管線(Data Flow Pipeline)
+## 資料流管線(Data Flow Pipeline)
 
 ```text
 ProjectMeta(+ ExtractOptions)
@@ -123,7 +123,7 @@ ProjectMeta(+ ExtractOptions)
   → backend-select: 合成事實流 + 能力等級 + 報告 → ExtractResult → 交給 graph-core
 ```
 
-### 模組間公開介面(Module Interfaces)
+## 模組間公開介面(Module Interfaces)
 
 ```haskell
 -- 後端抽象(backend-select 調度的統一介面,兩後端各實現一份)
@@ -145,14 +145,14 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 `IndexHandle` 為「已就緒索引」的不透明參照(內容屬 Level 3)。
 
-### 使用的技術
+## 使用的技術
 
 沿用主架構技術棧。子系統特有選型:
 
 - **hiedb 執行檔**(外部、選用):依 ADR-002;使用者以同版 GHC 加 `--allow-newer=hie-compat:base` 安裝
 - **sqlite-simple** 讀 hiedb 索引:2026-08-20 實測 sqlite-simple 0.4.19 + direct-sqlite 2.3.29(自帶 C sqlite3,無系統依賴)在 GHC 9.14.1 編譯成功,並實際讀出 hiedb 0.8 的 schema(`mods` / `decls` / `defs` / `refs` / `exports` / `imports` / `typerefs` 等表)。純 C binding、API 面小,第三方風險遠低於 link `ghc` 的套件;若未來版本編不過,fallback 為解析 `hiedb` 查詢子命令的文字輸出
 
-### 架構圖
+## 架構圖
 
 ```text
  ExtractOptions + ProjectMeta
@@ -176,20 +176,20 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
             graph-core
 ```
 
-### 開發階段
+## 開發階段
 
 對應主架構 S1(fact-contract、import-scan)與 S3(hiedb-driver、hiedb-facts)。無額外內部里程碑。
 
-### 功能規劃
+## 功能規劃
 
-#### 階段一:S1 骨架
+### 階段一:S1 骨架
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
 | 1 | fact-contract | Fact DTO、後端抽象介面、能力分級、auto 選擇與降級合成 | backend-select | - | - |
 | 2 | import-scan | T0 後端:import 行解析、module 宣告事實 | import-scan | #1 | - |
 
-#### 階段二:S3 函式級
+### 階段二:S3 函式級
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
@@ -198,9 +198,9 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 (共 4 個 features、2 個階段;全部完成即子系統可交付)
 
-### Feature 契約卡
+## Feature 契約卡
 
-#### fact-contract
+### fact-contract
 
 - **階段**:階段一
 - **負責模組**:backend-select
@@ -209,7 +209,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 - **驗收標準**:以假後端(測試替身)驗證——auto 模式下探測失敗的後端出現在 `erReports` 且附原因、`erLevel` 正確反映實際跑的後端;`HiedbOnly` 但後端不可用時回空事實 + 報告而不 crash;事實流排序穩定(同輸入兩次結果相同)
 - **明確不做**:不實作任何真後端(import-scan、hiedb 各有 feature);不解析任何檔案;不定義 CLI 參數解析(屬 CLI 組裝層)
 
-#### import-scan
+### import-scan
 
 - **階段**:階段一
 - **負責模組**:import-scan
@@ -218,7 +218,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 - **驗收標準**:對 MagicFarmer 與 particle-magic(唯讀)執行——每個 included 檔案有一筆 `FactModule`;`import`、`import qualified X as Y`、`import X (…) hiding (…)` 多行語法都能抽出 `FactImport`;CPP 條件內的 import 依字面抽取(best-effort,行為寫進文件);單檔讀取失敗印警告不中斷;連續兩次執行輸出相同
 - **明確不做**:不解析 import 清單明細(只到 module 對 module);不讀 `.hie`;不驗證 import 的 module 是否存在(懸空 import 留給 graph-core 處理);不做完整 Haskell 語法解析(只認 module 標頭與 import 區)
 
-#### hiedb-driver
+### hiedb-driver
 
 - **階段**:階段二
 - **負責模組**:hiedb-driver
@@ -227,7 +227,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 - **驗收標準**:hiedb 不在 PATH 時 `ProbeResult = Unavailable`(原因指明執行檔)且整體降級為 `ModuleLevel` 不失敗;對 fixture 專案(自建,含 `.hie`)執行後 `.knot/hiedb.sqlite` 存在且可被 SQLite 開啟;`dbPath` 覆寫時 `.knot/` 不被建立;重跑時索引重用(第二次明顯不重做全量)
 - **明確不做**:不讀索引內容出事實(hiedb-facts 的事);不自己解析 `.hie` 產索引;不管理 `.gitignore`(只在首次建立 `.knot/` 時印提示);不清理過期索引
 
-#### hiedb-facts
+### hiedb-facts
 
 - **階段**:階段二
 - **負責模組**:hiedb-facts

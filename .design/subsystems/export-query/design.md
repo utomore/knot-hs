@@ -10,9 +10,9 @@ parent: system
 related-adr: [ADR-003]
 ---
 
-## export-query 子系統架構
+# export-query 子系統架構
 
-### 定位與範圍
+## 定位與範圍
 
 管線末站(見 system.md「子系統劃分 › export-query」),兩個面向:
 
@@ -21,9 +21,9 @@ related-adr: [ADR-003]
 
 **明確不做**:不建圖、不改圖(查詢只讀不寫);不做視覺化;不重跑抽取(查詢面只認 JSON 檔,不碰 `.hie` 或原始碼)。
 
-### 對外契約(Public Interface & DTOs)
+## 對外契約(Public Interface & DTOs)
 
-#### 匯出面
+### 匯出面
 
 ```haskell
 writeCodegraph :: ExportOptions -> CodeGraph -> IO ExportReport
@@ -47,7 +47,7 @@ data ExportReport = ExportReport
   }
 ```
 
-#### 投影規則(契約的一部分,對齊 ADR-003)
+### 投影規則(契約的一部分,對齊 ADR-003)
 
 1. **relation 對映**:`RImports → "imports"`、`RCalls → "calls"`、`RUses → "uses"`、`RImplements → "implements"`、`RContains → "contains"`
 2. **節點欄位**:`id`(NodeId 原文)、`label`、`source_file`(`gnFile`,已是 repo 相對正斜線)、`source_location`(`gnLine` 有值時輸出 `L<行>`)
@@ -55,7 +55,7 @@ data ExportReport = ExportReport
 4. **頂層欄位**:`directed: true`;`built_at_commit` 依 `CommitPolicy`
 5. **決定性**:同一 `CodeGraph` 序列化結果 byte 級相同(欄位順序、清單順序固定)
 
-#### 查詢面
+### 查詢面
 
 ```haskell
 loadQueryGraph :: FilePath -> IO (Either LoadError QueryGraph)
@@ -83,14 +83,14 @@ data QueryResult
 data LoadError                      -- 檔案不存在 / JSON 壞掉 / 必要欄位缺漏(帶說明文字)
 ```
 
-#### 查詢規則(契約的一部分)
+### 查詢規則(契約的一部分)
 
 1. **依賴類邊才進圖**:`Reachable` / `ShortestPath` / `RankConnectivity` 只走依賴類 relation(`imports`、`imports_from`、`calls`、`uses`、`references`、`extends`、`implements`、`inherits`、`instantiates`、`depends_on`);結構類(`contains`、`method`、`defines`)不算——與 dev-flow `scan-graph.mjs` 語意一致
 2. **未知 relation 列印排除**:載入時認不得的 relation 彙整列印(relation 名 + 邊數),不靜默吞掉(ADR-003 的下游行為)
 3. **`FindNodes`** 比對所有節點(含結構類邊連接的節點);其餘三指令操作依賴圖
 4. **決定性**:結果排序穩定(距離/度數同值時按 id 字典序)
 
-#### CLI 子命令對映(承接 system.md 頂層契約)
+### CLI 子命令對映(承接 system.md 頂層契約)
 
 ```text
 knot query find <keyword>            → FindNodes
@@ -101,7 +101,7 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
 
 參數解析屬 CLI 組裝層;本子系統收 `QueryCommand`。
 
-### 內部模組劃分(Internal Modules)
+## 內部模組劃分(Internal Modules)
 
 | 模組 | 單一職責 |
 |---|---|
@@ -110,7 +110,7 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
 | **query-engine** | 四種查詢演算法(純函數,BFS/度數統計) |
 | **query-render** | `QueryResult` → 人類可讀文字 |
 
-### 資料流管線(Data Flow Pipeline)
+## 資料流管線(Data Flow Pipeline)
 
 ```text
 匯出:CodeGraph(+ ExportOptions)
@@ -124,15 +124,15 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
 
 查詢面的錯誤策略:`LoadError` 屬「使用者給錯輸入」,直接失敗(exit 1)而非 best-effort——與匯出管線的 best-effort 區隔,因為沒有「部分查詢結果」可言;查無節點(`FindNodes` 空集合、`PathResult Nothing`)是正常結果,exit 0。
 
-### 模組間公開介面(Module Interfaces)
+## 模組間公開介面(Module Interfaces)
 
 對外契約的 `loadQueryGraph` / `runQuery` / `renderResult` 即是三個查詢模組的邊界介面;匯出面單一模組無內部介面。無額外條目。
 
-### 使用的技術
+## 使用的技術
 
 沿用主架構技術棧。子系統特有選型:**aeson** 做 JSON 讀寫——2026-08-20 實測在 GHC 9.14.1 編譯成功;instance 標頭等字串的 escaping 交給標準實作,匯出與查詢兩面共用。commit 偵測呼叫 `git rev-parse HEAD`(對目標專案唯讀,失敗即省略)。
 
-### 架構圖
+## 架構圖
 
 ```text
             CodeGraph                    codegraph.json 路徑 + QueryCommand
@@ -152,19 +152,19 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
  (repo 根目錄)
 ```
 
-### 開發階段
+## 開發階段
 
 對應主架構 S1(json-export)與 S4(graph-load、query-commands)。無額外內部里程碑。
 
-### 功能規劃
+## 功能規劃
 
-#### 階段一:S1 骨架
+### 階段一:S1 骨架
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
 | 1 | json-export | codegraph.json 投影、寫檔、commit 欄位、匯出報告 | export-writer | - | - |
 
-#### 階段二:S4 查詢 CLI
+### 階段二:S4 查詢 CLI
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
@@ -173,9 +173,9 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
 
 (共 3 個 features、2 個階段;全部完成即子系統可交付)
 
-### Feature 契約卡
+## Feature 契約卡
 
-#### json-export
+### json-export
 
 - **階段**:階段一
 - **負責模組**:export-writer
@@ -184,7 +184,7 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
 - **驗收標準**:輸出的 JSON 含 `directed: true`、每個節點有 `id`/`label`/`source_file`、每條邊有 `source`/`target`/`relation`/`confidence: "EXTRACTED"`;`gnLine` 有值的節點輸出 `source_location: "L<行>"`;在 git repo 內執行時頂層有 `built_at_commit` 且等於 `git rev-parse HEAD`,非 repo 時該欄位不存在且無警告;同一 `CodeGraph` 兩次序列化 byte 級相同;`xrNotes` 含 `GraphStats` 的丟棄/過濾/去重摘要;實際以 dev-flow 的 `scan-graph.mjs` 吃輸出檔驗證可解析
 - **明確不做**:不讀 JSON(graph-load 的事);不印 stdout/stderr(報告由 CLI 層印);不改 `CodeGraph` 內容;不輸出 IR 的額外欄位(型別等擴充留給未來)
 
-#### graph-load
+### graph-load
 
 - **階段**:階段二
 - **負責模組**:graph-load
@@ -193,7 +193,7 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
 - **驗收標準**:讀自家 json-export 的輸出成功;缺 `nodes` 或邊引用不存在的節點 id 時回 `LoadError` 且訊息指出問題;含未知 relation(如 `"foo"`)的檔案能載入、該類邊被排除且列印「relation 名 + 邊數」;`contains` 邊載入後不出現在依賴圖(以 reachable 驗證)
 - **明確不做**:不實作查詢演算法(query-commands 的事);不寫任何檔案;不嘗試修復壞 JSON(直接 `LoadError`)
 
-#### query-commands
+### query-commands
 
 - **階段**:階段二
 - **負責模組**:query-engine、query-render

@@ -10,9 +10,9 @@ parent: system
 related-adr: []
 ---
 
-## graph-core 子系統架構
+# graph-core 子系統架構
 
-### 定位與範圍
+## 定位與範圍
 
 管線第三站(見 system.md「子系統劃分 › graph-core」):吃 project-meta 的 `ProjectMeta` 與 extraction 的 `ExtractResult`,組裝成內部圖 IR `CodeGraph`,交給 export-query 投影。
 
@@ -20,7 +20,7 @@ related-adr: []
 
 **明確不做**:不讀檔案、不做任何 IO、不認識 `.hie` 或 SQLite(只認事實流)、不序列化(codegraph.json 是 export-query 的事)、不做 span 比對(fromDecl 已由 extraction 解析)。
 
-### 對外契約(Public Interface & DTOs)
+## 對外契約(Public Interface & DTOs)
 
 唯一進入點,**純函數**(無 IO,同輸入必同輸出):
 
@@ -71,7 +71,7 @@ data GraphStats = GraphStats
 
 `GraphWarning` 為警告文字(如「FactRef 目標無法解析到任何內部節點」的彙整)。
 
-#### 節點 id 鑄造規則(契約的一部分,一經發佈不可變)
+### 節點 id 鑄造規則(契約的一部分,一經發佈不可變)
 
 | 節點 | id 格式 | 例 |
 |---|---|---|
@@ -82,7 +82,7 @@ data GraphStats = GraphStats
 
 id 只由 `QualName`(module、occ、namespace)與 instance 標頭決定——同一份原始碼在任何機器、任何次編譯都鑄出相同 id。
 
-#### 組裝規則(契約的一部分)
+### 組裝規則(契約的一部分)
 
 1. **內部節點才實化**:只為「在 `pmSources` 有對應檔案」的 module 及其宣告建節點;指向外部(base、第三方套件)的邊**丟棄**,彙整進 `gsDroppedExternal` 與 `gsTopExternalTargets`,不靜默吞掉
 2. **邊推導表**:
@@ -103,7 +103,7 @@ id 只由 `QualName`(module、occ、namespace)與 instance 標頭決定——同
 6. **`moduleOnly`**:只輸出 module 節點與 `RImports` 邊(decl 層事實直接忽略,不計入統計)
 7. **決定性**:`cgNodes`、`cgEdges` 排序穩定
 
-### 內部模組劃分(Internal Modules)
+## 內部模組劃分(Internal Modules)
 
 | 模組 | 單一職責 |
 |---|---|
@@ -112,7 +112,7 @@ id 只由 `QualName`(module、occ、namespace)與 instance 標頭決定——同
 | **edge-derive** | 邊推導(規則 2)、自環丟棄(規則 4)、去重與證據行(規則 5) |
 | **graph-assemble** | `buildGraph` 進入點:調度前三者、`moduleOnly` 分流(規則 6)、統計與警告彙整、穩定排序(規則 7) |
 
-### 資料流管線(Data Flow Pipeline)
+## 資料流管線(Data Flow Pipeline)
 
 ```text
 ProjectMeta + ExtractResult(+ BuildOptions)
@@ -124,7 +124,7 @@ ProjectMeta + ExtractResult(+ BuildOptions)
 
 全程純函數,無 IO、無外部呼叫;警告以值的形式在管線中傳遞。
 
-### 模組間公開介面(Module Interfaces)
+## 模組間公開介面(Module Interfaces)
 
 ```haskell
 -- fact-gate:過濾與判定
@@ -150,11 +150,11 @@ data EdgeStats = EdgeStats
   }
 ```
 
-### 使用的技術
+## 使用的技術
 
 沿用主架構技術棧;無子系統特有選型——boot libs(`containers`)即足,全模組純函數。
 
-### 架構圖
+## 架構圖
 
 ```text
  ProjectMeta + ExtractResult + BuildOptions
@@ -174,19 +174,19 @@ data EdgeStats = EdgeStats
         CodeGraph → export-query
 ```
 
-### 開發階段
+## 開發階段
 
 對應主架構 S1(module 層)與 S3(decl 層、TH 過濾)。無額外內部里程碑。
 
-### 功能規劃
+## 功能規劃
 
-#### 階段一:S1 骨架
+### 階段一:S1 骨架
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
 | 1 | module-graph | CodeGraph DTO、buildGraph 進入點、module 節點與 imports 邊、外部丟棄統計 | graph-assemble、fact-gate、node-mint、edge-derive | - | - |
 
-#### 階段二:S3 decl 層
+### 階段二:S3 decl 層
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
@@ -195,9 +195,9 @@ data EdgeStats = EdgeStats
 
 (共 3 個 features、2 個階段;全部完成即子系統可交付)
 
-### Feature 契約卡
+## Feature 契約卡
 
-#### module-graph
+### module-graph
 
 - **階段**:階段一
 - **負責模組**:graph-assemble、fact-gate、node-mint、edge-derive
@@ -206,7 +206,7 @@ data EdgeStats = EdgeStats
 - **驗收標準**:以 fixture 事實流驗證——`import base 系 module` 的邊被丟棄且 `gsDroppedExternal`/`gsTopExternalTargets` 正確;重複 import 合併且 `gsDedupedEdges` 計數;module 自 import 不產邊;同輸入兩次呼叫結果完全相等(純函數);`moduleOnly = True/False` 在本階段輸出相同(尚無 decl 事實)
 - **明確不做**:不處理 `FactDecl`/`FactRef`/`FactInstance`(decl-nodes、decl-edges 的事,本階段忽略之但不 crash);不序列化 JSON;不印任何輸出(統計只放進 `GraphStats`)
 
-#### decl-nodes
+### decl-nodes
 
 - **階段**:階段二
 - **負責模組**:fact-gate、node-mint
@@ -215,7 +215,7 @@ data EdgeStats = EdgeStats
 - **驗收標準**:同名型別與值鑄出不同 id(`Demo.Core.Foo#t` vs `Demo.Core.Foo`);instance 節點 id 含渲染標頭且穩定;指向 `pmSources` 外檔案或行號 ≤ 0 的事實被濾除且 `gsFilteredGenerated` 計數;每個 decl 節點有一條來自所屬 module 的 `RContains`;`moduleOnly = True` 時 decl 節點與 `RContains` 完全不出現
 - **明確不做**:不推導 calls/uses/implements(decl-edges 的事);不改 module 層行為;不嘗試為外部名稱建節點
 
-#### decl-edges
+### decl-edges
 
 - **階段**:階段二
 - **負責模組**:edge-derive

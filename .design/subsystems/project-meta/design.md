@@ -10,9 +10,9 @@ parent: system
 related-adr: [ADR-001]
 ---
 
-## project-meta 子系統架構
+# project-meta 子系統架構
 
-### 定位與範圍
+## 定位與範圍
 
 管線第一站(見 system.md「子系統劃分 › project-meta」):把一個 Haskell 專案根目錄變成結構化的「專案描述」,供 extraction 決定要讀哪些檔、graph-core 決定哪些節點屬於納入範圍。
 
@@ -20,7 +20,7 @@ related-adr: [ADR-001]
 
 **明確不做**:不讀原始碼**內容**(module 對映靠路徑規則)、不讀 `.hie` **內容**(版本檢查屬 extraction)、不建圖、不觸發任何編譯。對目標專案一律唯讀。
 
-### 對外契約(Public Interface & DTOs)
+## 對外契約(Public Interface & DTOs)
 
 唯一進入點,呼叫者為 CLI 組裝層(結果轉交 extraction):
 
@@ -76,7 +76,7 @@ data HieInfo = HieInfo
 
 `MetaWarning` 為帶來源路徑的警告;`ComponentRef` 為 `(pkgName, compName)` 的參照。
 
-#### 判定規則(契約的一部分)
+### 判定規則(契約的一部分)
 
 1. **排除 kind**:`TestSuite`、`Benchmark` 預設 `compExcluded = True`,`includeTests = True` 時翻轉;其餘 kind 一律納入
 2. **一對多歸類**:檔案落在多個 component 的 `hs-source-dirs` 時,`sfOwners` 全列;**只要任一 owner 未排除即 `sfIncluded = True`**(例:particle-magic 的 `app/Main.hs` 同屬 executable 與 test-suite → 納入)
@@ -86,7 +86,7 @@ data HieInfo = HieInfo
 6. **幽靈判定**:`.hie` 相對路徑對映的 module 在 `pmSources` 中無對應原始檔 → 列入 `hieGhosts`,附警告,不交給下游
 7. **決定性**:同樣輸入產生同樣輸出,所有清單排序穩定
 
-### 內部模組劃分(Internal Modules)
+## 內部模組劃分(Internal Modules)
 
 | 模組 | 單一職責 |
 |---|---|
@@ -95,7 +95,7 @@ data HieInfo = HieInfo
 | **source-index** | 掃描檔案樹(略過 `dist-newstyle`、`.git` 等)、component 歸類、module 對映、排除判定 → `[SourceFile]` |
 | **hie-locate** | 三層 `.hie` 發現、`.hie` 檔列舉、幽靈過濾 → `HieInfo` |
 
-### 資料流管線(Data Flow Pipeline)
+## 資料流管線(Data Flow Pipeline)
 
 ```text
 root(MetaOptions)
@@ -108,7 +108,7 @@ root(MetaOptions)
 
 錯誤策略沿用全域 best-effort:任何一步失敗都降級為警告 + 部分結果,不中斷。
 
-### 模組間公開介面(Module Interfaces)
+## 模組間公開介面(Module Interfaces)
 
 ```haskell
 -- discovery
@@ -124,11 +124,11 @@ indexSources :: MetaOptions -> [PackageMeta] -> IO ([SourceFile], [MetaWarning])
 locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
 ```
 
-### 使用的技術
+## 使用的技術
 
 沿用主架構技術棧(GHC 9.14.1、GHC2024)。子系統特有選型:**Cabal boot library** 解析 `.cabal`——GHC 自帶、零第三方風險、`.cabal` 格式的權威實作,與 ADR-001 的取捨原則一致(沿用既有決策,不另開 ADR);檔案系統操作用 boot libs(`directory`、`filepath`)。
 
-### 架構圖
+## 架構圖
 
 ```text
  MetaOptions(root、--include-tests、--hiedir)
@@ -149,19 +149,19 @@ locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
                extraction
 ```
 
-### 開發階段
+## 開發階段
 
 對應主架構 S1(路徑掃描部分)與 S2(`.cabal` 整合、幽靈過濾);S3 的 hiedb 後端消費 `pmHie`。無額外內部里程碑。
 
-### 功能規劃
+## 功能規劃
 
-#### 階段一:S1 骨架
+### 階段一:S1 骨架
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
 | 1 | scan-baseline | ProjectMeta DTO、檔案樹掃描、大寫尾綴 module 對映、路徑啟發式排除 | discovery、source-index | - | - |
 
-#### 階段二:S2 .cabal 整合
+### 階段二:S2 .cabal 整合
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
@@ -170,9 +170,9 @@ locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
 
 (共 3 個 features、2 個階段;全部完成即子系統可交付)
 
-### Feature 契約卡
+## Feature 契約卡
 
-#### scan-baseline
+### scan-baseline
 
 - **階段**:階段一
 - **負責模組**:discovery、source-index
@@ -181,7 +181,7 @@ locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
 - **驗收標準**:對 particle-magic 與 MagicFarmer(皆唯讀)執行——列出全部 `.hs` 且 `dist-newstyle`、`.git` 內容不出現;`src/MagicFarmer/Render/Core.hs` 對映 `MagicFarmer.Render.Core`;`test/`、`bench/` 檔案 `sfIncluded = False` 且 `includeTests = True` 可翻轉;連續執行兩次輸出完全相同
 - **明確不做**:不解析 `.cabal` 內容(cabal-components 的事);不碰 `.hie`(hie-discovery 的事);不讀任何檔案內容;不處理多套件語意(僅回報找到的 `.cabal` 路徑)
 
-#### cabal-components
+### cabal-components
 
 - **階段**:階段二
 - **負責模組**:discovery、cabal-model、source-index
@@ -190,7 +190,7 @@ locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
 - **驗收標準**:對 particle-magic(唯讀)執行——列出 9 個 component(named library 2、executable 4、foreign-library 1、test-suite 1、benchmark 1);`app/` 下檔案 `sfOwners` 同時含 executable 與 test-suite 且 `sfIncluded = True`;僅屬 test-suite 的 `test/` 檔案 `sfIncluded = False`;多套件 `cabal.project` 能列出多個 `PackageMeta`(以臨時 fixture 專案驗證,不得改動驗收標的專案)
 - **明確不做**:不做非預設 flag 組合的 conditional 求值(以預設 flag 攤平);不解析 build-depends 依賴圖;不讀 `.hie`;不掃 `dist-newstyle` 內的原始碼
 
-#### hie-discovery
+### hie-discovery
 
 - **階段**:階段二
 - **負責模組**:hie-locate
