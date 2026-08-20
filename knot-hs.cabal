@@ -21,13 +21,19 @@ library
                       Knot.Graph.FactGate
                       Knot.Graph.NodeMint
                       Knot.Graph.EdgeDerive
+                      Knot.Export
+                      Knot.Export.Types
+                      Knot.Export.Encode
+                      Knot.Export.Commit
     build-depends:    base ^>=4.22
                     , Cabal ^>=3.16
                     , Cabal-syntax ^>=3.16
+                    , aeson ^>=2.3
                     , bytestring
                     , containers
                     , directory
                     , filepath
+                    , process
                     , text
     ghc-options:      -Wall
     default-language: GHC2024
@@ -48,12 +54,14 @@ test-suite knot-test
     main-is:          Main.hs
     other-modules:    Knot.App.Summary
     build-depends:    base ^>=4.22
+                    , aeson ^>=2.3
                     , bytestring
                     , containers
                     , directory
                     , filepath
                     , hedgehog
                     , knot-hs
+                    , process
                     , tasty
                     , tasty-hedgehog
                     , tasty-hunit

@@ -1,13 +1,19 @@
 -- | project-meta(F001 scan-baseline、F002 cabal-components、F003 hie-discovery)、
--- extraction(F001 fact-contract、F002 import-scan)與 graph-core(F001
--- module-graph)的 1-to-1 測試。
+-- extraction(F001 fact-contract、F002 import-scan)、graph-core(F001
+-- module-graph)與 export-query(F001 json-export)的 1-to-1 測試。
 module Main (main) where
 
 import Control.Exception (throwIO)
 import Control.Monad (forM_)
+import qualified Data.Aeson as A
+import qualified Data.Aeson.Key as AK
+import qualified Data.Aeson.KeyMap as AKM
 import qualified Data.ByteString as BS
-import Data.Char (isSpace)
+import qualified Data.ByteString.Builder as BB
+import qualified Data.ByteString.Lazy as BSL
+import Data.Char (isDigit, isSpace)
 import Data.Containers.ListUtils (nubOrd)
+import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (find, isInfixOf, isPrefixOf, sort, sortOn)
 import qualified Data.Map.Strict as Map
@@ -17,10 +23,13 @@ import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import System.Directory
   ( createDirectoryIfMissing
+  , doesFileExist
   , getTemporaryDirectory
   , removePathForcibly
   )
-import System.FilePath ((</>))
+import System.Exit (ExitCode (..))
+import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.Process (readProcessWithExitCode)
 
 import Hedgehog (Gen, evalIO, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
@@ -30,6 +39,15 @@ import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 import Test.Tasty.Hedgehog (testProperty)
 
 import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummary)
+import Knot.Export (writeCodegraph)
+import Knot.Export.Commit (detectCommit)
+import Knot.Export.Encode (encodeCodegraph, relationText, statsNotes)
+import Knot.Export.Types
+  ( CommitPolicy (..)
+  , ExportOptions (..)
+  , ExportReport (..)
+  , defaultOutputPath
+  )
 import Knot.Extract (extract)
 import Knot.Extract.Backend
   ( Backend (..)
@@ -57,6 +75,9 @@ import Knot.Extract.Types
   , NameSpace (..)
   , QualName (..)
   )
+-- 假設 A7:'ExportOptions' 與 'ExtractOptions' 的 @rootDir@ 同名,
+-- 記錄建構/更新語法可消歧、裸選擇器不行 → 裸取值走 qualified。
+import qualified Knot.Extract.Types as XT
 import Knot.Graph (buildGraph)
 import Knot.Graph.EdgeDerive (EdgeStats (..), deriveEdges)
 import Knot.Graph.FactGate (GatedFacts (..), gateFacts)
@@ -146,6 +167,7 @@ tests = testGroup "knot-hs"
   [ f001Tests, f002Tests, f003Tests
   , extractionF001Tests, extractionF002Tests
   , graphCoreF001Tests
+  , exportQueryF001Tests
   ]
 
 f001Tests :: TestTree
@@ -746,7 +768,7 @@ extractionF001Tests = testGroup "extraction/F001 fact-contract"
 testExtractTypesConstruct :: TestTree
 testExtractTypesConstruct = testCase "test_extract_types_construct" $ do
   let opts = extOpts Auto
-  rootDir opts       @?= projFixture
+  XT.rootDir opts    @?= projFixture
   backendChoice opts @?= Auto
   hiedbExe opts      @?= Nothing
   dbPath opts        @?= Nothing
@@ -1239,7 +1261,7 @@ scratchMeta = ProjectMeta
 testRunBestEffort :: TestTree
 testRunBestEffort = testCase "test_run_best_effort" $ do
   (facts, ws) <- withScratchTree $ \root ->
-    bRun importScanBackend ((extOpts Auto) { rootDir = root }) scratchMeta
+    bRun importScanBackend ((extOpts Auto) { XT.rootDir = root }) scratchMeta
   -- 正常檔的事實完整
   facts @?=
     [ FactModule "src/Good.hs" (mn "Scratch.Good")
@@ -1258,7 +1280,7 @@ testRunBestEffort = testCase "test_run_best_effort" $ do
     _ -> assertFailure ("expected exactly two warnings, got: " <> show ws)
   -- 經 extract 的真實 fixture:被排除檔不產生任何事實
   pm <- loadProjectMeta (defOpts compsFixture)
-  r <- extract ((extOpts Auto) { rootDir = compsFixture }) pm
+  r <- extract ((extOpts Auto) { XT.rootDir = compsFixture }) pm
   erWarnings r @?= []
   let excluded = map sfPath (filter (not . sfIncluded) (pmSources pm))
   assertBool "fixture must contain excluded files" (not (null excluded))
@@ -1273,13 +1295,13 @@ testImportScanDeterministic :: TestTree
 testImportScanDeterministic = testGroup "test_import_scan_deterministic"
   [ testCase "two consecutive bRun on the same ProjectMeta are identical" $ do
       (r1, r2) <- withScratchTree $ \root -> do
-        let opts = (extOpts Auto) { rootDir = root }
+        let opts = (extOpts Auto) { XT.rootDir = root }
         a <- bRun importScanBackend opts scratchMeta
         b <- bRun importScanBackend opts scratchMeta
         pure (a, b)
       r2 @?= r1
       pm <- loadProjectMeta (defOpts compsFixture)
-      let opts = (extOpts Auto) { rootDir = compsFixture }
+      let opts = (extOpts Auto) { XT.rootDir = compsFixture }
       c1 <- bRun importScanBackend opts pm
       c2 <- bRun importScanBackend opts pm
       c2 @?= c1
@@ -1670,7 +1692,7 @@ testBuildGraphDeterministic :: TestTree
 testBuildGraphDeterministic = testGroup "test_build_graph_deterministic"
   [ testCase "proj fixture: one module node per included file, pure" $ do
       pm <- loadProjectMeta (defOpts projFixture)
-      r <- extract ((extOpts Auto) { rootDir = projFixture }) pm
+      r <- extract ((extOpts Auto) { XT.rootDir = projFixture }) pm
       let included = filter sfIncluded (pmSources pm)
           g = buildGraph defBuildOpts pm r
       assertBool "fixture yields a non-empty fact stream" (not (null (erFacts r)))
@@ -1684,7 +1706,7 @@ testBuildGraphDeterministic = testGroup "test_build_graph_deterministic"
       buildGraph (BuildOptions { moduleOnly = True }) pm r @?= g
   , testCase "graph fixture: internal edges, external drops, dedupe, self-loop" $ do
       pm <- loadProjectMeta (defOpts graphFixture)
-      r <- extract ((extOpts Auto) { rootDir = graphFixture }) pm
+      r <- extract ((extOpts Auto) { XT.rootDir = graphFixture }) pm
       let g = buildGraph defBuildOpts pm r
       erWarnings r @?= []
       map gnId (cgNodes g) @?= graphFixtureNodeIds
@@ -1786,3 +1808,315 @@ testRenderGraphSummary = testCase "test_render_graph_summary" $ do
     (T.pack "  ! Main: declared in 2 source files" `T.isInfixOf` out)
   -- 輸出順序固定(決定性)
   renderGraphSummary g @?= out
+
+--------------------------------------------------------------------------------
+-- export-query/F001 json-export
+--------------------------------------------------------------------------------
+
+exportQueryF001Tests :: TestTree
+exportQueryF001Tests = testGroup "export-query/F001 json-export"
+  [ testExportTypesConstruct          -- T1
+  , testEncodeNodeEdge                -- T2
+  , testEncodeDocumentLayout          -- T3
+  , testDetectCommit                  -- T4
+  , testWriteCodegraphEntry           -- T5
+  , testExportEndToEndDeterministic   -- T6
+  ]
+
+-- | 手寫節點 / 邊 / 圖的測試捷徑。
+xNode :: String -> String -> FilePath -> Maybe Int -> GraphNode
+xNode i lbl f ln = GraphNode (nid i) ModuleNode (T.pack lbl) f ln
+
+xEdge :: String -> String -> Relation -> Maybe Int -> GraphEdge
+xEdge s t r ln = GraphEdge (nid s) (nid t) r ln
+
+zeroStats :: GraphStats
+zeroStats = GraphStats
+  { gsDroppedExternal    = 0
+  , gsTopExternalTargets = []
+  , gsFilteredGenerated  = 0
+  , gsDedupedEdges       = 0
+  }
+
+graphWith :: [GraphNode] -> [GraphEdge] -> CodeGraph
+graphWith ns es = CodeGraph
+  { cgNodes = ns, cgEdges = es, cgStats = zeroStats, cgWarnings = [] }
+
+-- | 'encodeCodegraph' 的輸出解成 Text(檔案內容是 UTF-8,無 BOM)。
+encodeText :: Maybe Text -> CodeGraph -> Text
+encodeText mc g =
+  TE.decodeUtf8 (BSL.toStrict (BB.toLazyByteString (encodeCodegraph mc g)))
+
+-- | 文件中的陣列元素行(縮排恰 4 空格),去掉縮排與元素分隔逗號後回傳
+-- (逗號與縮排本身由 T3 的整份 byte 級斷言負責)。
+elemLines :: Text -> [Text]
+elemLines =
+  map (dropComma . T.drop 4) . filter (T.pack "    " `T.isPrefixOf`) . T.lines
+ where
+  dropComma t
+    | T.pack "," `T.isSuffixOf` t = T.dropEnd 1 t
+    | otherwise                   = t
+
+-- | 在暫存目錄下建一個乾淨的工作目錄,跑完刪除。
+withExportDir :: String -> (FilePath -> IO a) -> IO a
+withExportDir name act = do
+  tmp <- getTemporaryDirectory
+  let root = tmp </> ("knot-hs-export-" <> name)
+  removePathForcibly root
+  createDirectoryIfMissing True root
+  r <- act root
+  removePathForcibly root
+  pure r
+
+-- | 測試自行呼叫一次 @git rev-parse HEAD@,避免把 sha 硬寫進測試。
+gitHeadOf :: FilePath -> IO (Maybe Text)
+gitHeadOf root = do
+  (code, out, _) <- readProcessWithExitCode "git" ["-C", root, "rev-parse", "HEAD"] ""
+  pure $ case code of
+    ExitSuccess   -> Just (T.strip (T.pack out))
+    ExitFailure _ -> Nothing
+
+-- export-query T1: 三個契約 DTO 的建構與欄位讀取、defaultOutputPath,
+-- 以及 ExportOptions.rootDir 與 ExtractOptions.rootDir 同名的可編譯性(假設 A7)
+testExportTypesConstruct :: TestTree
+testExportTypesConstruct = testCase "test_export_types_construct" $ do
+  let xo = ExportOptions
+        { rootDir      = "C:/proj"
+        , outputPath   = "C:/proj/codegraph.json"
+        , commitPolicy = AutoDetect
+        }
+  outputPath xo   @?= "C:/proj/codegraph.json"
+  commitPolicy xo @?= AutoDetect
+  -- 兩建構子互異且 Eq 可用
+  assertBool "AutoDetect /= NoCommit" (AutoDetect /= NoCommit)
+  (xo { commitPolicy = NoCommit } == xo) @?= False
+  (xo == xo) @?= True
+  let rep = ExportReport
+        { xrPath      = "out/codegraph.json"
+        , xrNodeCount = 3
+        , xrEdgeCount = 2
+        , xrNotes     = [T.pack "deduped edges: 0"]
+        }
+  xrPath rep      @?= "out/codegraph.json"
+  xrNodeCount rep @?= 3
+  xrEdgeCount rep @?= 2
+  xrNotes rep     @?= [T.pack "deduped edges: 0"]
+  (rep == rep)    @?= True
+  -- 非契約面 defaultOutputPath(不把平台分隔符寫死)
+  takeFileName  (defaultOutputPath "C:/proj") @?= "codegraph.json"
+  takeDirectory (defaultOutputPath "C:/proj") @?= "C:/proj"
+  -- 假設 A7:同時 import 兩個 Types 模組,記錄建構語法可消歧 rootDir
+  let eo = ExtractOptions
+        { rootDir       = "C:/proj"
+        , backendChoice = Auto
+        , hiedbExe      = Nothing
+        , dbPath        = Nothing
+        }
+  backendChoice eo @?= Auto
+
+-- export-query T2: 物件層——relation 對映、節點/邊欄位與順序、
+-- source_location 的兩分支(節點與邊皆有)、字串 escaping
+testEncodeNodeEdge :: TestTree
+testEncodeNodeEdge = testCase "test_encode_node_edge" $ do
+  -- 投影規則 1:五個建構子全部對映
+  map relationText [RImports, RCalls, RUses, RImplements, RContains]
+    @?= map T.pack ["imports", "calls", "uses", "implements", "contains"]
+  -- 規則 2 / 3 的欄位與順序(byte 級字串相等,順序才釘得住)
+  let g = graphWith
+        [ xNode "A" "A" "src/A.hs" Nothing
+        , xNode "B" "B" "src/B.hs" (Just 42)
+        ]
+        [ xEdge "A" "B" RImports Nothing
+        , xEdge "B" "A" RCalls (Just 7)
+        ]
+  elemLines (encodeText Nothing g) @?= map T.pack
+    [ "{\"id\":\"A\",\"label\":\"A\",\"source_file\":\"src/A.hs\"}"
+    , "{\"id\":\"B\",\"label\":\"B\",\"source_file\":\"src/B.hs\",\"source_location\":\"L42\"}"
+    , "{\"source\":\"A\",\"target\":\"B\",\"relation\":\"imports\",\"confidence\":\"EXTRACTED\"}"
+    , "{\"source\":\"B\",\"target\":\"A\",\"relation\":\"calls\",\"confidence\":\"EXTRACTED\",\"source_location\":\"L7\"}"
+    ]
+  -- 節點的 Nothing 分支確實不含該鍵;邊的 Nothing 分支同理(階段一閘門 A5 裁決)
+  case elemLines (encodeText Nothing g) of
+    [nA, nB, eAB, eBA] -> do
+      assertBool "node without gnLine has no source_location key"
+        (not (T.pack "source_location" `T.isInfixOf` nA))
+      assertBool "node with gnLine ends with source_location"
+        (T.pack ",\"source_location\":\"L42\"}" `T.isSuffixOf` nB)
+      assertBool "edge without geLine has no source_location key"
+        (not (T.pack "source_location" `T.isInfixOf` eAB))
+      assertBool "edge with geLine ends with source_location"
+        (T.pack ",\"source_location\":\"L7\"}" `T.isSuffixOf` eBA)
+    ls -> assertFailure ("expected 4 element lines, got: " <> show ls)
+  -- escaping:雙引號、反斜線、控制字元、非 ASCII 原樣 UTF-8
+  let ge = graphWith
+        [ GraphNode (NodeId (T.pack "q\"id")) ModuleNode
+            (T.pack "say \"hi\"\\p\n\1055\28450") "src/\28450.hs" Nothing
+        ] []
+  elemLines (encodeText Nothing ge) @?= [T.pack
+    ("{\"id\":\"q\\\"id\",\"label\":\"say \\\"hi\\\"\\\\p\\n\1055\28450\""
+      <> ",\"source_file\":\"src/\28450.hs\"}")]
+
+-- export-query T3: 文件層——半 pretty 版面、頂層欄位順序、
+-- built_at_commit 兩分支、空陣列壓行、檔尾換行;以及 statsNotes 的五種行
+testEncodeDocumentLayout :: TestTree
+testEncodeDocumentLayout = testCase "test_encode_document_layout" $ do
+  let g = graphWith
+        [ xNode "Demo.Core" "Demo.Core" "src/Demo/Core.hs" Nothing
+        , xNode "Main" "Main" "app/Main.hs" (Just 1)
+        ]
+        [ xEdge "Main" "Demo.Core" RImports (Just 6) ]
+      body =
+        [ "  \"nodes\": ["
+        , "    {\"id\":\"Demo.Core\",\"label\":\"Demo.Core\",\"source_file\":\"src/Demo/Core.hs\"},"
+        , "    {\"id\":\"Main\",\"label\":\"Main\",\"source_file\":\"app/Main.hs\",\"source_location\":\"L1\"}"
+        , "  ],"
+        , "  \"links\": ["
+        , "    {\"source\":\"Main\",\"target\":\"Demo.Core\",\"relation\":\"imports\",\"confidence\":\"EXTRACTED\",\"source_location\":\"L6\"}"
+        , "  ]"
+        , "}"
+        ]
+  -- Nothing:built_at_commit 整行不存在
+  encodeText Nothing g
+    @?= T.unlines (map T.pack (["{", "  \"directed\": true,"] <> body))
+  -- Just sha:第二行是 built_at_commit,連同其逗號
+  encodeText (Just (T.pack "deadbeef")) g @?= T.unlines (map T.pack
+    (["{", "  \"directed\": true,", "  \"built_at_commit\": \"deadbeef\","] <> body))
+  -- 空圖:兩個陣列壓成同一行
+  encodeText Nothing (graphWith [] []) @?= T.unlines (map T.pack
+    ["{", "  \"directed\": true,", "  \"nodes\": [],", "  \"links\": []", "}"])
+  -- 決定性的必要條件:輸出中沒有 CR(binary builder,不經平台換行轉換)
+  assertBool "no CR in output"
+    (not (T.pack "\r" `T.isInfixOf` encodeText Nothing g))
+  -- 驗收標準 5:statsNotes 的行序固定
+  statsNotes (GraphStats 12 [(mn "Data.Text", 7), (mn "Data.Map", 4)] 0 3)
+    @?= map T.pack
+      [ "dropped external edges: 12"
+      , "filtered generated facts: 0"
+      , "deduped edges: 3"
+      , "top external target: Data.Text (7)"
+      , "top external target: Data.Map (4)"
+      ]
+  statsNotes zeroStats @?= map T.pack
+    [ "dropped external edges: 0"
+    , "filtered generated facts: 0"
+    , "deduped edges: 0"
+    ]
+
+-- export-query T4: commit 偵測的四種情形;全程不印、不拋
+testDetectCommit :: TestTree
+testDetectCommit = testCase "test_detect_commit" $ do
+  -- NoCommit:對任何路徑都回 Nothing(連 git 都不跑)
+  detectCommit NoCommit "." >>= (@?= Nothing)
+  detectCommit NoCommit "no/such/path" >>= (@?= Nothing)
+  -- AutoDetect 對專案自身:值等於同一時刻 git rev-parse HEAD
+  expected <- gitHeadOf "."
+  actual   <- detectCommit AutoDetect "."
+  actual @?= expected
+  case actual of
+    Nothing  -> assertFailure "expected a commit sha inside knot-hs's own repo"
+    Just sha -> do
+      assertBool ("sha is lowercase hex: " <> show sha)
+        (T.all (\c -> isDigit c || (c >= 'a' && c <= 'f')) sha)
+      assertBool ("sha length in {40,64}: " <> show (T.length sha))
+        (T.length sha `elem` [40, 64])
+  -- AutoDetect 對「暫存目錄下的非 repo 目錄」:Nothing,且不外流 git 訊息
+  nonRepo <- withExportDir "nonrepo" (detectCommit AutoDetect)
+  nonRepo @?= Nothing
+  -- AutoDetect 對不存在的路徑:Nothing 而非拋例外
+  tmp <- getTemporaryDirectory
+  missing <- detectCommit AutoDetect (tmp </> "knot-hs-export-does-not-exist")
+  missing @?= Nothing
+
+-- export-query T5: 進入點——建父目錄、binary 寫檔、ExportReport 五項組裝
+testWriteCodegraphEntry :: TestTree
+testWriteCodegraphEntry = testCase "test_write_codegraph_entry" $ do
+  let g = (graphWith
+        [ xNode "Demo.Core" "Demo.Core" "src/Demo/Core.hs" Nothing
+        , xNode "Main" "Main" "app/Main.hs" (Just 1)
+        ]
+        [ xEdge "Main" "Demo.Core" RImports (Just 6) ])
+        { cgStats = GraphStats 4 [(mn "Data.Text", 3)] 0 2 }
+  withExportDir "entry" $ \dir -> do
+    -- 多層尚未建立的子路徑
+    let out = dir </> "a" </> "b" </> "codegraph.json"
+    rep <- writeCodegraph ExportOptions
+      { rootDir = dir, outputPath = out, commitPolicy = NoCommit } g
+    doesFileExist out >>= assertBool ("file written: " <> out)
+    -- 進入點沒有偷改內容或換行:與純函數輸出 byte 級相同
+    written <- BS.readFile out
+    written @?= BSL.toStrict (BB.toLazyByteString (encodeCodegraph Nothing g))
+    xrPath rep      @?= out
+    xrNodeCount rep @?= 2
+    xrEdgeCount rep @?= 1
+    xrNotes rep     @?= statsNotes (cgStats g)
+  -- AutoDetect 且 rootDir 指向專案自身:檔案含 built_at_commit 且等於 git HEAD
+  expected <- gitHeadOf "."
+  withExportDir "entry-commit" $ \dir -> do
+    let out = dir </> "codegraph.json"
+    _ <- writeCodegraph ExportOptions
+      { rootDir = ".", outputPath = out, commitPolicy = AutoDetect } g
+    txt <- TE.decodeUtf8 <$> BS.readFile out
+    case expected of
+      Nothing  -> assertFailure "expected a commit sha inside knot-hs's own repo"
+      Just sha -> assertBool ("built_at_commit line for " <> show sha)
+        (T.pack ("  \"built_at_commit\": \"" <> T.unpack sha <> "\",")
+           `T.isInfixOf` txt)
+
+-- export-query T6: 端到端真實檔案 + 決定性(驗收標準 1–4)
+testExportEndToEndDeterministic :: TestTree
+testExportEndToEndDeterministic =
+  testCase "test_export_end_to_end_deterministic" $ do
+    pm <- loadProjectMeta (defOpts graphFixture)
+    r  <- extract ((extOpts Auto) { XT.rootDir = graphFixture }) pm
+    let g = buildGraph defBuildOpts pm r
+    withExportDir "e2e" $ \dir -> do
+      let out  = dir </> "codegraph.json"
+          opts = ExportOptions
+            { rootDir = graphFixture, outputPath = out, commitPolicy = NoCommit }
+      _ <- writeCodegraph opts g
+      bytes1 <- BS.readFile out
+      -- 結構斷言(F002 graph-load 的 schema 前提)
+      top <- case A.decodeStrict bytes1 of
+        Just (A.Object o) -> pure o
+        other -> assertFailure ("top level is not a JSON object: " <> show other)
+      AKM.lookup (AK.fromString "directed") top @?= Just (A.Bool True)
+      AKM.lookup (AK.fromString "built_at_commit") top @?= Nothing
+      nodes <- objArray "nodes" top
+      links <- objArray "links" top
+      assertBool "nodes is non-empty" (not (null nodes))
+      assertBool "links is non-empty" (not (null links))
+      ids <- fmap Set.fromList $ mapM (nodeIdOf) nodes
+      forM_ links $ \e -> do
+        forM_ ["source", "target", "relation", "confidence"] $ \k ->
+          assertBool ("link has " <> k <> ": " <> show e)
+            (AKM.member (AK.fromString k) e)
+        AKM.lookup (AK.fromString "confidence") e
+          @?= Just (A.String (T.pack "EXTRACTED"))
+        -- 階段一閘門 A5 裁決:graph fixture 的邊都有 geLine → 都有 source_location
+        assertBool ("link has source_location: " <> show e)
+          (AKM.member (AK.fromString "source_location") e)
+        s <- strField "source" e
+        t <- strField "target" e
+        assertBool ("link source is a known node id: " <> show s) (s `Set.member` ids)
+        assertBool ("link target is a known node id: " <> show t) (t `Set.member` ids)
+      -- 驗收標準 4:同一 CodeGraph 兩次序列化 byte 級相同
+      _ <- writeCodegraph opts g
+      bytes2 <- BS.readFile out
+      bytes2 @?= bytes1
+      -- 反證:投影沿用輸入序而非自行排序
+      _ <- writeCodegraph opts
+        g { cgNodes = reverse (cgNodes g), cgEdges = reverse (cgEdges g) }
+      bytes3 <- BS.readFile out
+      assertBool "reversed input yields different bytes" (bytes3 /= bytes1)
+ where
+  objArray k o = case AKM.lookup (AK.fromString k) o of
+    Just (A.Array v) -> pure [m | A.Object m <- toList v]
+    other -> assertFailure (k <> " is not an array of objects: " <> show other)
+  nodeIdOf n = do
+    forM_ ["id", "label", "source_file"] $ \k ->
+      assertBool ("node has " <> k <> ": " <> show n)
+        (AKM.member (AK.fromString k) n)
+    strField "id" n
+  strField k o = case AKM.lookup (AK.fromString k) o of
+    Just (A.String t) -> pure t
+    other -> assertFailure (k <> " is not a string: " <> show other)
