@@ -30,7 +30,8 @@ extract :: ExtractOptions -> ProjectMeta -> IO ExtractResult
 
 ```haskell
 data ExtractOptions = ExtractOptions
-  { backendChoice :: BackendChoice     -- 對應 CLI --backend
+  { rootDir       :: FilePath           -- 專案根目錄(sfPath、hieFiles 等 repo 相對路徑的錨點)
+  , backendChoice :: BackendChoice     -- 對應 CLI --backend
   , hiedbExe      :: Maybe FilePath    -- 覆寫 hiedb 執行檔(預設查 PATH)
   , dbPath        :: Maybe FilePath    -- 覆寫索引位置(預設 <root>/.knot/hiedb.sqlite)
   }
@@ -106,7 +107,7 @@ data ExtractWarning = ExtractWarning   -- (批次澄清裁定,比照 MetaWarning
 3. **auto 合成**:import-scan 必跑;hiedb 探測通過(執行檔存在、`pmHie` 存在、相容性檢查過)則加跑,`erLevel = DeclLevel`;任一條件不成立記入 `BackendReport` 並降為 `ModuleLevel`。`ImportsOnly` / `HiedbOnly` 只跑指定後端(後者供除錯)
 4. **fromDecl 由後端解析**:`FactRef.frFromDecl` 在事實產出時即填好(hiedb 後端以 span 包含關係 join 得出);graph-core 不做 span 比對
 5. **相容性探測**:hiedb-driver 需能區分並回報「執行檔不存在」「索引失敗/`.hie` 版本不合」兩類不可用(探測手段屬 Level 3 自主權);extraction 是全系統唯一允許讀 `.hie` 內容的子系統
-6. **索引快取**:預設 `<root>/.knot/hiedb.sqlite`(目標專案內**唯一允許新建**的路徑,`dbPath` 可改道);索引重用交給 `hiedb index` 自身的增量機制
+6. **索引快取**:預設 `<root>/.knot/hiedb.sqlite`(目標專案內**唯一允許新建**的路徑,`dbPath` 可改道,root 取自 `ExtractOptions.rootDir`);索引重用交給 `hiedb index` 自身的增量機制
 7. **best-effort**:單檔解析失敗、單表查詢失敗 → 警告 + 跳過;整個後端失敗 → 降級 + 報告,不中斷
 8. **決定性**:事實流排序穩定,同樣輸入產生同樣輸出
 
