@@ -16,7 +16,7 @@ parent: extraction
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | fact-contract | design-done |
-| 階段一:S1 骨架 | W2 | import-scan | pending |
+| 階段一:S1 骨架 | W2 | import-scan | design-done |
 | 階段二:S3 函式級 | W3 | hiedb-driver | 本次不跑 |
 | 階段二:S3 函式級 | W4 | hiedb-facts | 本次不跑 |
 
@@ -36,7 +36,7 @@ parent: extraction
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
 | fact-contract | F001 | F001-fact-contract.md | opus(Fable 誤判中斷改派) | 繼承 | design-done |
-| import-scan | F002 | F002-import-scan.md | 繼承 | 繼承 | pending |
+| import-scan | F002 | F002-import-scan.md | opus(預防 Fable 誤判) | 繼承 | design-done |
 | hiedb-driver | F003 | F003-hiedb-driver.md | 繼承 | 繼承 | 本次不跑 |
 | hiedb-facts | F004 | F004-hiedb-facts.md | 繼承 | 繼承 | 本次不跑 |
 
@@ -51,6 +51,13 @@ parent: extraction
 | F001 A5 | 未選中的後端是否進 erReports | 進,brUsed=False + 未選中原因 | 待裁決 |
 | F001 A6 | 調度引擎需為測試匯出 | 比照 project-meta 慣例,haddock 註明非契約面 | 待裁決 |
 | F001 A7 | 本階段註冊表空,extract 回空事實流 | 視為階段一預期語意,T7 測試釘住 | 待裁決 |
+| F002 A1 | ExtractOptions/ProjectMeta 都不帶專案根目錄,後端開不了檔(sfPath 是 repo 相對) | 建議 ExtractOptions 增 rootDir;純核心 scanSource 不碰路徑 | **閘門必裁(同時卡 F003)** |
+| F002 A2 | fmModule 權威來源 | 以檔案 module 標頭為唯一權威,不與 sfModule 交叉比對 | 待裁決 |
+| F002 A3 | 讀檔/解碼失敗的檔案 | 不產生 FactModule(規則 7 優先) | 待裁決 |
+| F002 A4 | import 區邊界判定 | 第一個「第 0 欄、非空、非 import/module/CPP」的 token | 待裁決 |
+| F002 A5 | 重複與自我 import | 照字面出事實,不去重 | 待裁決 |
+| F002 A6 | 驗收方式 | 以 knot 手動唯讀實跑,app 層加 renderFactSummary | 待裁決 |
+| F002 A7 | 去註解狀態機範圍 | 只追字串字面量與巢狀區塊註解,不追字元字面量 | 待裁決 |
 
 ## 階段結果
 

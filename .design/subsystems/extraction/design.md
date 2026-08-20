@@ -194,7 +194,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
 | 1 | fact-contract | Fact DTO、後端抽象介面、能力分級、auto 選擇與降級合成 | backend-select | - | F001 |
-| 2 | import-scan | T0 後端:import 行解析、module 宣告事實 | import-scan | #1 | - |
+| 2 | import-scan | T0 後端:import 行解析、module 宣告事實 | import-scan | #1 | F002 |
 
 ### 階段二:S3 函式級
 
