@@ -1,11 +1,15 @@
--- | F001 scan-baseline 與 F002 cabal-components 的 1-to-1 測試。
+-- | project-meta(F001 scan-baseline、F002 cabal-components、F003 hie-discovery)
+-- 與 extraction(F001 fact-contract)的 1-to-1 測試。
 module Main (main) where
 
+import Control.Exception (throwIO)
 import Control.Monad (forM_)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (find, isInfixOf, isPrefixOf, sort)
 import qualified Data.Text as T
+import Data.Text (Text)
 
-import Hedgehog (forAll, property, (===))
+import Hedgehog (Gen, evalIO, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Test.Tasty (TestTree, defaultMain, testGroup)
@@ -13,6 +17,26 @@ import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 import Test.Tasty.Hedgehog (testProperty)
 
 import Knot.App.Summary (renderMetaSummary)
+import Knot.Extract (extract)
+import Knot.Extract.Backend
+  ( Backend (..)
+  , ProbeResult (..)
+  , hiedbName
+  , importScanName
+  , runBackends
+  )
+import Knot.Extract.Types
+  ( BackendChoice (..)
+  , BackendReport (..)
+  , CapabilityLevel (..)
+  , DeclKind (..)
+  , ExtractOptions (..)
+  , ExtractResult (..)
+  , ExtractWarning (..)
+  , Fact (..)
+  , NameSpace (..)
+  , QualName (..)
+  )
 import Knot.Meta (loadProjectMeta)
 import Knot.Meta.CabalModel (resolvePackage)
 import Knot.Meta.Discovery (findCabalFiles)
@@ -78,7 +102,7 @@ main :: IO ()
 main = defaultMain tests
 
 tests :: TestTree
-tests = testGroup "knot-hs" [f001Tests, f002Tests, f003Tests]
+tests = testGroup "knot-hs" [f001Tests, f002Tests, f003Tests, extractionF001Tests]
 
 f001Tests :: TestTree
 f001Tests = testGroup "F001 scan-baseline"
@@ -586,3 +610,348 @@ testLoadMetaHie = testCase "test_load_meta_hie" $ do
   pm2 <- loadProjectMeta (defOpts noCabalFixture)
   pmHie pm2 @?= Nothing
   map mwPath (pmWarnings pm2) @?= [noCabalFixture]
+
+--------------------------------------------------------------------------------
+-- extraction/F001 fact-contract
+--------------------------------------------------------------------------------
+
+extOpts :: BackendChoice -> ExtractOptions
+extOpts c = ExtractOptions
+  { rootDir       = projFixture
+  , backendChoice = c
+  , hiedbExe      = Nothing
+  , dbPath        = Nothing
+  }
+
+mn :: String -> ModuleName
+mn = ModuleName . T.pack
+
+qn :: String -> String -> NameSpace -> QualName
+qn m o s = QualName { qnModule = mn m, qnOcc = T.pack o, qnSpace = s }
+
+-- | 假後端:探測通過,回固定事實與警告。
+fakeOk :: Text -> CapabilityLevel -> [Fact] -> [ExtractWarning] -> Backend
+fakeOk n lvl fs ws = Backend
+  { bName  = n
+  , bLevel = lvl
+  , bProbe = \_ _ -> pure Available
+  , bRun   = \_ _ -> pure (fs, ws)
+  }
+
+-- | 假後端:探測失敗,原因指定。
+fakeUnavailable :: Text -> CapabilityLevel -> Text -> Backend
+fakeUnavailable n lvl reason =
+  (fakeOk n lvl [] []) { bProbe = \_ _ -> pure (Unavailable reason) }
+
+-- | 假後端:探測通過但 bRun 抛例外。
+fakeRunBoom :: Text -> CapabilityLevel -> String -> Backend
+fakeRunBoom n lvl msg =
+  (fakeOk n lvl [] []) { bRun = \_ _ -> throwIO (userError msg) }
+
+-- | 假後端:記錄自己被呼叫過哪些階段。
+tracingBackend :: IORef [Text] -> Text -> CapabilityLevel -> Backend
+tracingBackend tref n lvl = Backend
+  { bName  = n
+  , bLevel = lvl
+  , bProbe = \_ _ -> logCall (T.pack "probe") >> pure Available
+  , bRun   = \_ _ -> logCall (T.pack "run") >> pure ([], [])
+  }
+ where
+  logCall stage = modifyIORef' tref (++ [n <> T.pack ":" <> stage])
+
+-- | 假後端:捕獲實際收到的 ProjectMeta。
+capturingBackend :: IORef (Maybe ProjectMeta) -> Text -> Backend
+capturingBackend cref n =
+  (fakeOk n ModuleLevel [] []) { bRun = \_ pm -> writeIORef cref (Just pm) >> pure ([], []) }
+
+reportFor :: Text -> ExtractResult -> IO BackendReport
+reportFor n r = case find ((== n) . brBackend) (erReports r) of
+  Just br -> pure br
+  Nothing -> assertFailure ("no BackendReport for backend: " <> T.unpack n)
+
+-- | 刻意亂序的事實樣本(兩組,分屬兩個假後端)。
+factsA, factsB :: [Fact]
+factsA =
+  [ FactImport (mn "Z.Late") (mn "A.Early") "src/Z/Late.hs" 9
+  , FactModule "src/A/Early.hs" (mn "A.Early")
+  , FactModule "src/Z/Late.hs" (mn "Z.Late")
+  ]
+factsB =
+  [ FactRef (mn "Z.Late") (Just (qn "Z.Late" "go" ValueNs)) (qn "A.Early" "helper" ValueNs)
+      "src/Z/Late.hs" 21
+  , FactDecl (qn "A.Early" "helper" ValueNs) ValueDecl "src/A/Early.hs" 4
+  , FactInstance (qn "A.Early" "Renderable" TypeNs) (T.pack "Renderable Sprite")
+      "src/A/Early.hs" 30
+  ]
+
+emptyMeta :: ProjectMeta
+emptyMeta = ProjectMeta [] [] Nothing []
+
+extractionF001Tests :: TestTree
+extractionF001Tests = testGroup "extraction/F001 fact-contract"
+  [ testExtractTypesConstruct     -- T1
+  , testBackendIfaceConstruct     -- T2
+  , testIncludedScope             -- T3
+  , testProbeAndSelect            -- T4
+  , testBestEffortRun             -- T5
+  , testFactSynthesis             -- T6
+  , testExtractEntryEmptyRegistry -- T7
+  ]
+
+-- extraction T1: 建構每個 DTO(Fact 五個建構子全部)並驗證欄位取值
+testExtractTypesConstruct :: TestTree
+testExtractTypesConstruct = testCase "test_extract_types_construct" $ do
+  let opts = extOpts Auto
+  rootDir opts       @?= projFixture
+  backendChoice opts @?= Auto
+  hiedbExe opts      @?= Nothing
+  dbPath opts        @?= Nothing
+  ExtractOptions "." HiedbOnly (Just "hiedb.exe") (Just "db") @?=
+    ExtractOptions { rootDir = ".", backendChoice = HiedbOnly
+                   , hiedbExe = Just "hiedb.exe", dbPath = Just "db" }
+  -- QualName.qnModule 確為 Knot.Meta.Types.ModuleName(以該型別的值直接建構即證明共用)
+  let modName = ModuleName (T.pack "A.Early") :: ModuleName
+      q = QualName { qnModule = modName, qnOcc = T.pack "helper", qnSpace = ValueNs }
+  qnModule q @?= modName
+  qnOcc q    @?= T.pack "helper"
+  qnSpace q  @?= ValueNs
+  -- Fact 五個建構子
+  case FactModule "src/A/Early.hs" modName of
+    f@FactModule{} -> do
+      fmFile f   @?= "src/A/Early.hs"
+      fmModule f @?= modName
+  case FactImport modName (mn "Data.Text") "src/A/Early.hs" 3 of
+    f@FactImport{} -> do
+      fiFrom f @?= modName
+      fiTo f   @?= mn "Data.Text"
+      fiFile f @?= "src/A/Early.hs"
+      fiLine f @?= 3
+  case FactDecl q DataDecl "src/A/Early.hs" 4 of
+    f@FactDecl{} -> do
+      fdName f @?= q
+      fdKind f @?= DataDecl
+      fdFile f @?= "src/A/Early.hs"
+      fdLine f @?= 4
+  case FactRef modName (Just q) (qn "Z.Late" "go" ValueNs) "src/A/Early.hs" 5 of
+    f@FactRef{} -> do
+      frFromModule f @?= modName
+      frFromDecl f   @?= Just q
+      frTarget f     @?= qn "Z.Late" "go" ValueNs
+      frFile f       @?= "src/A/Early.hs"
+      frLine f       @?= 5
+  case FactInstance (qn "A.Early" "Renderable" TypeNs) (T.pack "Renderable Sprite")
+         "src/A/Early.hs" 6 of
+    f@FactInstance{} -> do
+      fiClass f    @?= qn "A.Early" "Renderable" TypeNs
+      fiInstHead f @?= T.pack "Renderable Sprite"
+      fiInstFile f @?= "src/A/Early.hs"
+      fiInstLine f @?= 6
+  -- DeclKind 七個建構子皆可建構且互異
+  length (sort [ValueDecl, DataDecl, ClassDecl, InstanceDecl, TypeSynDecl, PatSynDecl, FamilyDecl])
+    @?= 7
+  -- 回報 DTO
+  let br = BackendReport { brBackend = importScanName, brUsed = True, brDetail = T.empty }
+      ew = ExtractWarning { ewSource = hiedbName, ewMessage = T.pack "oops" }
+      res = ExtractResult { erFacts = factsA, erLevel = DeclLevel
+                          , erReports = [br], erWarnings = [ew] }
+  brBackend br   @?= importScanName
+  brUsed br      @?= True
+  brDetail br    @?= T.empty
+  ewSource ew    @?= hiedbName
+  ewMessage ew   @?= T.pack "oops"
+  erFacts res    @?= factsA
+  erLevel res    @?= DeclLevel
+  erReports res  @?= [br]
+  erWarnings res @?= [ew]
+  -- CapabilityLevel 的 Ord:ModuleLevel < DeclLevel
+  assertBool "ModuleLevel < DeclLevel" (ModuleLevel < DeclLevel)
+
+-- extraction T2: 假後端值的建構與呼叫;後端名常數等於契約字串
+testBackendIfaceConstruct :: TestTree
+testBackendIfaceConstruct = testCase "test_backend_iface_construct" $ do
+  importScanName @?= T.pack "import-scan"
+  hiedbName      @?= T.pack "hiedb"
+  let opts = extOpts Auto
+      ok   = fakeOk importScanName ModuleLevel factsA [ExtractWarning importScanName (T.pack "w")]
+      bad  = fakeUnavailable hiedbName DeclLevel (T.pack "hiedb not on PATH")
+  bName ok   @?= importScanName
+  bLevel ok  @?= ModuleLevel
+  bLevel bad @?= DeclLevel
+  pOk <- bProbe ok opts emptyMeta
+  pOk @?= Available
+  pBad <- bProbe bad opts emptyMeta
+  pBad @?= Unavailable (T.pack "hiedb not on PATH")
+  (fs, ws) <- bRun ok opts emptyMeta
+  fs @?= factsA
+  ws @?= [ExtractWarning importScanName (T.pack "w")]
+  (fs2, ws2) <- bRun bad opts emptyMeta
+  fs2 @?= []
+  ws2 @?= []
+
+-- extraction T3: 規則 1——後端只收到 sfIncluded = True 的檔;其餘欄位原樣
+testIncludedScope :: TestTree
+testIncludedScope = testCase "test_included_scope" $ do
+  pm <- loadProjectMeta (defOpts compsFixture)
+  assertBool "fixture must contain excluded files"
+    (any (not . sfIncluded) (pmSources pm))
+  cref <- newIORef Nothing
+  _ <- runBackends [capturingBackend cref importScanName] (extOpts Auto) pm
+  seen <- readIORef cref
+  case seen of
+    Nothing   -> assertFailure "backend never received a ProjectMeta"
+    Just pmIn -> do
+      assertBool "only included sources reach the backend"
+        (all sfIncluded (pmSources pmIn))
+      map sfPath (pmSources pmIn) @?= map sfPath (filter sfIncluded (pmSources pm))
+      pmPackages pmIn @?= pmPackages pm
+      pmHie pmIn      @?= pmHie pm
+      pmWarnings pmIn @?= pmWarnings pm
+
+-- extraction T4: 選擇與探測(規則 3)
+testProbeAndSelect :: TestTree
+testProbeAndSelect = testGroup "test_probe_and_select"
+  [ testCase "auto: failing probe reported, other backend still runs" $ do
+      let reason = T.pack "hiedb not on PATH"
+          reg = [ fakeOk importScanName ModuleLevel factsA []
+                , fakeUnavailable hiedbName DeclLevel reason ]
+      r <- runBackends reg (extOpts Auto) emptyMeta
+      brHiedb <- reportFor hiedbName r
+      brUsed brHiedb   @?= False
+      brDetail brHiedb @?= reason
+      brImport <- reportFor importScanName r
+      brUsed brImport @?= True
+      erFacts r @?= sort factsA
+      erLevel r @?= ModuleLevel
+  , testCase "auto: probe exception treated as unavailable, no crash" $ do
+      let reg = [ fakeOk importScanName ModuleLevel factsA []
+                , (fakeOk hiedbName DeclLevel [] [])
+                    { bProbe = \_ _ -> throwIO (userError "probe-boom") } ]
+      r <- runBackends reg (extOpts Auto) emptyMeta
+      brHiedb <- reportFor hiedbName r
+      brUsed brHiedb @?= False
+      assertBool "detail carries exception text"
+        (T.pack "probe-boom" `T.isInfixOf` brDetail brHiedb)
+      erLevel r @?= ModuleLevel
+      erWarnings r @?= []   -- 探測不可用不產警告
+  , testCase "HiedbOnly with unavailable hiedb: empty facts, no crash" $ do
+      let reason = T.pack "hiedb executable not found"
+          reg = [ fakeOk importScanName ModuleLevel factsA []
+                , fakeUnavailable hiedbName DeclLevel reason ]
+      r <- runBackends reg (extOpts HiedbOnly) emptyMeta
+      erFacts r @?= []
+      erLevel r @?= ModuleLevel
+      brHiedb <- reportFor hiedbName r
+      brUsed brHiedb   @?= False
+      brDetail brHiedb @?= reason
+      brImport <- reportFor importScanName r
+      brUsed brImport @?= False
+      assertBool "import-scan reported as not selected"
+        (T.pack "not selected" `T.isInfixOf` brDetail brImport)
+  , testCase "ImportsOnly: hiedb backend never invoked but still reported" $ do
+      traceRef <- newIORef []
+      let reg = [ fakeOk importScanName ModuleLevel factsA []
+                , tracingBackend traceRef hiedbName DeclLevel ]
+      r <- runBackends reg (extOpts ImportsOnly) emptyMeta
+      calls <- readIORef traceRef
+      calls @?= []
+      brHiedb <- reportFor hiedbName r
+      brUsed brHiedb @?= False
+      assertBool "hiedb reported as not selected"
+        (T.pack "not selected" `T.isInfixOf` brDetail brHiedb)
+      length (erReports r) @?= 2   -- 每個註冊後端剛好一筆
+      erFacts r @?= sort factsA
+  ]
+
+-- extraction T5: best-effort 執行(規則 7)
+testBestEffortRun :: TestTree
+testBestEffortRun = testGroup "test_best_effort_run"
+  [ testCase "throwing bRun degrades to report + warning, others survive" $ do
+      let selfWarn = ExtractWarning importScanName (T.pack "unreadable file: src/X.hs")
+          reg = [ fakeOk importScanName ModuleLevel factsA [selfWarn]
+                , fakeRunBoom hiedbName DeclLevel "run-boom" ]
+      r <- runBackends reg (extOpts Auto) emptyMeta
+      brHiedb <- reportFor hiedbName r
+      brUsed brHiedb @?= False
+      assertBool "detail carries exception text"
+        (T.pack "run-boom" `T.isInfixOf` brDetail brHiedb)
+      -- 後端自報的警告原樣出現,加上失敗後端的一則警告
+      case erWarnings r of
+        [w1, w2] -> do
+          w1 @?= selfWarn
+          ewSource w2 @?= hiedbName
+          assertBool "warning carries exception text"
+            (T.pack "run-boom" `T.isInfixOf` ewMessage w2)
+        ws -> assertFailure ("expected exactly two warnings, got: " <> show ws)
+      erFacts r @?= sort factsA   -- 正常後端的事實完整保留
+      erLevel r @?= ModuleLevel   -- 失敗後端不貢獻能力等級
+  , testCase "lazy exception inside the fact list is caught too" $ do
+      let boomBackend = (fakeOk hiedbName DeclLevel [] [])
+            { bRun = \_ _ ->
+                pure (FactModule "src/A/Early.hs" (mn "A.Early") : error "lazy-boom", []) }
+          reg = [fakeOk importScanName ModuleLevel factsA [], boomBackend]
+      r <- runBackends reg (extOpts Auto) emptyMeta
+      brHiedb <- reportFor hiedbName r
+      brUsed brHiedb @?= False
+      assertBool "detail carries lazy exception text"
+        (T.pack "lazy-boom" `T.isInfixOf` brDetail brHiedb)
+      erFacts r @?= sort factsA   -- 失敗後端的事實全數丟棄
+      length (erWarnings r) @?= 1
+  ]
+
+-- extraction T6: 合成(規則 8)
+testFactSynthesis :: TestTree
+testFactSynthesis = testGroup "test_fact_synthesis"
+  [ testCase "facts totally ordered, level takes the max of successful backends" $ do
+      let reg = [ fakeOk importScanName ModuleLevel factsA []
+                , fakeOk hiedbName DeclLevel factsB [] ]
+          opts = extOpts Auto
+      r1 <- runBackends reg opts emptyMeta
+      r2 <- runBackends reg opts emptyMeta
+      erFacts r1 @?= sort (factsA ++ factsB)
+      r2 @?= r1                    -- 同輸入連續兩次結果完全相同
+      erLevel r1 @?= DeclLevel
+      let fs = erFacts r1
+      assertBool "facts non-decreasing" (and (zipWith (<=) fs (drop 1 fs)))
+  , testCase "only the ModuleLevel backend succeeds -> ModuleLevel" $ do
+      let reg = [ fakeOk importScanName ModuleLevel factsA []
+                , fakeUnavailable hiedbName DeclLevel (T.pack "no hiedb") ]
+      r <- runBackends reg (extOpts Auto) emptyMeta
+      erLevel r @?= ModuleLevel
+  , testProperty "shuffling backend output does not change synthesis" $ property $ do
+      fs <- forAll (Gen.list (Range.linear 0 12) genFact)
+      shuffled <- forAll (Gen.shuffle fs)
+      let run xs = runBackends [fakeOk importScanName ModuleLevel xs []]
+                     (extOpts Auto) emptyMeta
+      base <- evalIO (run fs)
+      alt  <- evalIO (run shuffled)
+      erFacts alt === erFacts base
+  ]
+
+-- | T6 property 用的事實產生器(涵蓋全部五個建構子)。
+genFact :: Gen Fact
+genFact = Gen.choice
+  [ FactModule <$> genPath <*> genMod
+  , FactImport <$> genMod <*> genMod <*> genPath <*> genLine
+  , FactDecl <$> genQual <*> Gen.element
+      [ValueDecl, DataDecl, ClassDecl, InstanceDecl, TypeSynDecl, PatSynDecl, FamilyDecl]
+      <*> genPath <*> genLine
+  , FactRef <$> genMod <*> Gen.maybe genQual <*> genQual <*> genPath <*> genLine
+  , FactInstance <$> genQual <*> genOcc <*> genPath <*> genLine
+  ]
+ where
+  genMod  = ModuleName <$> genOcc
+  genOcc  = T.pack <$> Gen.string (Range.linear 1 4) Gen.alpha
+  genPath = Gen.string (Range.linear 1 6) Gen.alpha
+  genLine = Gen.int (Range.linear 1 200)
+  genQual = QualName <$> genMod <*> genOcc <*> Gen.element [ValueNs, TypeNs]
+
+-- extraction T7: 進入點與空註冊表(階段一語意)
+testExtractEntryEmptyRegistry :: TestTree
+testExtractEntryEmptyRegistry = testCase "test_extract_entry_empty_registry" $ do
+  pm <- loadProjectMeta (defOpts projFixture)
+  forM_ [Auto, ImportsOnly, HiedbOnly] $ \c -> do
+    r <- extract (extOpts c) pm
+    erFacts r    @?= []
+    erReports r  @?= []
+    erWarnings r @?= []
+    erLevel r    @?= ModuleLevel

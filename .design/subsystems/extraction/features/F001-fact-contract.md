@@ -3,7 +3,7 @@ id: F001
 type: feature
 title: fact-contract
 description: 抽取契約 DTO、後端抽象與 auto 探測降級合成
-status: open
+status: done
 created: 2026-08-20
 updated: 2026-08-20
 depends-on: [project-meta/F001]
@@ -47,7 +47,7 @@ extraction 子系統的第一個 feature:把 Level 2「對外契約」「事實�
 | 契約項 | 本 feature 的落實 |
 |---|---|
 | 對外契約 `extract :: ExtractOptions -> ProjectMeta -> IO ExtractResult` | 完整實作進入點;階段一語意:後端註冊表為空 → 回空事實 + 空報告 + `ModuleLevel` |
-| DTO `ExtractOptions`、`BackendChoice`、`ExtractResult`、`CapabilityLevel` | 首次定義,欄位與 design.md「對外契約」原文一致 |
+| DTO `ExtractOptions`、`BackendChoice`、`ExtractResult`、`CapabilityLevel` | 首次定義,欄位與 design.md「對外契約」原文一致(含階段一閘門後新增的 `ExtractOptions.rootDir`) |
 | 事實流 DTO `Fact`(五個建構子全部)、`QualName`、`NameSpace`、`DeclKind`、`BackendReport`、`ExtractWarning` | 首次定義,原文一致;`ExtractWarning` 依 D1 為 `{ ewSource, ewMessage }` |
 | `ModuleName` 共用 project-meta 契約 | 依 D2 直接 `import Knot.Meta.Types (ModuleName (..))`,不重複定義 |
 | 模組介面 `Backend`(`bName` / `bLevel` / `bProbe` / `bRun`)、`ProbeResult` | 首次定義,原文一致;本階段無實例(測試以假後端填充) |
@@ -160,7 +160,8 @@ extract :: ExtractOptions -> ProjectMeta -> IO ExtractResult
 
 ```haskell
 data ExtractOptions = ExtractOptions
-  { backendChoice :: BackendChoice
+  { rootDir       :: FilePath          -- 專案根目錄(契約變更,見「實作備註 › 契約變更」)
+  , backendChoice :: BackendChoice
   , hiedbExe      :: Maybe FilePath
   , dbPath        :: Maybe FilePath
   }
@@ -236,13 +237,13 @@ runBackends :: [Backend] -> ExtractOptions -> ProjectMeta -> IO ExtractResult
 
 ## TodoList
 
-- [ ] T1: `Knot.Extract.Types` 全部 DTO 定義(含 deriving 與 `ModuleName` 共用),`knot-hs.cabal` 加 `exposed-modules`,`cabal build all` 通過  `dep: project-meta/F001`
-- [ ] T2: `Knot.Extract.Backend` 的 `Backend`、`ProbeResult`、後端名常數定義  `dep: T1`
-- [ ] T3: 納入範圍窄化(規則 1):`pmSources` 濾為 `sfIncluded = True`,其餘欄位原樣  `dep: T1`
-- [ ] T4: 選擇與探測(規則 3):`BackendChoice` → 選中清單 → `bProbe` → 啟用清單 + 未選中/不可用的 `BackendReport`  `dep: T2, T3`
-- [ ] T5: best-effort 執行(規則 7):`bRun` 包例外 + 強制求值,失敗轉報告 + 警告且不中斷其他後端  `dep: T4`
-- [ ] T6: 合成(規則 8):事實流全序排序、警告/報告固定序、`erLevel` 取實際成功後端的最大能力等級  `dep: T5`
-- [ ] T7: `Knot.Extract.extract` 進入點與空註冊表(階段一語意寫入 haddock)  `dep: T6`
+- [x] T1: `Knot.Extract.Types` 全部 DTO 定義(含 deriving 與 `ModuleName` 共用),`knot-hs.cabal` 加 `exposed-modules`,`cabal build all` 通過  `dep: project-meta/F001`
+- [x] T2: `Knot.Extract.Backend` 的 `Backend`、`ProbeResult`、後端名常數定義  `dep: T1`
+- [x] T3: 納入範圍窄化(規則 1):`pmSources` 濾為 `sfIncluded = True`,其餘欄位原樣  `dep: T1`
+- [x] T4: 選擇與探測(規則 3):`BackendChoice` → 選中清單 → `bProbe` → 啟用清單 + 未選中/不可用的 `BackendReport`  `dep: T2, T3`
+- [x] T5: best-effort 執行(規則 7):`bRun` 包例外 + 強制求值,失敗轉報告 + 警告且不中斷其他後端  `dep: T4`
+- [x] T6: 合成(規則 8):事實流全序排序、警告/報告固定序、`erLevel` 取實際成功後端的最大能力等級  `dep: T5`
+- [x] T7: `Knot.Extract.extract` 進入點與空註冊表(階段一語意寫入 haddock)  `dep: T6`
 
 ## 1-to-1 測試對照表
 
@@ -265,7 +266,36 @@ runBackends :: [Backend] -> ExtractOptions -> ProjectMeta -> IO ExtractResult
 - A5: 未被 `backendChoice` 選中的後端是否進 `erReports`?契約說「各後端:用了/沒用 + 原因」→ 採取:進,`brUsed = False` 且原因為「未被 backendChoice 選中」→ 影響:若只報探測過的後端,改組裝一處
 - A6: 調度引擎 `runBackends` 需被假後端測試直接呼叫,但它不在 Level 2 模組間介面清單內 → 採取:比照 project-meta 既有慣例(`moduleNameFromPath`)以 haddock 註明「非契約面」匯出 → 影響:E001 型的內部匯出收斂機制落地時,一併搬遷
 - A7: 本階段註冊表為空,`extract` 對真實專案回空事實流 → 採取:視為階段一預期語意並寫入 haddock 與測試(T7),不臨時塞任何真後端 → 影響:無(F002 註冊 import-scan 後自然填實)
+- A8:(實作階段新增)後端**成功**執行時 `brDetail` 該填什麼?design.md 只定義「未用時的降級原因」 → 採取:`brUsed = True` 時 `brDetail = ""`(空 `Text`),不塞「ok」之類的字樣,讓「非空 detail」恆等於「有降級原因」 → 影響:若下游希望成功時也帶說明(如「掃了 N 個檔」),改 `runBackends` 組裝一處;`Backend` 簽名不變
 
 ## 實作備註
 
-(撰寫時留空)
+### 契約變更:`ExtractOptions.rootDir`(階段一閘門裁決)
+
+本文檔撰寫時 `ExtractOptions` 只有三個欄位;閘門裁決後編排者在 Level 2 契約(`design.md`,commit `aac1e06`)新增**第一個欄位** `rootDir :: FilePath`,本實作依裁決落實:
+
+```haskell
+data ExtractOptions = ExtractOptions
+  { rootDir       :: FilePath          -- 專案根目錄
+  , backendChoice :: BackendChoice
+  , hiedbExe      :: Maybe FilePath
+  , dbPath        :: Maybe FilePath
+  }
+```
+
+理由:後端從 `ProjectMeta` 拿到的 `sfPath` / `hieFiles` 都是 **repo 相對路徑**,原契約沒有任何錨點可供開檔;規則 6 的 `<root>/.knot/hiedb.sqlite` 同樣缺這個 root。`ExtractOptions` 是唯一同時流向兩個後端的參數,錨點放這裡最省。本欄位在階段一無邏輯觸碰(調度引擎不開檔),由 `F002` / `F003` 開始實際使用。上文「新增的介面」與「對應的 Level 2 契約」已同步更新。
+
+### 落實與文檔的差異(皆屬內部自主權,非契約偏離)
+
+- 調度引擎以內部型別 `Outcome`(報告 / 事實 / 警告 / `Maybe CapabilityLevel`)承載單一後端的結果,`runBackends` 只做 `mapM` + 合成;`narrowScope`、`isSelected`、`runOne`、`attempt`、`synthLevel` 為私有輔助函數,皆不匯出
+- `bProbe` 亦以 `evaluate` 求值後才判讀,與 `bRun` 一致(文檔只寫「包例外」);探測抛例外一律視同 `Unavailable`,原因取 `displayException`
+- `bRun` 的強制求值以 `evaluate (length fs)` / `evaluate (length ws)` 落實,惰性錯誤(如事實 list spine 中的 `error`)確實落在 `try` 內——已由 T5 第二條測試實證
+- 未選中原因文字定為 `"not selected by backendChoice"`(英文,比照 project-meta 既有警告文字慣例)
+- `-Wall` 對 `Fact` 的 partial record selector **未告警**(GHC 9.14.1),文檔預留的區域 pragma / pattern match 迴避手段用不上;library 與 test 皆零警告編譯
+
+### 驗收與回歸
+
+- `cabal build all` 零警告;`cabal test all` **44 個測試全通過**(project-meta 既有 31 個全綠、未動一行,extraction/F001 新增 13 個 leaf case)
+- 契約卡四項驗收標準逐條對應:1 → T4(a)、2 → T6、3 → T4(c)、4 → T6(兩次執行相等 + hedgehog shuffle property 100 cases)
+- `knot-hs.cabal` 只加三個 `exposed-modules`,`build-depends` 與 `version: 0.0.1.0` 未動(D4)
+- 驗收標的專案(MagicFarmer、particle-magic)未被觸碰;測試只用既有 `test/fixtures/`(`proj`、`comps`)
