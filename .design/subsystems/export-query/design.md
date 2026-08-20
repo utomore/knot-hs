@@ -123,7 +123,8 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
 
 ```text
 匯出:CodeGraph(+ ExportOptions)
-  → export-writer: 投影(規則 1–5)→ commit 偵測 → 寫 codegraph.json → ExportReport → CLI 層列印
+  → export-writer: commit 偵測 → 投影(規則 1–5)→ 寫 codegraph.json → ExportReport → CLI 層列印
+                   (commit 必須先偵測:built_at_commit 是投影輸出的頂層欄位)
 
 查詢:codegraph.json 路徑 + QueryCommand
   → graph-load:   讀檔 → 驗證 → 依賴類/結構類分流 → QueryGraph(壞檔 → LoadError,exit 1)

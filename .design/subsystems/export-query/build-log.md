@@ -15,7 +15,7 @@ parent: export-query
 
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
-| 階段一:S1 骨架 | W1 | json-export | design-done |
+| 階段一:S1 骨架 | W1 | json-export | impl-done |
 | 階段二:S4 查詢 CLI | W2 | graph-load | pending |
 | 階段二:S4 查詢 CLI | W3 | query-commands | pending |
 | 階段二:S4 查詢 CLI | W4 | cli-wiring | pending |
@@ -53,7 +53,7 @@ parent: export-query
 
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
-| json-export | F001 | F001-json-export.md | 繼承 | 繼承 | design-done |
+| json-export | F001 | F001-json-export.md | 繼承 | 繼承 | impl-done |
 | graph-load | F002 | F002-graph-load.md | 繼承 | 繼承 | pending |
 | query-commands | F003 | F003-query-commands.md | 繼承 | 繼承 | pending |
 | cli-wiring | F004 | F004-cli-wiring.md | 繼承 | 繼承 | pending |
@@ -65,18 +65,33 @@ parent: export-query
 | 來源 | 假設 | 採取的判斷 | 閘門裁決 |
 |---|---|---|---|
 | F001 A1 | Level 2 只列單一 `export-writer` 模組,但純函數投影 / IO 偵測 / 寫檔混一檔難測 | 拆 `Knot.Export` / `.Types` / `.Encode` / `.Commit` 四個 Haskell 模組 | **開工前接受**:Level 2 的 export-writer 是邏輯模組不等於單一檔案,比照 graph-core 拆 FactGate/NodeMint/EdgeDerive 的前例,屬實作自主權 |
-| F001 A2 | `outputPath` 非 `Maybe`,預設值由誰算未定 | `writeCodegraph` 視為權威值;另出非契約面 `defaultOutputPath :: FilePath -> FilePath` 給 F004 用 | 待閘門 |
-| F001 A3 | `cgWarnings` 若不進 `xrNotes` 就沒有通道被印出 | `xrNotes` 嚴守契約只放 `GraphStats`;警告由 F004 直接從 `CodeGraph` 取來印 | 待閘門 |
-| F001 A4 | `xrNotes` 行文格式未定 | 固定五種英文小寫行,對齊 `Summary.hs` 風格 | 待閘門 |
+| F001 A2 | `outputPath` 非 `Maybe`,預設值由誰算未定 | `writeCodegraph` 視為權威值;另出非契約面 `defaultOutputPath :: FilePath -> FilePath` 給 F004 用 | 接受 |
+| F001 A3 | `cgWarnings` 若不進 `xrNotes` 就沒有通道被印出 | `xrNotes` 嚴守契約只放 `GraphStats`;警告由 F004 直接從 `CodeGraph` 取來印 | 接受,**但通道現在是斷的**:已列為 F004 委派的硬性驗收項 |
+| F001 A4 | `xrNotes` 行文格式未定 | 固定五種英文小寫行,對齊 `Summary.hs` 風格 | 接受 |
 | F001 A5 | 投影規則 3 不輸出 `geLine`,但下游 `scan-graph.mjs:265` 以 `e.source_location ?? src.source_location` 取循環依賴證據行;S1 的 module 節點 `gnLine` 恆為 `Nothing`,兩層皆空 | 嚴守契約不輸出,列為建議修訂 Level 2 | **開工前裁決:輸出**。編排者複驗下游程式碼屬實,判定為契約起草漏欄(ADR-003 本就寫明 `source_location` 供循環依賴證據行用,IR 的 `geLine` 也已備好資料)。投影規則 3 與 json-export 契約卡已回寫 |
-| F001 A6 | git sha 驗證強度未定 | 去空白後要求字元全落在 `0-9a-f` 且長度 40 或 64 | 待閘門 |
-| F001 A7 | `ExportOptions.rootDir` 與既有 `ExtractOptions.rootDir` 同名 | 實測 GHC2024 內含 `DisambiguateRecordFields`:記錄建構語法可消歧、裸選擇器不行;一律用記錄建構語法,不新增擴充 | 待閘門 |
+| F001 A6 | git sha 驗證強度未定 | 去空白後要求字元全落在 `0-9a-f` 且長度 40 或 64 | 接受 |
+| F001 A7 | `ExportOptions.rootDir` 與既有 `ExtractOptions.rootDir` 同名 | 實測 GHC2024 內含 `DisambiguateRecordFields`:記錄建構語法可消歧、裸選擇器不行;一律用記錄建構語法,不新增擴充 | 接受(實作已更正該結論:改用 qualified import,見階段結果) |
 
 ## 階段結果
 
 ### 階段一:S1 骨架
 
-(待執行)
+- **F001 json-export**(設計繼承 / 實作繼承):Todo 6/6、測試 **69/69**(既有 63 全綠)、`-Wall` 零警告、版本號維持 `0.0.1.0`
+- 落地位置:`src/Knot/Export.hs` + `Knot/Export/{Types,Encode,Commit}.hs`(A1 拆分);`knot-hs.cabal` library 新增 `aeson ^>=2.3`、`process`
+- **契約補完(開工前裁決)**:A5 投影規則 3 增邊的 `source_location`,實作一字不差落地並補了兩分支測試
+- **D5 手動對帳通過**:`test/fixtures/graph` 走完整管線產出的真檔餵 `scan-graph.mjs`,3 節點 / 3 邊全部解析成功,`imports` relation 認得、`directed` 與 `built_at_commit` 都正確消費(還做了新鮮度比對)。編排者另行驗證輸出為 **0 CR / 14 LF**,Windows 上未被轉成 CRLF(投影規則 5 的必要條件)
+- **A7 的設計階段結論被實作推翻**:設計說「GHC2024 內含 `DisambiguateRecordFields`,記錄建構語法可消歧」,實作發現它**不涵蓋記錄更新**(GHC-99339)與裸選擇器(GHC-87543)。已改用 qualified import 解決(`test/Main.hs` 8 處)。教訓:spike 要覆蓋實際用法,不能只驗最簡案例
+- **arch-audit subsys 發現**(依嚴重度):
+  1. (中)A3 的警告通道在 F004 完成前是斷的——`writeCodegraph` 完全不碰 `cgWarnings`,若 F004 漏接,graph-core 的碰撞警告永遠不會被使用者看到。已列為 F004 委派的硬性驗收項
+  2. (中)非契約面公開匯出 4 個:`Knot.Export.Encode` 的 `encodeCodegraph` / `relationText` / `statsNotes`、`Knot.Export.Types` 的 `defaultOutputPath`。其中 `relationText` **目前只有測試在用**,屬 G-E001 的同型需求
+  3. (低)`design.md` 匯出管線敘述順序與實作相反且不可行:文檔寫「投影 → commit 偵測 → 寫檔」,但 `built_at_commit` 是投影的輸出欄位,commit 必須先偵測。實作為 commit → 投影 → 寫檔
+  4. (低)`writeCodegraph` 會自動建立輸出路徑的父目錄,契約未登記;預設路徑不會觸發,`--output` 指向不存在目錄時會在目標專案內建目錄
+  5. (低)`statsNotes` 放在 `Encode` 模組,但它產生的是報告文字不是 JSON 投影,輕微職責混雜(屬實作自主權,不強制改)
+  6. (低/觀察)`Encode` 直接 import `Knot.Meta.Types (ModuleName)`,成因是 graph-core 的 `GraphStats.gsTopExternalTargets` 在公開 DTO 透出上游型別。消費契約而非繞道,不算外洩
+  7. (資訊)`cabal test` 不加 `--enable-tests` 解不出 plan(`cabal.project` 只有 `packages: .`)。既有狀況,非本次造成
+  8. (資訊)各 `design.md` 的 frontmatter 都沒填 `code-paths`,將來拿 knot 掃自己時 `scan-graph.mjs` 會 0% 對映
+- **契約卡對帳**:負責模組、Level 2 介面、資料流段落與實作相符;`writeCodegraph` 簽名一字不差;三個 DTO 欄位與契約一致(含本次新增的 `rootDir`)
+- **本階段未驗到的事**(D3 的已知代價):沒有 CLI 入口,MagicFarmer / particle-magic 的唯讀實跑順延至 F004
 
 ### 階段二:S4 查詢 CLI
 
