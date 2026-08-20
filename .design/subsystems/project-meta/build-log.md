@@ -16,7 +16,7 @@ parent: project-meta
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | scan-baseline | impl-done |
-| 階段二:S2 .cabal 整合 | W2 | cabal-components, hie-discovery | pending |
+| 階段二:S2 .cabal 整合 | W2 | cabal-components, hie-discovery | design-done |
 
 無跨子系統依賴;開發者決定兩階段連貫跑完(各階段閘門照停)。
 
@@ -35,8 +35,8 @@ parent: project-meta
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
 | scan-baseline | F001 | F001-scan-baseline.md | 繼承 | 繼承 | impl-done |
-| cabal-components | F002 | F002-cabal-components.md | 繼承 | 繼承 | pending |
-| hie-discovery | F003 | F003-hie-discovery.md | 繼承 | 繼承 | pending |
+| cabal-components | F002 | F002-cabal-components.md | opus(Fable 誤判三連中斷後改派) | 繼承 | design-done |
+| hie-discovery | F003 | F003-hie-discovery.md | 繼承 | 繼承 | design-done |
 
 ## 待確認假設彙總
 
@@ -49,6 +49,23 @@ parent: project-meta
 | F001 A5 | 階段二 DTO 需先存在使型別完整 | 照 design.md 原文先行定義(零邏輯) | 接受 |
 | F001 A6 | 最小執行入口的參數範圍 | 手寫 getArgs 支援 PATH 與 --include-tests | 接受 |
 | F001 A7 | cabal 版本號未被指定 | 暫定 0.1.0.0(版本號依全域指示須由使用者裁定) | 裁定 0.0.1.0,已改 |
+| F003 A1 | 第 1/2 層目錄存在但無 .hie | 採用該層回 Just(空清單)+警告,不 fallback | 待裁決 |
+| F003 A2 | 路徑推不出 module 的 .hie | 留 hieFiles + 警告,不判幽靈 | 待裁決 |
+| F003 A3 | 三層皆未命中 | (Nothing, []) 不出警告 | 待裁決 |
+| F003 A4 | dist-newstyle 層多個 .hie 根 | hieDir = 最深共同祖先(要支援多根需 DTO 改 [FilePath],屬 L2 變更) | 待裁決 |
+| F003 A5 | hieDirOverride 相對路徑基準 | 以 root 為基準 | 待裁決 |
+| F003 A6 | 幽靈判定的母集 | 全體 pmSources 的 sfModule(不論 sfIncluded) | 待裁決 |
+| F003 A7 | override 在 root 外 | makeRelative 化簡,不成則原路徑正斜線化+警告 | 待裁決 |
+| F003 A8 | F002 不列入 depends-on | 未消費其介面;loadProjectMeta 接線依階段內序列(F002 → F003) | 待裁決 |
+| F002 A1 | resolvePackage 單一 FilePath 無法既可讀又 repo 相對 | 回相對 .cabal 自身目錄的結果,root 錨定由 Knot.Meta 負責 | 待裁決 |
+| F002 A2 | cabal.project glob(pkgs/*) | 不支援,含 * 的 entry 出警告略過 | 待裁決 |
+| F002 A3 | compName 前綴未定 | 比照 cabal target 語法 lib:/exe:/flib:/test:/bench: | 待裁決 |
+| F002 A4 | cabal.project 的 import: | 不追隨 | 待裁決 |
+| F002 A5 | 不屬任何 component 的檔案 | 退回 S1 尾綴法 + 路徑啟發式 | 待裁決 |
+| F002 A6 | Either 無法「成功且附警告」 | 非致命 PWarning 丟棄 | 待裁決 |
+| F002 A7 | finalizePD 回 Left | 警告 + 略過該套件,不 fallback 到 flatten | 待裁決 |
+| F002 A8 | buildable: False component | 照列,compExcluded 只依 kind | 待裁決 |
+| F002 A9 | particle-magic 的 app/ 實際有三個 owner(bench 也吃) | 依規則 2 全列;驗收「含」字判定 | 待裁決 |
 
 ## 階段結果
 
@@ -61,4 +78,4 @@ parent: project-meta
 
 ### 階段二:S2 .cabal 整合
 
-(待執行)
+- W2 設計:F003 完成;F002 首跑與續跑均遭 API 安全機制誤判中斷([reasoning_extraction] 誤報),以全新 agent 重跑(同 prompt、模型仍繼承)

@@ -174,8 +174,8 @@ locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 2 | cabal-components | Cabal boot lib 解析多套件多 component、一對多歸類、component 排除、精確 module 對映 | discovery、cabal-model、source-index | #1 | - |
-| 3 | hie-discovery | 三層 .hie 發現策略、.hie 清單、幽靈檔過濾 | hie-locate | #1 | - |
+| 2 | cabal-components | Cabal boot lib 解析多套件多 component、一對多歸類、component 排除、精確 module 對映 | discovery、cabal-model、source-index | #1 | F002 |
+| 3 | hie-discovery | 三層 .hie 發現策略、.hie 清單、幽靈檔過濾 | hie-locate | #1 | F003 |
 
 (共 3 個 features、2 個階段;全部完成即子系統可交付)
 
