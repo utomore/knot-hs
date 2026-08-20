@@ -1,0 +1,46 @@
+cabal-version:      3.4
+name:               knot-hs
+version:            0.1.0.0
+synopsis:           Haskell code knowledge graph generator for dev-flow
+build-type:         Simple
+
+library
+    hs-source-dirs:   src
+    exposed-modules:  Knot.Meta
+                      Knot.Meta.Types
+                      Knot.Meta.Discovery
+                      Knot.Meta.SourceIndex
+    build-depends:    base ^>=4.22
+                    , containers
+                    , directory
+                    , filepath
+                    , text
+    ghc-options:      -Wall
+    default-language: GHC2024
+
+executable knot
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    other-modules:    Knot.App.Summary
+    build-depends:    base ^>=4.22
+                    , knot-hs
+                    , text
+    ghc-options:      -Wall
+    default-language: GHC2024
+
+test-suite knot-test
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test, app
+    main-is:          Main.hs
+    other-modules:    Knot.App.Summary
+    build-depends:    base ^>=4.22
+                    , directory
+                    , filepath
+                    , hedgehog
+                    , knot-hs
+                    , tasty
+                    , tasty-hedgehog
+                    , tasty-hunit
+                    , text
+    ghc-options:      -Wall
+    default-language: GHC2024

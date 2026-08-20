@@ -1,0 +1,1 @@
+-- fixture: tree without cabal file

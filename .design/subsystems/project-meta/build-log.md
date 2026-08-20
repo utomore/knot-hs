@@ -15,7 +15,7 @@ parent: project-meta
 
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
-| 階段一:S1 骨架 | W1 | scan-baseline | design-done |
+| 階段一:S1 骨架 | W1 | scan-baseline | impl-done |
 | 階段二:S2 .cabal 整合 | W2 | cabal-components, hie-discovery | pending |
 
 無跨子系統依賴;開發者決定兩階段連貫跑完(各階段閘門照停)。
@@ -34,7 +34,7 @@ parent: project-meta
 
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
-| scan-baseline | F001 | F001-scan-baseline.md | 繼承 | 繼承 | design-done |
+| scan-baseline | F001 | F001-scan-baseline.md | 繼承 | 繼承 | impl-done |
 | cabal-components | F002 | F002-cabal-components.md | 繼承 | 繼承 | pending |
 | hie-discovery | F003 | F003-hie-discovery.md | 繼承 | 繼承 | pending |
 
@@ -48,6 +48,7 @@ parent: project-meta
 | F001 A4 | 原始碼副檔名範圍 | 只收 .hs,不含 .lhs | 待裁決 |
 | F001 A5 | 階段二 DTO 需先存在使型別完整 | 照 design.md 原文先行定義(零邏輯) | 待裁決 |
 | F001 A6 | 最小執行入口的參數範圍 | 手寫 getArgs 支援 PATH 與 --include-tests | 待裁決 |
+| F001 A7 | cabal 版本號未被指定 | 暫定 0.1.0.0(版本號依全域指示須由使用者裁定) | 待裁決 |
 
 ## 階段結果
 

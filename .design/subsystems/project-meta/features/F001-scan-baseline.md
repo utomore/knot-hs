@@ -3,7 +3,7 @@ id: F001
 type: feature
 title: scan-baseline
 description: 檔案樹掃描與大寫尾綴 module 對映,產出 S1 版 ProjectMeta
-status: open
+status: done
 created: 2026-08-20
 updated: 2026-08-20
 depends-on: []
@@ -195,15 +195,15 @@ renderMetaSummary :: ProjectMeta -> Text
 
 ## TodoList
 
-- [ ] T1: 專案骨架——`knot-hs.cabal`(library + `knot` executable + `knot-test` test-suite)、`cabal.project`,`cabal build all` 通過  `dep: -`
-- [ ] T2: `Knot.Meta.Types` 全部 DTO 定義(S1 四個 + 階段二先行定義)  `dep: T1`
-- [ ] T3: `Knot.Meta.Discovery.findCabalFiles`——根目錄 `*.cabal` 定位、無 `.cabal` 警告  `dep: T2`
-- [ ] T4: source-index 檔案樹走訪——D4 略過清單、repo 相對正斜線路徑、僅收 `.hs`  `dep: T2`
-- [ ] T5: 大寫尾綴 module 對映(純函數)  `dep: T2`
-- [ ] T6: 路徑啟發式排除與 `includeTests` 翻轉  `dep: T2`
-- [ ] T7: `indexSources` 組裝(T4+T5+T6)與決定性排序  `dep: T4, T5, T6`
-- [ ] T8: `Knot.Meta.loadProjectMeta` 管線組裝(discovery → source-index、警告彙整、`pmPackages = []`、`pmHie = Nothing`)  `dep: T3, T7`
-- [ ] T9: `knot` 執行檔——極簡 `getArgs` 解析(`PATH`、`--include-tests`)與 `renderMetaSummary` 摘要輸出  `dep: T8`
+- [x] T1: 專案骨架——`knot-hs.cabal`(library + `knot` executable + `knot-test` test-suite)、`cabal.project`,`cabal build all` 通過  `dep: -`
+- [x] T2: `Knot.Meta.Types` 全部 DTO 定義(S1 四個 + 階段二先行定義)  `dep: T1`
+- [x] T3: `Knot.Meta.Discovery.findCabalFiles`——根目錄 `*.cabal` 定位、無 `.cabal` 警告  `dep: T2`
+- [x] T4: source-index 檔案樹走訪——D4 略過清單、repo 相對正斜線路徑、僅收 `.hs`  `dep: T2`
+- [x] T5: 大寫尾綴 module 對映(純函數)  `dep: T2`
+- [x] T6: 路徑啟發式排除與 `includeTests` 翻轉  `dep: T2`
+- [x] T7: `indexSources` 組裝(T4+T5+T6)與決定性排序  `dep: T4, T5, T6`
+- [x] T8: `Knot.Meta.loadProjectMeta` 管線組裝(discovery → source-index、警告彙整、`pmPackages = []`、`pmHie = Nothing`)  `dep: T3, T7`
+- [x] T9: `knot` 執行檔——極簡 `getArgs` 解析(`PATH`、`--include-tests`)與 `renderMetaSummary` 摘要輸出  `dep: T8`
 
 ## 1-to-1 測試對照表
 
@@ -227,7 +227,10 @@ renderMetaSummary :: ProjectMeta -> Text
 - A4: 契約卡驗收只提 `.hs` → 採取:只收 `.hs`,不含 `.lhs` → 影響:若要支援 literate Haskell,改 source-index 副檔名判定與大寫尾綴法去副檔名一步
 - A5: 階段二 DTO(`PackageMeta` 等)本階段就照 design.md 原文定義(否則 `ProjectMeta` 型別不完整)→ 採取:先行定義、零邏輯 → 影響:F002/F003 若需改欄位屬 Level 2 契約變更,走編排者
 - A6: D1 說完整 CLI 參數解析不做,但驗收需要對真實專案翻轉 `includeTests` → 採取:`knot` 以手寫 `getArgs` 支援位置參數 `PATH` 與旗標 `--include-tests` 兩項,不引入解析套件 → 影響:後續正式 CLI feature 以正式解析器取代,語意不變
+- A7: cabal 版本號未在契約卡與委派決策中指定(使用者全域指示:版本號一律由使用者指定;本檔為新建,無既有版本可保留)→ 採取:暫定 `0.1.0.0` → 影響:使用者裁定後僅改 `knot-hs.cabal` 的 `version` 欄
 
 ## 實作備註
 
-(開發過程中與設計的偏差記錄於此,撰寫時留空)
+- `moduleNameFromPath`(判定規則 3 的純函數)自 `Knot.Meta.SourceIndex` 額外匯出,並於 haddock 標註「僅為 1-to-1 測試而匯出,非 Level 2 契約面」——T5 的 hedgehog property 需直接測純函數;不構成契約變更。
+- 驗收標的現況:MagicFarmer 現有檔案樹中不存在契約卡例子檔 `src/MagicFarmer/Render/Core.hs`(`src/MagicFarmer/Render/` 目錄存在、內含其他檔案);大寫尾綴對映改以同目錄實檔驗證(如 `src/MagicFarmer/Render/Camera.hs` → `MagicFarmer.Render.Camera`),契約卡原例路徑於 test fixture 中原樣覆蓋並通過(T5)。
+- 驗收結果(2026-08-20,兩標的皆唯讀,僅輸出至 knot-hs 側暫存):MagicFarmer——115 個 `.hs` 全列(與 find 對帳一致)、無 `dist-newstyle`/`.git` 洩漏、預設排除 60 檔且 `--include-tests` 全數翻轉為納入、連續兩次輸出完全相同。particle-magic——193 個 `.hs` 全列(對帳一致)、排除僅落在 `test/`(148)與 `bench/`(1)、`--include-tests` 後 0 排除、連續兩次輸出完全相同。

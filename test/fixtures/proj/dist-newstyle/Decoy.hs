@@ -1,0 +1,1 @@
+-- decoy: must never appear in scan results
