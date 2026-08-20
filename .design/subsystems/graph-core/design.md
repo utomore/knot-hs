@@ -191,7 +191,7 @@ data EdgeStats = EdgeStats
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 1 | module-graph | CodeGraph DTO、buildGraph 進入點、module 節點與 imports 邊、外部丟棄統計 | graph-assemble、fact-gate、node-mint、edge-derive | - | - |
+| 1 | module-graph | CodeGraph DTO、buildGraph 進入點、module 節點與 imports 邊、外部丟棄統計 | graph-assemble、fact-gate、node-mint、edge-derive | - | F001 |
 
 ### 階段二:S3 decl 層
 
