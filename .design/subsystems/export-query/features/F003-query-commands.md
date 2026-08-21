@@ -3,7 +3,7 @@ id: F003
 type: feature
 title: query-commands
 description: 四種導航查詢的演算法與查詢結果文字渲染
-status: open
+status: done
 created: 2026-08-21
 updated: 2026-08-21
 depends-on: [F002]
@@ -449,27 +449,27 @@ data QueryResult
 
 ## TodoList
 
-- [ ] T1: `Knot.Query.Types` 擴充三個契約 DTO(`QueryCommand` 四建構子、`Direction` 兩建構子、
+- [x] T1: `Knot.Query.Types` 擴充三個契約 DTO(`QueryCommand` 四建構子、`Direction` 兩建構子、
       `QueryResult` 四建構子,`Eq`/`Show`);建立 `Knot.Query.Engine` 與 `Knot.Query.Render`
       兩個模組骨架並加進 `knot-hs.cabal` library 的 `exposed-modules`(**build-depends 零新增**);
       `Knot.Query` 匯出清單加上 `runQuery` / `renderResult` / 三個 DTO;`version` 不動、
       executable 段不動;`cabal build all --enable-tests` 在 `-Wall` 下零警告  `dep: F002`
-- [ ] T2: `runQuery` 的 `FindNodes` 分支——關鍵字與 id / label 兩邊 `T.toLower` 後
+- [x] T2: `runQuery` 的 `FindNodes` 分支——關鍵字與 id / label 兩邊 `T.toLower` 後
       `isInfixOf`,命中即收錄;輸出沿 `qgNodes` 的 id 升序;掃全部節點(含只被結構邊連到者);
       空關鍵字回全部節點  `dep: T1`
-- [ ] T3: `runQuery` 的 `Reachable` 分支——`Forward`/`Reverse` 分別走 `qgForward`/`qgReverse`;
+- [x] T3: `runQuery` 的 `Reachable` 分支——`Forward`/`Reverse` 分別走 `qgForward`/`qgReverse`;
       逐層 BFS 記錄 hop 距離;起點不入結果但**可經由環以真實距離出現**(規則 5);
       起點不存在回空集合;輸出依 (距離, id) 升序  `dep: T1`
-- [ ] T4: `runQuery` 的 `ShortestPath` 分支——FIFO 發現序 BFS(鄰居沿用 `qgForward` 的升序、
+- [x] T4: `runQuery` 的 `ShortestPath` 分支——FIFO 發現序 BFS(鄰居沿用 `qgForward` 的升序、
       層內不重排)+ 首次發現寫入前驅 + 回溯重建;連通回 `Just [from … to]`、不連通與
       端點不存在回 `Nothing`、`from == to` 回 `Just [from]`;等長多解取**字典序最小**(規則 6)
       `dep: T1`
-- [ ] T5: `runQuery` 的 `RankConnectivity` 分支——度數取 `qgInDeg`/`qgOutDeg`(邊數語意,不重算);
+- [x] T5: `runQuery` 的 `RankConnectivity` 分支——度數取 `qgInDeg`/`qgOutDeg`(邊數語意,不重算);
       依 (總度數降序, id 升序) 排序後 `take n`;排除總度數 0 的節點;`n <= 0` 回空清單  `dep: T1`
-- [ ] T6: `Knot.Query.Render.renderResult`——四個建構子的行格式、空結果只出首行、
+- [x] T6: `Knot.Query.Render.renderResult`——四個建構子的行格式、空結果只出首行、
       `PathResult Nothing` 出 `path: not connected`、路徑行的 ` -> ` 串接與 hop 數計算;
       `T.unlines` 產出(每行 `\n` 結尾)、全程不印  `dep: T1`
-- [ ] T7: 決定性與「只走依賴類邊」的總驗收——fixture 圖上四個查詢連跑兩次結果相等;
+- [x] T7: 決定性與「只走依賴類邊」的總驗收——fixture 圖上四個查詢連跑兩次結果相等;
       `contains` 與未知 relation 邊不影響 `reachable` / `path` / `rank` 的任何結果;
       hedgehog 隨機圖屬性測試(同輸入同輸出、`Reachable` 距離恆 ≥ 1、路徑首尾正確且每一步都在
       `qgForward` 中)  `dep: T2, T3, T4, T5`
@@ -528,5 +528,48 @@ data QueryResult
 
 ## 實作備註
 
-(撰寫時留空;開發過程中與設計的偏差記錄於此。非契約面公開匯出的清單已預先登記在
-「新增的介面 › 非契約面」,供 build-log 階段一發現 2 所指的 `G-E001` 一併收斂。)
+非契約面公開匯出的清單已預先登記在「新增的介面 › 非契約面」,供 build-log 階段一
+發現 2 所指的 `G-E001` 一併收斂。
+
+### `F002` 真實簽名複驗(2026-08-21,設計時 `F002` 尚未實作)
+
+「使用到的既有串接介面」表中標注「來源文檔 = F002」的五列,已對落地後的原始碼逐一複驗,
+**五列全部一字不差,無任何落差**:
+
+| 設計文檔記載的簽名 | 真實原始碼位置 | 結果 |
+|---|---|---|
+| `QueryGraph` 七欄位 | `src/Knot/Query/Types.hs:49-58` | 一致(另 `deriving (Eq, Show)`,設計未寫但不影響) |
+| `QueryNode { qnId, qnLabel, qnFile }` | `src/Knot/Query/Types.hs:31-36` | 一致 |
+| `newtype NodeId = NodeId Text deriving (Eq, Ord, Show)` | `src/Knot/Query/Types.hs:26-27` | 一致 |
+| `parseQueryGraph :: FilePath -> ByteString -> Either LoadError QueryGraph` | `src/Knot/Query/Load.hs:115` | 一致 |
+| `LoadError` 三建構子 | `src/Knot/Query/Types.hs:64-68` | 一致 |
+
+唯一與設計文稿的細節差異(**不是契約落差**):`Knot.Query.Types` 只匯出 `NodeId (..)` 的
+建構子,**沒有 `unNodeId` 具名選擇器**(`F002` 的 `unNodeId` 是 `Knot.Query.Load` 的私有函數)。
+設計文檔「FindNodes」與「renderResult」段落的虛擬碼寫了 `unNodeId (qnId n)`——落地時
+`Knot.Query.Engine` 與 `Knot.Query.Render` 各自以匯出的建構子做模式比對定義同名私有函數。
+屬實作自主權範圍,契約零變動。
+
+### `F002` 實作階段確立、設計文檔未寫到的兩條語意(已遵守)
+
+1. **鄰接表 / 度數的「缺鍵」語意**:`qgForward` / `qgReverse` / `qgOutDeg` / `qgInDeg`
+   只收錄**實際有依賴邊**的節點,無邊者是**缺鍵**而非空清單 / 0。本 feature 取值一律走
+   `Map.findWithDefault [] n` / `Map.findWithDefault 0 n`;「全部節點」一律走
+   `qgNodes`(`FindNodes`、`RankConnectivity` 的來源)與 `qgIndex`(端點存在性判定)
+2. **鄰接表已去重且升序、度數已是邊數**:BFS 直接取用,**不重排、不重算**
+
+### 其他
+
+- `design.md` 查詢規則 6 的措辭在本 feature 開工前收緊(「展開某個節點時把鄰居依 id 排序後
+  入列」vs「把整層佇列依 id 重排」),與本文檔的歸納證明與 T4 反例 fixture **一致**,
+  照原設計實作,零改動
+- T4 的反例 fixture 已做**機械性反向驗證**:把 `Knot.Query.Engine` 的層內順序臨時改成
+  `sort (map fst fresh)`(即「整層佇列依 id 重排」),`test_query_path` 立即失敗於
+  `expected: Just [S,Alpha,Xray,T] but got: Just [S,Beta,Whisky,T]`,確認這條斷言真的擋得住
+  退化實作;驗證後已還原
+- `renderResult` 對 `PathResult (Just [])` 的防禦性處理:該值不可能來自 `runQuery`
+  (路徑恆含起點與終點),但為維持全函數且不產生一條空白明細行,落地為「只出
+  `path: 0 hops` 首行」,T6 有一條斷言釘住
+- 既有 74 個測試全綠,本 feature 新增 10 個(T1–T6 各 1、T7 四個子項),合計 **84 個全數通過**
+- 本次改動的新程式碼**零警告**;`test/Main.hs` 既有的 8 筆 `-Wincomplete-record-selectors`
+  (extraction `Fact` 部分選擇器)未觸碰,行號因新增 import 而由 ~1200/~1327 位移至 ~1206/~1333

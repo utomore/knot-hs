@@ -13,6 +13,9 @@ module Knot.Query.Types
   ( -- * 對外契約
     LoadError (..)
   , QueryGraph (..)
+  , QueryCommand (..)
+  , Direction (..)
+  , QueryResult (..)
     -- * 非契約面(F003 \/ F004 取用,見「新增的介面 › 非契約面」)
   , NodeId (..)
   , QueryNode (..)
@@ -65,4 +68,26 @@ data LoadError
   = LoadFileMissing Text   -- ^ 檔案不存在 / 讀不到
   | LoadParseError  Text   -- ^ JSON 語法壞掉
   | LoadSchemaError Text   -- ^ 必要欄位缺漏、型別不對、邊引用不存在的節點 id
+  deriving (Eq, Show)
+
+-- | 四種查詢指令(Level 2 契約原文)。CLI 參數解析(@--reverse@ \/ @--top N@
+-- 與其預設值)屬組裝層 @F004@;本子系統收到的已經是建好的 'QueryCommand'。
+data QueryCommand
+  = FindNodes Text                  -- ^ 關鍵字:id 與 label 的子字串比對,__不分大小寫__
+  | Reachable NodeId Direction      -- ^ 可達集合,__不含起點自身__(查詢規則 5)
+  | ShortestPath NodeId NodeId      -- ^ 兩點最短路徑,多解取字典序最小(查詢規則 6)
+  | RankConnectivity Int            -- ^ 連通度排名,參數為 top N
+  deriving (Eq, Show)
+
+-- | 'Forward':它依賴誰(走 'qgForward');'Reverse':誰依賴它(走 'qgReverse')。
+data Direction = Forward | Reverse
+  deriving (Eq, Show)
+
+-- | 查詢結果(Level 2 契約原文)。空集合與 'Nothing' 都是__正常結果__
+-- (查無節點 exit 0,由 @F004@ 決定);'runQuery' 沒有失敗路徑。
+data QueryResult
+  = FoundNodes   [(NodeId, Text, FilePath)]  -- ^ id、label、@source_file@;依 id 升序
+  | ReachableSet [(NodeId, Int)]             -- ^ 節點與 hop 距離(≥ 1);依 (距離, id) 升序
+  | PathResult   (Maybe [NodeId])            -- ^ 含起點與終點;'Nothing' = 不連通
+  | Ranking      [(NodeId, Int, Int)]        -- ^ 節點、入度、出度;依 (總度數降序, id 升序)
   deriving (Eq, Show)

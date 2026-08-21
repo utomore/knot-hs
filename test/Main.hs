@@ -1,6 +1,7 @@
 -- | project-meta(F001 scan-baseline、F002 cabal-components、F003 hie-discovery)、
 -- extraction(F001 fact-contract、F002 import-scan)、graph-core(F001
--- module-graph)與 export-query(F001 json-export、F002 graph-load)的 1-to-1 測試。
+-- module-graph)與 export-query(F001 json-export、F002 graph-load、
+-- F003 query-commands)的 1-to-1 測試。
 module Main (main) where
 
 import Control.Exception (throwIO)
@@ -15,7 +16,7 @@ import Data.Char (isDigit, isSpace)
 import Data.Containers.ListUtils (nubOrd)
 import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (find, isInfixOf, isPrefixOf, sort, sortOn)
+import Data.List (find, intercalate, isInfixOf, isPrefixOf, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -31,7 +32,7 @@ import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.Process (readProcessWithExitCode)
 
-import Hedgehog (Gen, evalIO, forAll, property, (===))
+import Hedgehog (Gen, annotate, assert, evalIO, failure, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 import Test.Tasty (TestTree, defaultMain, testGroup)
@@ -112,6 +113,10 @@ import Knot.Meta.Types
   , SourceFile (..)
   )
 import Knot.Query (loadQueryGraph)
+-- F003:同時對 'Knot.Query' 的匯出面與兩個內部模組下斷言,故進入點走 qualified。
+import qualified Knot.Query as KQ
+import Knot.Query.Engine (runQuery)
+import Knot.Query.Render (renderResult)
 import Knot.Query.Load
   ( RelationClass (..)
   , classifyRelation
@@ -182,6 +187,7 @@ tests = testGroup "knot-hs"
   , graphCoreF001Tests
   , exportQueryF001Tests
   , exportQueryF002Tests
+  , exportQueryF003Tests
   ]
 
 f001Tests :: TestTree
@@ -2408,3 +2414,432 @@ testLoadQueryGraphIoRoundtrip = testCase "test_load_query_graph_io_roundtrip" $
     -- (d) 規則 4:同一個檔案載入兩次結果相等
     again <- loadQueryGraph out
     again @?= Right q
+
+--------------------------------------------------------------------------------
+-- export-query / F003 query-commands
+--------------------------------------------------------------------------------
+
+exportQueryF003Tests :: TestTree
+exportQueryF003Tests = testGroup "export-query/F003 query-commands"
+  [ testQueryCommandTypes  -- T1
+  , testQueryFind          -- T2
+  , testQueryReachable     -- T3
+  , testQueryPath          -- T4
+  , testQueryRank          -- T5
+  , testRenderResult       -- T6
+  , testQueryDeterminism   -- T7
+  ]
+
+--------------------------------------------------------------------------------
+-- F003 fixture 圖:不手寫 QueryGraph,改手寫 codegraph.json 走 parseQueryGraph
+-- (三條不變式——鄰接去重升序、度數算邊數、節點依 id 升序——由載入層保證)
+--------------------------------------------------------------------------------
+
+jsonNode :: String -> String -> String -> String
+jsonNode i l f = concat
+  ["{\"id\":\"", i, "\",\"label\":\"", l, "\",\"source_file\":\"", f, "\"}"]
+
+jsonLink :: String -> String -> String -> String
+jsonLink s t r = concat
+  ["{\"source\":\"", s, "\",\"target\":\"", t, "\",\"relation\":\"", r, "\"}"]
+
+fixtureJson :: [String] -> [String] -> String
+fixtureJson ns ls = concat
+  [ "{\"directed\":true,\"nodes\":[", intercalate "," ns
+  , "],\"links\":[", intercalate "," ls, "]}"
+  ]
+
+-- | 10 個節點,JSON 中刻意__依 id 降序__排列,以證明輸出序不是檔案原序;
+-- label 與 id 刻意不同,才分得開「比對 id」與「比對 label」。
+fixtureNodes :: [String]
+fixtureNodes =
+  [ jsonNode "Xray"   "Xray.Impl"     "src/Xray.hs"
+  , jsonNode "Whisky" "Whisky.Impl"   "src/Whisky.hs"
+  , jsonNode "T"      "Target.Module" "src/T.hs"
+  , jsonNode "Self"   "Self.Ring"     "src/Self.hs"
+  , jsonNode "S"      "Start.Module"  "src/S.hs"
+  , jsonNode "Loop"   "Loop.One"      "src/Loop.hs"
+  , jsonNode "Iso"    "Iso.Lonely"    "src/Iso.hs"
+  , jsonNode "Cyc"    "Cyc.Two"       "src/Cyc.hs"
+  , jsonNode "Beta"   "Beta.Impl"     "src/Beta.hs"
+  , jsonNode "Alpha"  "Alpha.Impl"    "src/Alpha.hs"
+  ]
+
+-- | 依賴邊:兩條等長的 S→T 路徑(Alpha < Beta 但 Whisky < Xray,反向貪心的反例)、
+-- 一條重複邊(度數不去重)、一個自環與一個二元環(規則 5)。
+fixtureDepLinks :: [String]
+fixtureDepLinks =
+  [ jsonLink "S"      "Alpha"  "imports"
+  , jsonLink "S"      "Alpha"  "imports"
+  , jsonLink "S"      "Beta"   "calls"
+  , jsonLink "Alpha"  "Xray"   "calls"
+  , jsonLink "Beta"   "Whisky" "calls"
+  , jsonLink "Xray"   "T"      "uses"
+  , jsonLink "Whisky" "T"      "uses"
+  , jsonLink "Self"   "Self"   "depends_on"
+  , jsonLink "Loop"   "Cyc"    "imports"
+  , jsonLink "Cyc"    "Loop"   "imports"
+  ]
+
+-- | 結構類 + 未知類:兩者都不該影響 reachable / path / rank(驗收標準 6)。
+fixtureNoiseLinks :: [String]
+fixtureNoiseLinks =
+  [ jsonLink "Iso" "Alpha" "contains"
+  , jsonLink "S"   "T"     "foo"
+  ]
+
+fixtureSrc :: String
+fixtureSrc = fixtureJson fixtureNodes (fixtureDepLinks <> fixtureNoiseLinks)
+
+-- | fixture 節點 id 的升序(規則 3、4 的期望輸出序)。
+fixtureIdsAsc :: [QT.NodeId]
+fixtureIdsAsc = map qid
+  ["Alpha", "Beta", "Cyc", "Iso", "Loop", "S", "Self", "T", "Whisky", "Xray"]
+
+loadFixture :: String -> IO QT.QueryGraph
+loadFixture src = case parseAt "fixture.json" src of
+  Right g  -> pure g
+  Left err -> assertFailure ("fixture failed to load: " <> show err)
+
+-- | T1 已釘住四個建構子的對應,故這裡的 fallback 分支不會被走到。
+foundOf :: QT.QueryGraph -> String -> [(QT.NodeId, Text, FilePath)]
+foundOf g kw = case runQuery g (QT.FindNodes (T.pack kw)) of
+  QT.FoundNodes rows -> rows
+  _                  -> []
+
+reachableOf :: QT.QueryGraph -> QT.NodeId -> QT.Direction -> [(QT.NodeId, Int)]
+reachableOf g i d = case runQuery g (QT.Reachable i d) of
+  QT.ReachableSet rows -> rows
+  _                    -> []
+
+pathOf :: QT.QueryGraph -> QT.NodeId -> QT.NodeId -> Maybe [QT.NodeId]
+pathOf g a b = case runQuery g (QT.ShortestPath a b) of
+  QT.PathResult p -> p
+  _               -> Nothing
+
+-- | T7 (b)(c) 的比較面:四種查詢一次跑完。
+probeAll :: QT.QueryGraph -> [QT.QueryResult]
+probeAll g =
+  [ runQuery g (QT.FindNodes (T.pack "impl"))
+  , runQuery g (QT.FindNodes T.empty)
+  , runQuery g (QT.Reachable (qid "S") QT.Forward)
+  , runQuery g (QT.Reachable (qid "T") QT.Reverse)
+  , runQuery g (QT.Reachable (qid "Loop") QT.Forward)
+  , runQuery g (QT.ShortestPath (qid "S") (qid "T"))
+  , runQuery g (QT.RankConnectivity 100)
+  ]
+
+-- export-query/F003 T1: 三個 DTO 的建構與 Eq、runQuery 的建構子對應、
+-- Knot.Query 的匯出面,以及 fixture 圖的共用前提(10 個節點)
+testQueryCommandTypes :: TestTree
+testQueryCommandTypes = testCase "test_query_command_types" $ do
+  -- QueryCommand 四建構子與參數順序
+  let kw    = T.pack "demo"
+      cFind = QT.FindNodes kw
+      cFwd  = QT.Reachable (qid "A") QT.Forward
+      cRev  = QT.Reachable (qid "A") QT.Reverse
+      cPath = QT.ShortestPath (qid "A") (qid "B")
+      cRank = QT.RankConnectivity 10
+  cFind @?= QT.FindNodes kw
+  assertBool "Forward /= Reverse" (QT.Forward /= QT.Reverse)
+  (QT.Forward == QT.Forward) @?= True
+  assertBool "direction distinguishes two Reachable commands" (cFwd /= cRev)
+  assertBool "ShortestPath is ordered" (cPath /= QT.ShortestPath (qid "B") (qid "A"))
+  assertBool "find /= rank" (cFind /= cRank)
+  assertBool "reachable /= path" (cFwd /= cPath)
+  -- QueryResult 四建構子彼此互異、欄位形狀依契約原文
+  let rFound = QT.FoundNodes [(qid "A", T.pack "Demo.A", "src/A.hs")]
+      rReach = QT.ReachableSet [(qid "A", 1)]
+      rPath  = QT.PathResult (Just [qid "A", qid "B"])
+      rRank  = QT.Ranking [(qid "A", 1, 2)]
+  rFound @?= QT.FoundNodes [(qid "A", T.pack "Demo.A", "src/A.hs")]
+  rReach @?= QT.ReachableSet [(qid "A", 1)]
+  rPath  @?= QT.PathResult (Just [qid "A", qid "B"])
+  rRank  @?= QT.Ranking [(qid "A", 1, 2)]
+  assertBool "found /= reachable" (rFound /= rReach)
+  assertBool "path /= rank"       (rPath /= rRank)
+  assertBool "Just [] /= Nothing" (QT.PathResult (Just []) /= QT.PathResult Nothing)
+  assertBool "ranking is (id, in, out)" (rRank /= QT.Ranking [(qid "A", 2, 1)])
+  -- fixture:共用前提
+  g <- loadFixture fixtureSrc
+  length (QT.qgNodes g) @?= 10
+  map QT.qnId (QT.qgNodes g) @?= fixtureIdsAsc
+  queryGraphNotes g @?= [(T.pack "foo", 1)]
+  -- runQuery 的四個分支各自回對應的 QueryResult 建構子
+  -- (後續測試的 foundOf / reachableOf / pathOf 依賴這條)
+  case runQuery g cFind of
+    QT.FoundNodes _ -> pure ()
+    other -> assertFailure ("FindNodes should yield FoundNodes, got: " <> show other)
+  case runQuery g cFwd of
+    QT.ReachableSet _ -> pure ()
+    other -> assertFailure ("Reachable should yield ReachableSet, got: " <> show other)
+  case runQuery g cPath of
+    QT.PathResult _ -> pure ()
+    other -> assertFailure ("ShortestPath should yield PathResult, got: " <> show other)
+  case runQuery g cRank of
+    QT.Ranking _ -> pure ()
+    other -> assertFailure ("RankConnectivity should yield Ranking, got: " <> show other)
+  -- Knot.Query 的匯出清單已含 runQuery / renderResult(F004 只 import 這一個模組)
+  KQ.runQuery g cRank @?= runQuery g cRank
+  KQ.renderResult (KQ.Ranking [(KQ.NodeId (T.pack "A"), 1, 2)])
+    @?= renderResult rRank
+
+-- export-query/F003 T2: FindNodes——不分大小寫、id 與 label 兩面、id 升序、
+-- 掃全部節點(規則 3)、空關鍵字回全部(假設 A6)
+testQueryFind :: TestTree
+testQueryFind = testCase "test_query_find" $ do
+  g <- loadFixture fixtureSrc
+  -- 驗收標準 1:不分大小寫,三種寫法結果完全相同
+  let alpha = [(qid "Alpha", T.pack "Alpha.Impl", "src/Alpha.hs")]
+  foundOf g "alpha" @?= alpha
+  foundOf g "ALPHA" @?= alpha
+  foundOf g "Alpha" @?= alpha
+  -- 比對 label 也命中:id "S" 不含 "start",只可能經 label "Start.Module"
+  foundOf g "start" @?= [(qid "S", T.pack "Start.Module", "src/S.hs")]
+  -- 三元組的第二、三欄即該節點的 label 與 source_file
+  foundOf g "target" @?= [(qid "T", T.pack "Target.Module", "src/T.hs")]
+  -- 多命中時依 id 升序(JSON 中節點是 id 降序,故此序不可能是檔案原序)
+  foundOf g "impl" @?=
+    [ (qid "Alpha",  T.pack "Alpha.Impl",  "src/Alpha.hs")
+    , (qid "Beta",   T.pack "Beta.Impl",   "src/Beta.hs")
+    , (qid "Whisky", T.pack "Whisky.Impl", "src/Whisky.hs")
+    , (qid "Xray",   T.pack "Xray.Impl",   "src/Xray.hs")
+    ]
+  -- 規則 3:只被 contains 邊連到的節點照樣找得到
+  foundOf g "Iso" @?= [(qid "Iso", T.pack "Iso.Lonely", "src/Iso.hs")]
+  -- 查無命中是正常結果(空集合,exit 0 由 F004 決定)
+  runQuery g (QT.FindNodes (T.pack "zzz")) @?= QT.FoundNodes []
+  -- 假設 A6:空關鍵字回全部 10 個節點
+  map (\(i, _, _) -> i) (foundOf g "") @?= fixtureIdsAsc
+
+-- export-query/F003 T3: Reachable——方向、hop 距離、不含起點但環上以真實距離
+-- 出現(規則 5)、起點不存在回空集合(假設 A1)、(距離, id) 升序(規則 4)
+testQueryReachable :: TestTree
+testQueryReachable = testCase "test_query_reachable" $ do
+  g <- loadFixture fixtureSrc
+  -- 驗收標準 2 + 規則 4、5 前半:距離正確、依 (距離, id) 升序、不含起點 S
+  reachableOf g (qid "S") QT.Forward @?=
+    [ (qid "Alpha", 1), (qid "Beta", 1)
+    , (qid "Whisky", 2), (qid "Xray", 2)
+    , (qid "T", 3)
+    ]
+  -- Reverse 走反向邊:誰依賴 T、隔幾層
+  reachableOf g (qid "T") QT.Reverse @?=
+    [ (qid "Whisky", 1), (qid "Xray", 1)
+    , (qid "Alpha", 2), (qid "Beta", 2)
+    , (qid "S", 3)
+    ]
+  -- 方向不對稱:T 沒有出邊、S 沒有入邊
+  runQuery g (QT.Reachable (qid "T") QT.Forward) @?= QT.ReachableSet []
+  runQuery g (QT.Reachable (qid "S") QT.Reverse) @?= QT.ReachableSet []
+  -- 規則 5 後半:起點在環上時以真實距離出現(自環 1、二元環 2)
+  reachableOf g (qid "Self") QT.Forward @?= [(qid "Self", 1)]
+  reachableOf g (qid "Self") QT.Reverse @?= [(qid "Self", 1)]
+  reachableOf g (qid "Loop") QT.Forward @?= [(qid "Cyc", 1), (qid "Loop", 2)]
+  reachableOf g (qid "Cyc")  QT.Forward @?= [(qid "Loop", 1), (qid "Cyc", 2)]
+  -- 驗收標準 6:contains 邊不進依賴圖——Iso 出不去、Alpha 反向也看不到 Iso
+  runQuery g (QT.Reachable (qid "Iso") QT.Forward) @?= QT.ReachableSet []
+  runQuery g (QT.Reachable (qid "Iso") QT.Reverse) @?= QT.ReachableSet []
+  reachableOf g (qid "Alpha") QT.Reverse @?= [(qid "S", 1)]
+  -- 假設 A1:起點不存在回空集合,不拋例外
+  runQuery g (QT.Reachable (qid "NoSuchNode") QT.Forward) @?= QT.ReachableSet []
+  runQuery g (QT.Reachable (qid "NoSuchNode") QT.Reverse) @?= QT.ReachableSet []
+
+-- export-query/F003 T4: ShortestPath——等長多解取字典序最小(規則 6,反向貪心
+-- 的反例)、不連通與端點不存在回 Nothing、from == to 回 Just [from](假設 A2)
+testQueryPath :: TestTree
+testQueryPath = testCase "test_query_path" $ do
+  g <- loadFixture fixtureSrc
+  -- 規則 6:S→Alpha→Xray→T 與 S→Beta→Whisky→T 等長,Alpha < Beta → 取前者。
+  -- 這同時是反向貪心的反例:T 的兩個前驅是 Whisky 與 Xray 且 Whisky < Xray,
+  -- 若實作誤取「前驅 id 最小」會回 [S,Beta,Whisky,T],本斷言必須擋下。
+  pathOf g (qid "S") (qid "T")
+    @?= Just [qid "S", qid "Alpha", qid "Xray", qid "T"]
+  pathOf g (qid "S") (qid "Alpha") @?= Just [qid "S", qid "Alpha"]
+  pathOf g (qid "S") (qid "Whisky")
+    @?= Just [qid "S", qid "Beta", qid "Whisky"]
+  -- 驗收標準 4:不連通回 Nothing(方向相反、走不回去)
+  runQuery g (QT.ShortestPath (qid "Alpha") (qid "S")) @?= QT.PathResult Nothing
+  -- 驗收標準 6:contains 邊不算路
+  runQuery g (QT.ShortestPath (qid "S") (qid "Iso")) @?= QT.PathResult Nothing
+  runQuery g (QT.ShortestPath (qid "Iso") (qid "Alpha")) @?= QT.PathResult Nothing
+  -- 假設 A2:from == to 回 0 hop 的 Just [from],不去找環
+  pathOf g (qid "S")    (qid "S")    @?= Just [qid "S"]
+  pathOf g (qid "Self") (qid "Self") @?= Just [qid "Self"]
+  pathOf g (qid "Loop") (qid "Loop") @?= Just [qid "Loop"]
+  -- 環上的兩點仍算得出路徑
+  pathOf g (qid "Loop") (qid "Cyc") @?= Just [qid "Loop", qid "Cyc"]
+  -- 假設 A1:端點不存在回 Nothing
+  runQuery g (QT.ShortestPath (qid "S") (qid "NoSuchNode"))
+    @?= QT.PathResult Nothing
+  runQuery g (QT.ShortestPath (qid "NoSuchNode") (qid "S"))
+    @?= QT.PathResult Nothing
+  -- 同一查詢跑兩次結果相等
+  runQuery g (QT.ShortestPath (qid "S") (qid "T"))
+    @?= runQuery g (QT.ShortestPath (qid "S") (qid "T"))
+
+-- export-query/F003 T5: RankConnectivity——度數走邊數語意、同分按 id 升序、
+-- 自環兩端各 +1、零連通度排除(假設 A3)、--top N 生效、n <= 0 回空(假設 A4)
+testQueryRank :: TestTree
+testQueryRank = testCase "test_query_rank" $ do
+  g <- loadFixture fixtureSrc
+  -- 10 個節點扣掉只有 contains 邊的 Iso = 9 列。
+  -- S 的出度 3 = 兩條重複的 S→Alpha 計 2 再加 S→Beta(邊數語意,非相異鄰居數);
+  -- Alpha 入度 2 同理;Self 的自環兩端各 +1 → (1,1)。
+  -- 同分 tie-break:Alpha 與 S 同為總度數 3 而 Alpha 在前;
+  -- 尾端 Whisky 與 Xray 同為 (1,1) 而 Whisky 在前。
+  runQuery g (QT.RankConnectivity 100) @?= QT.Ranking
+    [ (qid "Alpha",  2, 1)
+    , (qid "S",      0, 3)
+    , (qid "Beta",   1, 1)
+    , (qid "Cyc",    1, 1)
+    , (qid "Loop",   1, 1)
+    , (qid "Self",   1, 1)
+    , (qid "T",      2, 0)
+    , (qid "Whisky", 1, 1)
+    , (qid "Xray",   1, 1)
+    ]
+  -- 假設 A3:零連通度節點不進榜
+  case runQuery g (QT.RankConnectivity 100) of
+    QT.Ranking rows -> do
+      length rows @?= 9
+      assertBool "Iso is absent from the ranking"
+        (qid "Iso" `notElem` [i | (i, _, _) <- rows])
+    other -> assertFailure ("expected Ranking, got: " <> show other)
+  -- 驗收標準 5:--top N 生效
+  runQuery g (QT.RankConnectivity 3) @?= QT.Ranking
+    [(qid "Alpha", 2, 1), (qid "S", 0, 3), (qid "Beta", 1, 1)]
+  runQuery g (QT.RankConnectivity 1) @?= QT.Ranking [(qid "Alpha", 2, 1)]
+  -- 假設 A4:n <= 0 回空清單,不視為錯誤
+  runQuery g (QT.RankConnectivity 0)    @?= QT.Ranking []
+  runQuery g (QT.RankConnectivity (-1)) @?= QT.Ranking []
+
+-- export-query/F003 T6: renderResult 的逐字元格式(假設 A5)
+testRenderResult :: TestTree
+testRenderResult = testCase "test_render_result" $ do
+  let a = qid "A"
+      b = qid "B"
+      c = qid "C"
+      t = T.pack
+  renderResult (QT.FoundNodes [(a, t "lbl", "src/A.hs")])
+    @?= t "found: 1 nodes\n  A  lbl  src/A.hs\n"
+  renderResult (QT.FoundNodes [(a, t "l1", "src/A.hs"), (b, t "l2", "src/B.hs")])
+    @?= t "found: 2 nodes\n  A  l1  src/A.hs\n  B  l2  src/B.hs\n"
+  -- 空結果只出首行,不輸出空字串
+  renderResult (QT.FoundNodes [])   @?= t "found: 0 nodes\n"
+  renderResult (QT.ReachableSet []) @?= t "reachable: 0 nodes\n"
+  renderResult (QT.Ranking [])      @?= t "rank: 0 nodes\n"
+  renderResult (QT.ReachableSet [(b, 2)]) @?= t "reachable: 1 nodes\n  2  B\n"
+  renderResult (QT.PathResult (Just [a, b, c])) @?= t "path: 2 hops\n  A -> B -> C\n"
+  renderResult (QT.PathResult (Just [a]))       @?= t "path: 0 hops\n  A\n"
+  -- 驗收標準 4:不連通有明確固定輸出,且無明細行
+  renderResult (QT.PathResult Nothing) @?= t "path: not connected\n"
+  -- 防禦性:空路徑不可能來自 runQuery,渲染仍是全函數且不留空白明細行
+  renderResult (QT.PathResult (Just [])) @?= t "path: 0 hops\n"
+  renderResult (QT.Ranking [(a, 1, 2)]) @?= t "rank: 1 nodes\n  3  A  in=1 out=2\n"
+  renderResult (QT.Ranking [(a, 1, 2), (b, 0, 3)])
+    @?= t "rank: 2 nodes\n  3  A  in=1 out=2\n  3  B  in=0 out=3\n"
+  -- 每行以 \n 結尾且全程不含 \r(binary 一致,不做平台換行轉換)
+  let samples =
+        [ QT.FoundNodes [(a, t "lbl", "src/A.hs")]
+        , QT.FoundNodes []
+        , QT.ReachableSet [(b, 2)]
+        , QT.PathResult (Just [a, b, c])
+        , QT.PathResult Nothing
+        , QT.Ranking [(a, 1, 2)]
+        ]
+  forM_ samples $ \s -> do
+    let out = renderResult s
+    assertBool ("output ends with a newline: " <> show out)
+      (T.pack "\n" `T.isSuffixOf` out)
+    assertBool ("output has no carriage return: " <> show out)
+      (not (T.pack "\r" `T.isInfixOf` out))
+    -- 純函數:同一輸入兩次渲染逐字元相同
+    renderResult s @?= out
+
+-- export-query/F003 T7: 決定性與「只走依賴類邊」的總驗收
+testQueryDeterminism :: TestTree
+testQueryDeterminism = testGroup "test_query_determinism"
+  [ testCase "(a) the same command twice yields the same result and text" $ do
+      g <- loadFixture fixtureSrc
+      let cmds =
+            [ QT.FindNodes (T.pack "impl")
+            , QT.Reachable (qid "S") QT.Forward
+            , QT.ShortestPath (qid "S") (qid "T")
+            , QT.RankConnectivity 100
+            ]
+      forM_ cmds $ \cmd -> do
+        runQuery g cmd @?= runQuery g cmd
+        renderResult (runQuery g cmd) @?= renderResult (runQuery g cmd)
+  , testCase "(b) results do not depend on the node/link order in the file" $ do
+      g <- loadFixture fixtureSrc
+      rev <- loadFixture
+        (fixtureJson (reverse fixtureNodes)
+                     (reverse (fixtureDepLinks <> fixtureNoiseLinks)))
+      probeAll rev @?= probeAll g
+      map renderResult (probeAll rev) @?= map renderResult (probeAll g)
+  , testCase "(c) structural and unknown relations do not affect any query" $ do
+      g    <- loadFixture fixtureSrc
+      lean <- loadFixture (fixtureJson fixtureNodes fixtureDepLinks)
+      -- 驗收標準 6:contains 與未知 relation 邊整批刪除後,四種查詢全部不變
+      -- (find 也不變——節點還在,規則 3)
+      probeAll lean @?= probeAll g
+      -- 差別只在未知 relation 的統計面(F004 印 stderr,不進查詢結果)
+      queryGraphNotes g    @?= [(T.pack "foo", 1)]
+      queryGraphNotes lean @?= []
+  , testProperty "(d) random graphs keep the BFS invariants" $ property $ do
+      (src, ids) <- forAll genQueryGraphSrc
+      g <- case parseAt "gen.json" src of
+        Right x  -> pure x
+        Left err -> do
+          annotate ("generated fixture failed to load: " <> show err)
+          failure
+      from <- forAll (Gen.element ids)
+      to   <- forAll (Gen.element ids)
+      let f   = QT.NodeId (T.pack from)
+          tgt = QT.NodeId (T.pack to)
+          fwd = reachableOf g f QT.Forward
+      -- 同輸入同輸出
+      runQuery g (QT.Reachable f QT.Forward)
+        === runQuery g (QT.Reachable f QT.Forward)
+      runQuery g (QT.ShortestPath f tgt) === runQuery g (QT.ShortestPath f tgt)
+      -- 規則 5:距離恆 >= 1(起點不入結果);規則 4:依 (距離, id) 升序
+      assert (all ((>= 1) . snd) fwd)
+      sortOn (\(i, d) -> (d, i)) fwd === fwd
+      -- 規則 6 的形狀不變式 + 最短性交叉驗證
+      case pathOf g f tgt of
+        Nothing -> pure ()
+        Just p  -> do
+          assert (not (null p))
+          take 1 p === [f]
+          take 1 (reverse p) === [tgt]
+          assert
+            (and [ v `elem` Map.findWithDefault [] u (QT.qgForward g)
+                 | (u, v) <- zip p (drop 1 p) ])
+          if f == tgt
+            then length p === 1
+            else lookup tgt fwd === Just (length p - 1)
+  ]
+
+-- | 隨機 fixture:3–8 個相異節點 id(取自固定字母表,含大小寫與長短以測字典序
+-- 邊界)與 0–15 條隨機 relation 的邊。
+genQueryGraphSrc :: Gen (String, [String])
+genQueryGraphSrc = do
+  k   <- Gen.int (Range.linear 3 8)
+  ids <- take k <$> Gen.shuffle queryAlphabet
+  ls  <- Gen.list (Range.linear 0 15) (genQueryLink ids)
+  pure (fixtureJson (map nodeOf ids) ls, ids)
+ where
+  nodeOf i = jsonNode i (i <> ".Label") ("src/" <> i <> ".hs")
+
+queryAlphabet :: [String]
+queryAlphabet = ["a", "B", "cc", "D", "e", "Ff", "g", "H"]
+
+genQueryLink :: [String] -> Gen String
+genQueryLink ids =
+  jsonLink <$> Gen.element ids <*> Gen.element ids <*> Gen.element queryRelPool
+
+-- | 依賴類 + 結構類 + 一個未知類,確保分流路徑都被隨機走到。
+queryRelPool :: [String]
+queryRelPool =
+  map T.unpack (dependencyRelations <> structuralRelations) <> ["foo"]

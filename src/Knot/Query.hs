@@ -1,20 +1,26 @@
 -- | export-query 子系統查詢面的唯一對外進入點。
 --
 -- Level 2 契約:@.design/subsystems/export-query/design.md@「對外契約 › 查詢面」。
--- 本 feature('F002' graph-load)落地 'loadQueryGraph' 與 'queryGraphNotes';
--- @F003@ 會把 @runQuery@ \/ @renderResult@ 加進同一份匯出清單,
--- @F004@ 因此只需 import 這一個模組。
+-- 'F002' graph-load 落地 'loadQueryGraph' 與 'queryGraphNotes';
+-- @F003@ query-commands 再把 'runQuery' \/ 'renderResult' 與三個查詢 DTO 加進
+-- 同一份匯出清單,@F004@ 因此只需 import 這一個模組即可完成整條查詢管線。
 --
 -- 之於查詢面 = 'Knot.Export' 之於匯出面:唯一的 IO 是__讀檔__,
--- 不建圖、不改圖、不寫任何檔案、全程不印任何輸出(委派決策 D8)。
+-- 不建圖、不改圖、不寫任何檔案、全程不印任何輸出(委派決策 D8)
+-- ——'renderResult' 回傳 'Data.Text.Text',列印由 CLI 層負責。
 module Knot.Query
   ( -- * 進入點
     loadQueryGraph
   , queryGraphNotes
+  , runQuery
+  , renderResult
     -- * DTO
   , LoadError (..)
   , QueryGraph
   , NodeId (..)
+  , QueryCommand (..)
+  , Direction (..)
+  , QueryResult (..)
   ) where
 
 import Control.Exception (try)
@@ -22,8 +28,17 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import System.IO.Error (isDoesNotExistError)
 
+import Knot.Query.Engine (runQuery)
 import Knot.Query.Load (parseQueryGraph, queryGraphNotes)
-import Knot.Query.Types (LoadError (..), NodeId (..), QueryGraph)
+import Knot.Query.Render (renderResult)
+import Knot.Query.Types
+  ( Direction (..)
+  , LoadError (..)
+  , NodeId (..)
+  , QueryCommand (..)
+  , QueryGraph
+  , QueryResult (..)
+  )
 
 -- | 讀 @codegraph.json@ 並組成查詢用圖(Level 2 契約原文簽名)。
 --
