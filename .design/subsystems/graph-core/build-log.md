@@ -16,8 +16,8 @@ parent: graph-core
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | module-graph | impl-done |
-| 階段二:S3 decl 層 | W2 | decl-nodes | 執行中(2026-08-22) |
-| 階段二:S3 decl 層 | W3 | decl-edges | 執行中(2026-08-22) |
+| 階段二:S3 decl 層 | W2 | decl-nodes | impl-done |
+| 階段二:S3 decl 層 | W3 | decl-edges | impl-done |
 
 階段一(2026-08-20):開發者決定只跑階段一(主架構 S1 端到端優先);跨子系統依賴 project-meta、extraction 階段一皆 done 並已 merge 進 main(PR #1,commit 76cf838)。
 
@@ -59,8 +59,8 @@ parent: graph-core
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
 | module-graph | F001 | F001-module-graph.md | opus(預防 Fable 誤判) | 繼承 | impl-done |
-| decl-nodes | F002 | F002-decl-nodes.md | 繼承 | 繼承 | 待跑(W2) |
-| decl-edges | F003 | F003-decl-edges.md | 繼承 | 繼承 | 待跑(W3) |
+| decl-nodes | F002 | F002-decl-nodes.md | 繼承 | 繼承 | impl-done |
+| decl-edges | F003 | F003-decl-edges.md | 繼承 | 繼承 | impl-done |
 
 ## 待確認假設彙總
 
@@ -77,7 +77,36 @@ parent: graph-core
 | F001 A9 | test/fixtures/proj 三個 included 檔全無標頭也無 import,端到端驗不到邊 | 保留 proj(D1 真實樣本),另建 test/fixtures/graph 驗邊集/丟棄/去重/自環 | 接受 |
 | F001 A10 | edge-derive 警告的 gwSource 該填什麼 | 邊警告用來源檔路徑(行號進 gwMessage);碰撞警告用 module 名 | 接受 |
 
-階段二的假設待 W2 / W3 回報後填入。
+### 階段二(2026-08-22)
+
+**開工前裁決**(影響下游 feature,不等閘門):
+
+| 來源 | 假設 | 採取的判斷 | 裁決 |
+|---|---|---|---|
+| F002 A8 | `deriveEdges` 第二參數 `[GraphNode]` 五欄無法還原 `(module, occ, namespace)`,decl 端點換不成 `NodeId` | 三案:改契約簽名 / node-mint 增索引函式 / edge-derive 自行重建 | **裁決:node-mint 增設非契約面索引函式**(比照 F001 `moduleFiles` 先例),`deriveEdges` 簽名零變更 |
+| F002 A3 | `FactInstance` 無 module 欄位,instance 節點的 `<mod-id>` 無來源 | 由 `fiInstFile` 反查 `FactModule` | **裁決:維持反查,不動 extraction 契約**。該建構子目前零產出,為想像中的資料改契約不划算;已回寫鑄造規則 |
+| F002 A1 | 規則 3 若套用到 `FactModule` 會讓 `gfInternal` 縮水 | 規則 3 只適用 decl 層事實 | **裁決:接受**,已回寫組裝規則 3 |
+
+**閘門裁決(2026-08-22)**:
+
+| 來源 | 假設 | 採取的判斷 | 裁決 |
+|---|---|---|---|
+| F002 A2 | (a) 條件比對 `pmSources` 全部條目而非只 `sfIncluded = True` | 比對全部條目 | 接受 |
+| F002 A4 | decl/instance 的 module 非內部 → 不建節點不產邊 | 不計 `gsDroppedExternal`,發彙整警告 | 接受(已回寫為組裝規則 4b) |
+| F002 A5 | `RContains` 的 `geLine` 取宣告行 | 取宣告行 | 接受 |
+| F002 A6 | 規則 3 生效會打破 F001 三條既有測試 | 更新期望值不刪除斷言 | 接受 |
+| F002 A7 | `mintNodes` 無警告通道 | 跳過一律靜默,警告由 edge-derive 以同一組判定發出 | 接受 |
+| F002 A9 | `DuplicateRecordFields` 同名欄位選擇器會靜默合併 | 不補救、不加統計欄位 | 接受(繼承 extraction A9 的粗度,已註記於鑄造規則) |
+| F002 A10 | `--backend hiedb` 單跑時 `gfInternal` 為空 → 整圖為空 | 由 4b 警告如實呈現 | 接受(D2 的既有推論,非本階段引入) |
+| **F002 A11** | **節點去重用 `nubOrdOn`(保留輸入序第一筆)會讓 `gnLine` 隨事實流順序跳動,違反組裝規則 7** | 改保留 `(gnFile, gnLine, gnKind)` 最小者 | **接受**。property test 實測抓出反例;與 F001 閘門對 `geLine` 取極小值的裁決同源。規則 5 只寫了邊的合併,節點面的決定性至此有了實作依據 |
+| F003 A2 | 規則 4b 與規則 1 衝突時的優先序 | 4b 先判 | 接受(否則 `--backend hiedb` 單跑會把自家 module 灌進 `gsTopExternalTargets`) |
+| F003 A3 | `frTarget` 落在 D1 消歧組 → 丟棄 + 警告不計統計 | 比照 4a | 接受 |
+| F003 A4 | instance 來源解析失敗不重發警告(F002 的 `RContains` 支已發過) | 不重發 | 接受 |
+| F003 A5 | `RImplements` 的 `geLine` 取 `fiInstLine` | 取 `fiInstLine` | 接受 |
+| F003 A6 | ref 警告採「每個 (來源檔, 原因) 一則帶筆數」的彙整式,imports 維持逐筆 | 兩種粒度並存 | 接受(ref 量級是每檔數百筆,逐筆會刷屏;實跑 19 則 vs 25 筆) |
+| F003 A7 | `gsTopExternalTargets` 語意由「被 import 最多」變成「被引用最多」 | 照 E4 不加欄位 | 接受(見閘門發現 2) |
+| F003 A8 | 來源解析失敗也發警告(契約卡只寫目標) | 兩端對稱 | 接受 |
+| F003 A12 | 端到端數字取決於索引建法 | 兩組數字並陳,以真實管線為基準 | 接受(見閘門發現 1) |
 
 ## 階段結果
 
@@ -89,3 +118,23 @@ parent: graph-core
 - **D1 消歧首次真實實證**:particle-magic 的 Main 由 5 個來源檔宣告(app、examples、tools/三支),整組鑄成 Main@<file>,無裸名節點;唯一警告即此碰撞
 - arch-audit subsys:純函數無 IO、資料流管線(gate → mint → derive → assemble)與契約一致、規則 1/2/4/5/6/7 逐條落實、SRP 清楚、NodeId 構造入口單一;去重取組內最小行號(比契約的「保留最早」更嚴格的決定性)
 - 閘門裁決:A1、A4–A10 全部接受(A4 的消歧組丟邊規則已寫進 design.md 組裝規則 4a);階段一收尾以 PR 整合
+
+### 階段二:S3 decl 層
+
+- **F002 decl-nodes**(設計繼承 / 實作繼承):Todo 7/7、測試 **126/126**;改 `FactGate.hs`(規則 3 三條件)、`NodeMint.hs`(`mintDeclId` / `mintInstanceId` / `declNodeIndex` / `dedupeNodes`)、`EdgeDerive.hs`(`RContains`)
+- **F003 decl-edges**(設計繼承 / 實作繼承):Todo 7/7、測試 **134/134**;只改 `EdgeDerive.hs`(`relationOf` 的 term/type 二分、`RCalls`/`RUses`/`RImplements` 三條判定鏈、`SkipKind` 彙整警告)
+- **Level 2 契約零偏離**:`buildGraph` / `gateFacts` / `mintNodes` / `deriveEdges` / `EdgeStats` / 全部 DTO 一字未動,E4 遵守。C3 改的兩個鑄造函式簽名實作一字不差落地
+- **編排者獨立驗證(未採信 subagent 轉述)**:
+  - `cabal clean` 後全量重建:警告 **8 筆**,逐筆確認全部是 G-E002 追蹤的 `test/Main.hs` `-Wincomplete-record-selectors`,**graph-core 新增程式碼零警告**。這是本專案首次在閘門獨立驗證此慣例而非轉述
+  - `cabal test`:**All 134 tests passed**,0 失敗 0 跳過
+  - 唯讀實跑 knot-hs 自身(`--db` 改道專案外):**654 節點 / 2267 邊 / 19 警告**;節點 = 31 module + 623 decl + 0 instance,邊 = 87 imports + 623 contains + **1246 calls + 311 uses** + 0 implements;`gsDroppedExternal` 3932、`gsFilteredGenerated` 846、`gsDedupedEdges` 527。**repo 零寫入**(無 `.knot/`)
+  - **決定性**:連跑兩次,輸出**位元相同**
+  - **下游契約驗證(S3 的存在理由)**:把圖餵給 dev-flow `scan-graph.mjs` → 解析成功、**檔案對映覆蓋率 31/31(100%)**、**端點未對映 0**(「查得到才產邊」的規則生效,無懸空 link)、**無子系統循環依賴**、依賴矩陣六條邊全部合理。**hub 洗版實測成立**:函式級節點(`deriveEdges` 38、`buildGraph` 33、`refFactsOf` 30、`renderGraphSummary` 31)首次與 module 並列進榜——這正是 S3 里程碑承諾的能力
+  - **邊界檢查**:graph-core 對外只碰 `Knot.Extract.Types` 與 `Knot.Meta.Types` 兩個契約 DTO 模組;別人進來只碰 `Knot.Graph` / `Knot.Graph.Types`。**無邊界外洩**
+- **arch-audit subsys 發現**(依嚴重度):
+  1. (中)**產生碼過濾不對稱**:規則 3(c) 濾掉 846 筆 generated **ref**,但 generated **decl** 一個都沒濾——`FactDecl` 沒有對應旗標(hiedb 的 `decls`/`defs` 表無 `is_generated` 欄,只有 `refs` 有)。實測 623 個 decl 節點中 **106 個(17%)是 deriving 產生的 dictionary 繫結**(`$fEqCommand`、`$fShowFact`、`$fFromRowDefRow`…)。它們稀釋 hub 排名,且沒有任何人寫過那些行。**修正需擴充 extraction 契約**(為 `FactDecl` 補 generated 欄位),或在 fact-gate 加 occ 名啟發式(與 design.md「不做啟發式」相衝)。**跨子系統,建議走 `/enhance-design`**
+  2. (低)**`gsTopExternalTargets` 語意漂移**(F003 A7):decl 層邊上線後由「被 import 最多的外部 module」變成「被引用最多的外部 module」,而 hiedb 回報的是**定義處**——實跑 Top-3 是 `GHC.Internal.Base`(554)/`Data.Text.Internal`(406)/`GHC.Internal.Classes`(401),使用者實際寫的 `Data.Text` 排到第 7。報告可讀性下降。E4 已裁定不加欄位;要改只能在 export-query 的摘要層分開呈現
+  3. (低)**19 則 `unresolved reference target $f…` 警告**:根因是 hiedb 的 `defs` 表隨索引建法而異(走目錄 631 列 / 逐檔清單 623 列,`mods`/`decls`/`refs` 三表逐列相同)。少的 8 列全是 deriving instance 字典,連帶 25 筆 ref 解析不到。屬 extraction 上游,與發現 1 同源
+  4. (低)`renderFactSummary`(`app/Knot/App/Summary.hs`)對 `FactDecl`/`FactRef`/`FactInstance` 走 `Show` fallback,`--summary facts` 會印 `Show` 原文。屬 export-query;extraction 階段二閘門已記過同一項,兩次委派都回報但都不跨子系統改
+  5. (資訊)三個非契約面共用工具(`moduleFiles` F001、`disambiguate`/`moduleOfFile` F002、`declNodeIndex` F002)都未登記進 design.md「模組間公開介面」,沿用 F001 的先例。要不要統一登記待裁決
+- **契約卡對帳**:兩張卡的負責模組、Level 2 介面、資料流段落與實作相符(decl-nodes 的「負責模組」已於委派前補上 `edge-derive`);`mintDeclId` / `mintInstanceId` / `declNodeIndex` 三個簽名在 F003 複驗 F002 真實原始碼時零落差
