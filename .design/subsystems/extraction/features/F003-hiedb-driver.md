@@ -372,6 +372,7 @@ chunkFileArgs :: Int -> Int -> [FilePath] -> [[FilePath]]
 5. **T6 拆成兩個測試節點**:`test_probe_hiedb`(執行檔類,無 hiedb 亦可跑)與 `test_probe_hiedb_available`(`.hie` 類 / 版本類 / 全過,需 hiedb)。原因:probe 是短路的,`pmHie` 與版本檢查只有在執行檔通過後才到得了,不拆就無法讓「無 hiedb 環境」也驗到執行檔類。另補一條設計未列的案例:檔頭不成形 → `hie files unavailable: `(不是版本類)。
 6. **T8 增加 (d) 相對 `dbPath` 案例**:A3 裁決變更後新增,驗 `dbPath = Just "build/idx.sqlite"` 落在 `<root>/build/idx.sqlite`、**行程 cwd 下沒有** `build/idx.sqlite`、`.knot/` 未建立。
 7. **`.knot/` 提示訊息措辭**:實際為 `created index cache directory <dbParent> under <rootAbs>; add .knot/ to .gitignore`(同時含 `.knot` 與 `.gitignore`,符合驗收)。
+8. **階段二閘門裁決:`probeParts` 的 `head` 換成全函式寫法**:原本是 `null (hieFiles hie)` guard + `head (hieFiles hie)`,執行期雖安全,但 GHC 9.14 的 `-Wall` 含 `-Wx-partial`,仍會發 `[GHC-63394]`。改以 `case hieFiles hie of { [] -> …; (firstHie : _) -> … }`,型別層面就不需要部分函式,警告消除;行為與錯誤訊息(`… has no usable .hie files`)完全不變。
 
 ### T11 自我驗收數據(knot-hs 自身的真實 `.hie`)
 
