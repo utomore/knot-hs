@@ -125,7 +125,9 @@ data ExtractWarning = ExtractWarning   -- (批次澄清裁定,比照 MetaWarning
 1. **納入範圍**:只處理 `pmSources` 中 `sfIncluded = True` 的檔案;`.hie` 清單以 `pmHie.hieFiles` 為準(幽靈檔已被 project-meta 濾除)
 2. **後端職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強、與降級模式行為一致);hiedb 後端只產 `FactDecl` / `FactRef`(`FactInstance` 依 C4 延後);`FactModule` 由 import-scan 產出;無 module 標頭的檔案依 Haskell 語意視為 `Main`(多個 Main 以 fmFile 區分,批次澄清裁定)
 3. **auto 合成**:import-scan 必跑;hiedb 探測通過(執行檔存在、`pmHie` 存在、相容性檢查過)則加跑,`erLevel = DeclLevel`;任一條件不成立記入 `BackendReport` 並降為 `ModuleLevel`。`ImportsOnly` / `HiedbOnly` 只跑指定後端(後者供除錯)
-4. **fromDecl 由後端解析**:`FactRef.frFromDecl` 在事實產出時即填好(hiedb 後端以 span 包含關係 join 得出);graph-core 不做 span 比對。**span 包含是一對多**(2026-08-21 實測:同一個 ref 可同時落在 `c:QueryNode` 與 `t:QueryNode` 兩個 root decl 內),取 **span 最小(最內層)** 的候選;span 大小相同時再依 `(qnSpace, qnOcc)` 字典序破雷,確保規則 8 的決定性
+4. **fromDecl 由後端解析**:`FactRef.frFromDecl` 在事實產出時即填好(hiedb 後端以 span 包含關係 join 得出);graph-core 不做 span 比對。**span 包含是一對多**(2026-08-21 實測:同一個 ref 可同時落在 `c:QueryNode` 與 `t:QueryNode` 兩個 root decl 內),取 **span 最小(最內層)** 的候選;span 大小相同時再依 `(qnSpace, qnOcc)` 字典序破雷,確保規則 8 的決定性。
+
+   **候選集是該檔的全部 `decls` 列,不得以 `is_root` 過濾**——這是個會靜默失敗的陷阱:hiedb 的 `isRoot` 只對 `ValBind InstanceBind` 與 `Decl` 為真,**一般頂層函式繫結是 `is_root = 0`**(2026-08-21 實測 knot-hs 自身索引:`v:` 前綴 108 筆全部 `is_root = False`,含 `buildGraph` / `extract` / `writeCodegraph`;只有 `c:` 95 筆與 `t:` 50 筆為 True)。帶著該過濾,「引用寫在哪個函式裡」會**永遠**解析不到而 `calls` 邊全空,但查詢本身不會報錯。安全性由 hiedb 上游的 `nameModule_maybe` 條件保證——局部繫結本來就不會進 `decls`
 
 4a. **產生碼旗標不由 extraction 判斷**:`FactRef.frGenerated` 原樣轉載 hiedb 的 `refs.is_generated`(2026-08-21 實測本專案 672/4740 = 14% 為 deriving 產生)。extraction **不過濾**、不詮釋;要不要丟棄是 graph-core 的決定(其 `GraphStats.gsFilteredGenerated` 因此有事實可依,不必靠「異常 span」啟發式)。import-scan 後端不產 `FactRef`,不受影響
 5. **相容性探測**:hiedb-driver 需能區分並回報「執行檔不存在」「索引失敗/`.hie` 版本不合」兩類不可用(探測手段屬 Level 3 自主權);extraction 是全系統唯一允許讀 `.hie` 內容的子系統

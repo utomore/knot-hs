@@ -3,9 +3,9 @@ id: F004
 type: feature
 title: hiedb-facts
 description: 讀 hiedb 索引出 decl 層事實流並組裝註冊 hiedb 後端
-status: open
+status: done
 created: 2026-08-21
-updated: 2026-08-21
+updated: 2026-08-22
 depends-on: [F001, F002, F003, project-meta/F001, export-query/F004]
 related-adr: [ADR-002]
 related-feature: []
@@ -379,17 +379,17 @@ pickFromDecl :: [(SrcSpan4, QualName)] -> Maybe QualName
 
 ## TodoList
 
-- [ ] T1: 前置 1——`Knot.Extract.Types` 的 `NameSpace` 擴為四值、`FactRef` 增 `frGenerated`(欄位位置照 design.md),同步調整既有測試的四處觸碰點;`cabal build all` 與既有測試全綠  `dep: F001`
-- [ ] T2: 前置 2——CLI `--hiedb` / `--db`:`ExtractCmd` 兩欄位、`extractParser` 兩旗標、`toExtractOptions` 透傳、刪掉引用 export-query F004 假設 A8 的 haddock  `dep: export-query/F004`
-- [ ] T3: `knot-hs.cabal` 加 `sqlite-simple`(library + test-suite)與 `exposed-modules`;`Knot.Extract.HiedbFacts` 骨架:`withConnection` 開闔、`Query . T.pack` 的 SQL 常數、私有 row record 與手寫 `FromRow`;`cabal build all` 通過  `dep: T1`
-- [ ] T4: `parseOcc` 與 `declKindOf`——四種前綴判讀、含 `:` 的運算子 occ、`z:` 與其他不認得的前綴回 `Nothing`  `dep: T3`
-- [ ] T5: `resolveModuleSource`——`hs_src` 反斜線正規化 + 最長後綴比對、`hs_src = NULL` 退回 `sfModule` 唯一比對、多筆同名時落空、回傳 `sfPath` 原文  `dep: T3`
-- [ ] T6: `pickFromDecl`——最內層挑選(起點最大、終點最小)、同 span 依 `(qnSpace, qnOcc)` 破雷、空候選回 `Nothing`  `dep: T4`
-- [ ] T7: `readIndexFacts` 主流程——三條 SQL(含 `LEFT JOIN` 與 `ORDER BY`)、`modIndex` 建立與 `is_boot` 略過、`FactDecl` / `FactRef` 產出(含 `frGenerated` 原樣轉載)、對映失敗與未知 namespace 的彙整警告、`ihNotes` 併入、最終排序  `dep: T5, T6, F003`
-- [ ] T8: `hiedbBackend` 組裝 + `Knot.Extract` 註冊表併排註冊 + `HiedbFactsError` 例外通道(`ensureIndex` 的 `Left` → `brUsed = False` + 原文)  `dep: T7, F003`
-- [ ] T9: fixture 擴充——`test/fixtures/hiedb/src/Demo/Core.hs` 加記錄型別與 `deriving`,重產兩個 `.hie`(維持兩 module),產生指令寫進測試原始碼註解  `dep: F003`
-- [ ] T10: 端到端驗收(fixture 副本,需 hiedb)——跨 module `FactRef` 的 `frFromDecl` 正確、四種 namespace 齊備、`frGenerated` 與 DB 逐筆對帳、`QualName` 全部對映得回 `pmSources`、連跑兩次結果相同  `dep: T7, T9`
-- [ ] T11: knot-hs 自身唯讀驗收(需 hiedb 且自身有 `.hie`)——`--db` 改道暫存目錄、走完整 `extract`、`erLevel == DeclLevel`、兩後端報告皆 `brUsed = True`、`<repo>/.knot/` 未被建立;實跑數據記入「實作備註」  `dep: T8`
+- [x] T1: 前置 1——`Knot.Extract.Types` 的 `NameSpace` 擴為四值、`FactRef` 增 `frGenerated`(欄位位置照 design.md),同步調整既有測試的四處觸碰點;`cabal build all` 與既有測試全綠  `dep: F001`
+- [x] T2: 前置 2——CLI `--hiedb` / `--db`:`ExtractCmd` 兩欄位、`extractParser` 兩旗標、`toExtractOptions` 透傳、刪掉引用 export-query F004 假設 A8 的 haddock  `dep: export-query/F004`
+- [x] T3: `knot-hs.cabal` 加 `sqlite-simple`(library + test-suite)與 `exposed-modules`;`Knot.Extract.HiedbFacts` 骨架:`withConnection` 開闔、`Query . T.pack` 的 SQL 常數、私有 row record 與手寫 `FromRow`;`cabal build all` 通過  `dep: T1`
+- [x] T4: `parseOcc` 與 `declKindOf`——四種前綴判讀、含 `:` 的運算子 occ、`z:` 與其他不認得的前綴回 `Nothing`  `dep: T3`
+- [x] T5: `resolveModuleSource`——`hs_src` 反斜線正規化 + 最長後綴比對、`hs_src = NULL` 退回 `sfModule` 唯一比對、多筆同名時落空、回傳 `sfPath` 原文  `dep: T3`
+- [x] T6: `pickFromDecl`——最內層挑選(起點最大、終點最小)、同 span 依 `(qnSpace, qnOcc)` 破雷、空候選回 `Nothing`  `dep: T4`
+- [x] T7: `readIndexFacts` 主流程——三條 SQL(含 `LEFT JOIN` 與 `ORDER BY`)、`modIndex` 建立與 `is_boot` 略過、`FactDecl` / `FactRef` 產出(含 `frGenerated` 原樣轉載)、對映失敗與未知 namespace 的彙整警告、`ihNotes` 併入、最終排序  `dep: T5, T6, F003`
+- [x] T8: `hiedbBackend` 組裝 + `Knot.Extract` 註冊表併排註冊 + `HiedbFactsError` 例外通道(`ensureIndex` 的 `Left` → `brUsed = False` + 原文)  `dep: T7, F003`
+- [x] T9: fixture 擴充——`test/fixtures/hiedb/src/Demo/Core.hs` 加記錄型別與 `deriving`,重產兩個 `.hie`(維持兩 module),產生指令寫進測試原始碼註解  `dep: F003`
+- [x] T10: 端到端驗收(fixture 副本,需 hiedb)——跨 module `FactRef` 的 `frFromDecl` 正確、四種 namespace 齊備、`frGenerated` 與 DB 逐筆對帳、`QualName` 全部對映得回 `pmSources`、連跑兩次結果相同  `dep: T7, T9`
+- [x] T11: knot-hs 自身唯讀驗收(需 hiedb 且自身有 `.hie`)——`--db` 改道暫存目錄、走完整 `extract`、`erLevel == DeclLevel`、兩後端報告皆 `brUsed = True`、`<repo>/.knot/` 未被建立;實跑數據記入「實作備註」  `dep: T8`
 
 ## 1-to-1 測試對照表
 
@@ -423,6 +423,154 @@ pickFromDecl :: [(SrcSpan4, QualName)] -> Maybe QualName
 
 ## 實作備註
 
-(撰寫時留空;實作階段記錄與設計的偏差、A1–A9 的最終裁決落點、T11 的自我驗收數據)
+實作於 2026-08-22 完成。編排者已對 A1–A9 全部裁決:A2 維持四值 `NameSpace`(`z:` 跳過 +
+依前綴彙整警告)、A1 接受 namespace 粗推(design.md 的 `DeclKind` 已補限制註記)、
+A3–A9 全部接受。全部照裁決實作,無契約偏離。
 
-**非契約面公開匯出登記(G-E001 日後一併收斂)**:`Knot.Extract.HiedbFacts` 的 `parseOcc`、`declKindOf`、`resolveModuleSource`、`pickFromDecl` 四個純函數僅為 1-to-1 測試而匯出,不屬 Level 2 契約面;`hiedbBackend` 與 `readIndexFacts` 是契約面。沿用 `Knot.Meta.SourceIndex.moduleNameFromPath`、`Knot.Extract.Backend.runBackends`、`Knot.Extract.ImportScan` 四個純函數的既有慣例(haddock 註明),一併登記在 `G-E001`。
+### 設計偏差 1(重要):`decls.is_root = 1` 不是 fromDecl 的候選集
+
+設計文檔「實作方式 › 1」的查證表把 `decls.is_root` 判讀為「頂層宣告(含 instance 繫結)
+→ 正是 fromDecl 的候選集」,`qRefs` 的 SQL 據此帶了 `AND d.is_root = 1`。**這個判讀是錯的**,
+實作階段以真實索引推翻:
+
+上游 `HieDb/Utils.hs` 的 `isRoot` 原文只對 `ValBind InstanceBind _ _` 與 `Decl _ _` 回 `True`,
+**一般的頂層值繫結(`ValBind RegularBind ModuleScope`)拿到的是 `is_root = 0`**。
+2026-08-22 對 fixture 索引實測 `decls` 全表:
+
+| occ | span | is_root |
+|---|---|---|
+| `v:run`(Demo.App 的頂層函式) | (8,1)–(8,30) | **0** |
+| `v:greet`(Demo.Core 的頂層函式) | (19,1)–(21,21) | **0** |
+| `fConfig:cfgName` | (15,5)–(15,12) | **0** |
+| `t:Color` / `c:Red` / `c:Green` / `c:Blue` / `t:Config` / `c:Config` | — | 1 |
+
+帶著 `is_root = 1` 過濾,「這個引用寫在哪個**函式**裡」會**永遠**解析不到
+(`frFromDecl` 恆為 `Nothing`,只有落在 data/class 宣告內的引用解得出來)——那正是
+fromDecl 最主要的用途。**實作改為不過濾 `is_root`**,候選集取該 `hieFile` 的全部 `decls` 列。
+安全性由上游保證:`goDec` 要求 `nameModule_maybe name == Just smdl`,局部 `where` / `let`
+繫結是 internal name(無 Module),本來就不入 `decls`,故不過濾也混不進非頂層的候選。
+
+這是 Level 3 內部 SQL 的修正,**不動任何 Level 2 契約**(design.md 的抽取規則 4 只說
+「以 span 包含關係 join 得出、取最內層」,未提 `is_root`)。`test_hiedb_facts_acceptance`
+的 (a) 逐條釘住修正後的行為。
+
+### 設計偏差 2:T3 的「空 SQLite」斷言移到 T7
+
+1-to-1 對照表的 T3 原本要「對一個空的暫存 SQLite 呼叫 `readIndexFacts`」且**不需 hiedb**。
+實際做不到:`IndexHandle` 的建構子依 F003 的設計刻意不匯出,**唯一取得途徑是 `ensureIndex`**,
+而它需要 hiedb 執行檔。故:
+
+- `test_hiedb_facts_smoke`(T3,不需 hiedb)改為釘住可及的部分:`bName` / `bLevel`、
+  註冊表順序 `[import-scan, hiedb]`、`HiedbOnly` 時 import-scan 的「未選中」報告
+- 「查詢失敗 → 警告 + 不抛例外」的規則 7 行為改由 `test_hiedb_backend_live`(T8,需 hiedb)
+  以「0 byte 假 `.hie` 讓 `ensureIndex` 失敗」的路徑覆蓋,並額外釘住 `HiedbFactsError`
+  通道的 `"hiedb index failed: "` 前綴
+
+### 其他小偏差(皆屬 Level 3 內部)
+
+- `Q_MODS` 只取四欄(`hieFile, mod, hs_src, is_boot`),**不取 `is_real`**:它只表示
+  「`hs_src` 是否為真實來源檔」,而 `hs_src = NULL` 的情形已由 `resolveModuleSource`
+  的第二層退路涵蓋;取而不用會觸發 `-Wunused-top-binds`
+- D7 的跳過機制沿用 F003 的同一個開關(設計要求),故 `hiedbGatedCount` 改為
+  `length hiedbGatedTests + length hiedbGatedF004Tests`(5 + 4 = 9),`hiedbNotice` 的
+  文字改成 `"extraction/F003 hiedb-driver + F004 hiedb-facts: …"`,F003 的
+  `test_hiedb_skip_notice` 對帳斷言同步調整。無 hiedb 環境實測:**111 個測試全過、
+  9 個跳過**,兩個佔位節點分別顯示 5 與 4
+- `test/Main.hs` 的 `test_hiedb_degrade`(F003 T10)內的區域 `hiedbBackend` 改名為
+  `stubHiedbBackend`——本 feature 匯入了真的 `hiedbBackend`,不改名會觸發
+  `-Wname-shadowing`。行為零變更(仍是替身後端)
+
+### F003 真實簽名複驗(2026-08-22)
+
+設計文檔標「來自 F003 設計文檔而非原始碼」的三列全部打開 `src/Knot/Extract/HiedbDriver.hs`
+(285 行)複驗,**簽名零落差**:
+
+| 複驗項 | 真實出處 | 結果 |
+|---|---|---|
+| `ensureIndex :: ExtractOptions -> ProjectMeta -> IO (Either Text IndexHandle)` | HiedbDriver.hs:241 | 相符 |
+| `probeHiedb :: ExtractOptions -> ProjectMeta -> IO ProbeResult` | HiedbDriver.hs:135 | 相符 |
+| `IndexHandle`(抽象,建構子不匯出) | HiedbDriver.hs:78-84 | 相符 |
+| `ihDbPath :: IndexHandle -> FilePath`(絕對) | HiedbDriver.hs:87-88;值來自 `makeAbsolute` | 相符 |
+| `ihRootDir :: IndexHandle -> FilePath`(絕對) | HiedbDriver.hs:91-92 | 相符(本 feature 刻意不用) |
+| `ihNotes :: IndexHandle -> [ExtractWarning]` | HiedbDriver.hs:106-107 | 相符 |
+| `ihExe :: IndexHandle -> FilePath` | HiedbDriver.hs:95-96 | 相符(本 feature 不用) |
+| `ihStats :: IndexHandle -> IndexStats` / `IndexStats { indexedCount, skippedCount, batchCount }` `deriving (Eq, Show)` | HiedbDriver.hs:100-115 | 相符(本 feature 不用) |
+| `"hiedb index failed: "` 前綴 | HiedbDriver.hs:125 `indexPrefix` | 相符,`HiedbFactsError` 原樣轉載 |
+
+`displayException` 不夾帶 backtrace 的假設(A7)實測成立:`runOne` 的
+`displayException (e :: SomeException)` 對 `HiedbFactsError` 回傳原文本身,
+`brDetail` 確實含 `"hiedb index failed: "`(`test_hiedb_backend_live` 釘住)。
+
+### hiedb 0.8.0.0 schema 二次複驗
+
+從 `C:\cabal\packages\hackage.haskell.org\hiedb\0.8.0.0` 解出原始碼,對 `HieDb/Create.hs`
+的 `setupHieDb` 逐條核對:八張表(`mods` / `exports` / `refs` / `decls` / `imports` /
+`defs` / `typenames` / `typerefs`),**確無 instance 表**(C4 的「不產 `FactInstance`」成立);
+`mods` 為 `(hieFile, mod, unit, is_boot, hs_src, is_real, hash)`,`hs_src TEXT UNIQUE` 可為 `NULL`;
+`refs` 為 `(hieFile, occ, mod, unit, sl, sc, el, ec, is_generated)`;`decls` 為
+`(hieFile, occ, sl, sc, el, ec, is_root)`(無 `mod` 欄);`defs` 為
+`(hieFile, occ, sl, sc, el, ec)` + `PRIMARY KEY(hieFile, occ)`。
+`HieDb/Types.hs` 的 `toNsChar` / `fromNsChar` 前綴五種(`v:` `c:` `t:` `z:` `f<父型別>:`)
+與 `FromField OccName` 的 `T.break (== ':')` 判準,均與 `parseOcc` 的實作一致。
+
+實測 fixture 索引的 `mods.hs_src` = `C:\Users\User\AppData\Local\Temp\hfix\src\Demo\Core.hs`
+(**絕對 + Windows 反斜線**),A3 的「正規化 + 最長後綴比對」路徑正確。
+
+### T11 自我驗收數據(2026-08-22,knot-hs 自身,唯讀)
+
+先以 `cabal build knot-hs:lib:knot-hs knot-hs:exe:knot --ghc-options="-fwrite-ide-info -hiedir .hie"`
+產出自身的 31 個 `.hie`(`.hie/` 已在 `.gitignore`,版控樹不受影響),再以
+`dbPath = <暫存路徑>` 走完整 `extract`:
+
+| 指標 | 值 |
+|---|---|
+| `hieFiles` | 31 |
+| `erLevel` | `DeclLevel` |
+| `erReports` | `[import-scan(used), hiedb(used)]`,`brDetail` 皆為空 |
+| `FactDecl` | 623 |
+| `FactRef` | 7265 |
+| `frGenerated = True` 的 `FactRef` | 846(11.6%) |
+| `erWarnings` | **0**(無「對映不到」、無未知 namespace 前綴) |
+| `<repo>/.knot/` | 未被建立(`--db` 改道生效) |
+
+未知 namespace 統計為零,印證 A2 的判斷:`z:` 在 `refs` / `defs` 實務上不出現。
+F003 的索引重用亦同步驗到:第一次 `IndexStats 31 0 1`、第二次 `IndexStats 0 31 1`。
+
+同一條路徑經**真實 CLI** 再驗一次(前置 2 的落地證明):
+
+```text
+$ knot extract . --db <暫存路徑>/self.sqlite --summary facts
+level: DeclLevel
+backends: 2
+  import-scan used=True
+  hiedb used=True
+facts: 8173 total, 31 modules, 254 imports
+warnings: 0
+```
+
+`knot extract --help` 的旗標與順序與 system.md「CLI 介面(頂層契約)」逐行一致;
+執行後 `<repo>/.knot/` 未被建立。
+
+**注意(給後續開發者)**:`<repo>/.hie/` 是本次為了跑 T11 而產生的本機產物(gitignored)。
+若日後**刪除**某個 library / executable 模組而沒有重產 `.hie`,殘留的 `.hie` 會讓
+`test_hiedb_facts_selfcheck` 出現「對映不到」警告而變紅;此時 `rm -rf .hie` 即可
+(該測試會自動回到「印明原因並跳過」)。
+
+### 建置與測試
+
+- `cabal build all --enable-tests`:通過。**本 feature 新增的程式碼零警告**
+  (`src/Knot/Extract/HiedbFacts.hs`、`Knot.Extract`、`Knot.Extract.Types`、`Knot.App.Cli`)。
+  既有負債未動:`test/Main.hs` 的 8 筆 `-Wincomplete-record-selectors`、
+  `src/Knot/Extract/HiedbDriver.hs:160` 的 1 筆 `-Wx-partial`(`head`,屬 F003)
+- `cabal test --enable-tests`(hiedb 在 PATH):**All 118 tests passed**
+- 無 hiedb 環境(把 `C:\cabal\bin` 從 PATH 移除後直接跑測試執行檔):
+  **All 111 tests passed**,並印出
+  `[skip] extraction/F003 hiedb-driver + F004 hiedb-facts: hiedb executable not found on PATH; 9 tests skipped`
+- 版本號 `0.0.1.0` 未更動;library 全程不印任何輸出(所有提示走 `ExtractWarning`)
+
+**非契約面公開匯出登記(G-E001 日後一併收斂)**:`Knot.Extract.HiedbFacts` 的 `parseOcc`、
+`declKindOf`、`resolveModuleSource`、`pickFromDecl` 四個純函數僅為 1-to-1 測試而匯出,
+不屬 Level 2 契約面;`hiedbBackend` 與 `readIndexFacts` 是契約面。沿用
+`Knot.Meta.SourceIndex.moduleNameFromPath`、`Knot.Extract.Backend.runBackends`、
+`Knot.Extract.HiedbDriver` 的 `defaultDbPath` / `parseIndexStats` / `chunkFileArgs` 的既有慣例
+(haddock 註明),一併登記在 `G-E001`。

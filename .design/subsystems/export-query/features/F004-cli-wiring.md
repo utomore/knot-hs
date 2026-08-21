@@ -5,7 +5,7 @@ title: cli-wiring
 description: knot extract / query 兩子命令的參數解析與四子系統管線組裝
 status: done
 created: 2026-08-21
-updated: 2026-08-21
+updated: 2026-08-22
 depends-on: [F001, F002, F003, project-meta/F001, project-meta/F002, project-meta/F003, extraction/F001, extraction/F002, graph-core/F001]
 related-adr: [ADR-002, ADR-003]
 related-feature: []
@@ -608,6 +608,15 @@ executable 內部匯出,不進 library `exposed-modules`,因此**不擴大 libra
   `SummaryMode`;但那會讓同一語意有兩個入口
 
 ## 實作備註
+
+**假設 A8 已被 extraction 階段二推翻(2026-08-22)**:`--hiedb` / `--db` 兩個旗標已由
+`extraction/F004`(hiedb-facts)的前置 2 補接——`ExtractCmd` 增 `ecHiedbExe` / `ecDbPath`
+兩欄位、`extractParser` 增兩個 `optional (strOption …)`、`toExtractOptions` 改為逐字透傳
+(原本寫死 `Nothing`)。理由:`system.md` 的 CLI 頂層契約現已明列這兩個旗標,且 hiedb 後端
+一註冊,沒有 `--db` 就會在任何被掃描的專案裡建 `.knot/` 且無法改道,直接違反
+「驗收標的不得異動」的唯讀例外機制。原假設 A8「契約卡六旗標不含 --db / --hiedb」的
+斷言(`test_extract_options_mapping` 的兩條 `Nothing`)已改為透傳斷言,另有
+`extraction/F004` 的 `test_hiedb_db_flags` 專門釘住這個缺陷修補。
 
 (executable 內部匯出的清單已預先登記在「新增的介面」,供 build-log 階段一發現 2 所指的
 `G-E001` 一併評估——本 feature 的匯出全部在 executable 段,不擴大 library 公開面。)

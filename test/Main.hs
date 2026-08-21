@@ -18,6 +18,7 @@ import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.List (find, intercalate, isInfixOf, isPrefixOf, sort, sortOn)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.Text (Text)
@@ -47,6 +48,9 @@ import System.IO
   , withFile
   )
 import System.Process (readProcessWithExitCode)
+
+-- extraction/F004 T10:驗收標準 3 的「逐筆對帳」要獨立開 DB 查 refs 表。
+import Database.SQLite.Simple (Query (..), query_, withConnection)
 
 import Options.Applicative
   ( ParserResult (..)
@@ -115,6 +119,14 @@ import Knot.Extract.HiedbDriver
   , ihStats
   , parseIndexStats
   , probeHiedb
+  )
+import Knot.Extract.HiedbFacts
+  ( declKindOf
+  , hiedbBackend
+  , parseOcc
+  , pickFromDecl
+  , readIndexFacts
+  , resolveModuleSource
   )
 import Knot.Extract.ImportScan
   ( headerModuleOf
@@ -263,6 +275,7 @@ tests mHiedb = testGroup "knot-hs"
   [ f001Tests, f002Tests, f003Tests
   , extractionF001Tests, extractionF002Tests
   , extractionF003Tests mHiedb
+  , extractionF004Tests mHiedb
   , graphCoreF001Tests
   , exportQueryF001Tests
   , exportQueryF002Tests
@@ -844,7 +857,7 @@ factsA =
   ]
 factsB =
   [ FactRef (mn "Z.Late") (Just (qn "Z.Late" "go" ValueNs)) (qn "A.Early" "helper" ValueNs)
-      "src/Z/Late.hs" 21
+      False "src/Z/Late.hs" 21
   , FactDecl (qn "A.Early" "helper" ValueNs) ValueDecl "src/A/Early.hs" 4
   , FactInstance (qn "A.Early" "Renderable" TypeNs) (T.pack "Renderable Sprite")
       "src/A/Early.hs" 30
@@ -898,11 +911,12 @@ testExtractTypesConstruct = testCase "test_extract_types_construct" $ do
       fdKind f @?= DataDecl
       fdFile f @?= "src/A/Early.hs"
       fdLine f @?= 4
-  case FactRef modName (Just q) (qn "Z.Late" "go" ValueNs) "src/A/Early.hs" 5 of
+  case FactRef modName (Just q) (qn "Z.Late" "go" ValueNs) True "src/A/Early.hs" 5 of
     f@FactRef{} -> do
       frFromModule f @?= modName
       frFromDecl f   @?= Just q
       frTarget f     @?= qn "Z.Late" "go" ValueNs
+      frGenerated f  @?= True
       frFile f       @?= "src/A/Early.hs"
       frLine f       @?= 5
   case FactInstance (qn "A.Early" "Renderable" TypeNs) (T.pack "Renderable Sprite")
@@ -1101,7 +1115,8 @@ genFact = Gen.choice
   , FactDecl <$> genQual <*> Gen.element
       [ValueDecl, DataDecl, ClassDecl, InstanceDecl, TypeSynDecl, PatSynDecl, FamilyDecl]
       <*> genPath <*> genLine
-  , FactRef <$> genMod <*> Gen.maybe genQual <*> genQual <*> genPath <*> genLine
+  , FactRef <$> genMod <*> Gen.maybe genQual <*> genQual <*> Gen.bool
+      <*> genPath <*> genLine
   , FactInstance <$> genQual <*> genOcc <*> genPath <*> genLine
   ]
  where
@@ -1109,18 +1124,21 @@ genFact = Gen.choice
   genOcc  = T.pack <$> Gen.string (Range.linear 1 4) Gen.alpha
   genPath = Gen.string (Range.linear 1 6) Gen.alpha
   genLine = Gen.int (Range.linear 1 200)
-  genQual = QualName <$> genMod <*> genOcc <*> Gen.element [ValueNs, TypeNs]
+  genQual = QualName <$> genMod <*> genOcc
+              <*> Gen.element [ValueNs, DataConNs, TypeNs, FieldNs]
 
 -- extraction T7: 進入點與註冊表
--- (F002 起註冊表已填入 import-scan;本測試改為驗證 extract 確實委派給
---  registeredBackends——每個註冊後端剛好一筆報告、能力等級由實際跑的後端決定。
+-- (F002 起註冊表已填入 import-scan、F004 起併排註冊 hiedb;本測試驗證
+--  extract 確實委派給 registeredBackends——每個註冊後端剛好一筆報告、
+--  能力等級由實際跑的後端決定。projFixture 沒有 .hie,故 hiedb 恆探測不過,
+--  等級停在 ModuleLevel 且不會在版控樹裡建 .knot/。
 --  空註冊表語意本身已隨 F002 消失,見 F002「實作備註」)
 testExtractEntryEmptyRegistry :: TestTree
 testExtractEntryEmptyRegistry = testCase "test_extract_entry_registry" $ do
   pm <- loadProjectMeta (defOpts projFixture)
   forM_ [Auto, ImportsOnly, HiedbOnly] $ \c -> do
     r <- extract (extOpts c) pm
-    map brBackend (erReports r) @?= [importScanName]
+    map brBackend (erReports r) @?= [importScanName, hiedbName]
     erLevel r @?= ModuleLevel
   rHiedb <- extract (extOpts HiedbOnly) pm
   erFacts rHiedb    @?= []   -- import-scan 未選中 → 無事實
@@ -1484,7 +1502,7 @@ extractionF003Tests mHiedb = testGroup "extraction/F003 hiedb-driver" $
   ]
   ++ case mHiedb of
        Just _  -> hiedbGatedTests
-       Nothing -> [testCase (hiedbSkipLabel hiedbGatedCount) (pure ())]
+       Nothing -> [testCase (hiedbSkipLabel (length hiedbGatedTests)) (pure ())]
 
 -- | 需要 hiedb 執行檔才跑得動的測試節點(D7 的管轄範圍)。
 hiedbGatedTests :: [TestTree]
@@ -1498,15 +1516,18 @@ hiedbGatedTests =
 
 -- | 跳過數常數;由 @test_hiedb_skip_notice@ 與實際掛載的節點數對帳
 -- (假設 A7:不引入 @tasty-expected-failure@,跳過數改由訊息與節點名承載)。
+--
+-- extraction/F004 沿用同一個開關(委派決策 D7:只__加掛__、不另建一套),
+-- 故總數是兩個 feature 的受管轄節點數相加。
 hiedbGatedCount :: Int
-hiedbGatedCount = 5
+hiedbGatedCount = length hiedbGatedTests + length hiedbGatedF004Tests
 
 -- | 測試啟動時印的一行:有 hiedb 就說用哪支,沒有就說明原因與跳過數。
 hiedbNotice :: Maybe FilePath -> Int -> String
 hiedbNotice (Just p) _ = "[hiedb] using " <> p
 hiedbNotice Nothing n =
-  "[skip] extraction/F003 hiedb-driver: hiedb executable not found on PATH; "
-    <> show n <> " tests skipped"
+  "[skip] extraction/F003 hiedb-driver + F004 hiedb-facts: \
+  \hiedb executable not found on PATH; " <> show n <> " tests skipped"
 
 -- | 佔位節點的名稱本身帶跳過數,使其也出現在 tasty 的逐項輸出。
 hiedbSkipLabel :: Int -> String
@@ -1646,8 +1667,10 @@ testHiedbSkipNotice = testCase "test_hiedb_skip_notice" $ do
   -- 佔位節點名稱也帶跳過數,使其出現在 tasty 逐項輸出
   assertBool "skip label carries the count"
     (show hiedbGatedCount `isInfixOf` hiedbSkipLabel hiedbGatedCount)
-  -- 常數與實際受管轄的節點數對帳
-  hiedbGatedCount @?= length hiedbGatedTests
+  -- 常數與實際受管轄的節點數對帳(F003 五個 + F004 加掛的,D7 同一個開關)
+  hiedbGatedCount @?= length hiedbGatedTests + length hiedbGatedF004Tests
+  assertBool "F004 must hang its gated tests on the same switch"
+    (not (null hiedbGatedF004Tests))
 
 -- extraction/F003 T6(不需 hiedb):執行檔類不可用,原因指明執行檔
 testProbeHiedbNoExe :: TestTree
@@ -1784,8 +1807,9 @@ testHiedbDegrade :: TestTree
 testHiedbDegrade = testCase "test_hiedb_degrade" $ do
   ranRef <- newIORef False
   let missing = hiedbFixture </> "no-such-hiedb-binary"
-      -- F004 之前的暫代組裝:bRun 被呼叫即代表降級判斷錯了
-      hiedbBackend = Backend
+      -- 暫代組裝(F004 已有真的 'hiedbBackend',這裡刻意用替身:
+      -- bRun 被呼叫即代表降級判斷錯了)
+      stubHiedbBackend = Backend
         { bName  = hiedbName
         , bLevel = DeclLevel
         , bProbe = probeHiedb
@@ -1794,7 +1818,7 @@ testHiedbDegrade = testCase "test_hiedb_degrade" $ do
       opts = (extOpts Auto)
         { XT.rootDir = projFixture, XT.hiedbExe = Just missing }
   pm <- loadProjectMeta (defOpts projFixture)
-  res <- runBackends [importScanBackend, hiedbBackend] opts pm
+  res <- runBackends [importScanBackend, stubHiedbBackend] opts pm
   erLevel res @?= ModuleLevel
   case erReports res of
     [scanRep, hiedbRep] -> do
@@ -1834,6 +1858,439 @@ testHiedbSelfcheck = testCase "test_hiedb_selfcheck" $ do
     _ -> putStrLn
       "[skip] test_hiedb_selfcheck: knot-hs itself has no .hie files \
       \(build with -fwrite-ide-info to enable this check)"
+
+--------------------------------------------------------------------------------
+-- extraction/F004 hiedb-facts
+--------------------------------------------------------------------------------
+
+extractionF004Tests :: Maybe FilePath -> TestTree
+extractionF004Tests mHiedb = testGroup "extraction/F004 hiedb-facts" $
+  [ testNamespaceAndGenerated  -- T1
+  , testHiedbDbFlags           -- T2
+  , testHiedbFactsSmoke        -- T3
+  , testParseOcc               -- T4
+  , testResolveModuleSource    -- T5
+  , testPickFromDecl           -- T6
+  , testHiedbBackendRegistered -- T8(不需 hiedb 的部分)
+  , testHiedbFactsFixture      -- T9
+  ]
+  ++ case mHiedb of
+       Just _  -> hiedbGatedF004Tests
+       Nothing -> [testCase (hiedbSkipLabel (length hiedbGatedF004Tests)) (pure ())]
+
+-- | F004 加掛到 D7 同一個開關上的節點(需要 hiedb 執行檔才跑得動)。
+hiedbGatedF004Tests :: [TestTree]
+hiedbGatedF004Tests =
+  [ testReadIndexFacts         -- T7
+  , testHiedbBackendLive       -- T8(需 hiedb 的部分)
+  , testHiedbFactsAcceptance   -- T10
+  , testHiedbFactsSelfcheck    -- T11
+  ]
+
+-- | 安全取出 'FactDecl' 的欄位:以位置 pattern 承接,避免對 sum type 用
+-- 部分選擇器(@-Wincomplete-record-selectors@)。
+declOf :: Fact -> Maybe (QualName, DeclKind, FilePath, Int)
+declOf (FactDecl n k f l) = Just (n, k, f, l)
+declOf _                  = Nothing
+
+-- | 安全取出 'FactRef' 的欄位(理由同 'declOf')。
+refOf :: Fact -> Maybe (ModuleName, Maybe QualName, QualName, Bool, FilePath, Int)
+refOf (FactRef m d t g f l) = Just (m, d, t, g, f, l)
+refOf _                     = Nothing
+
+isImportFact :: Fact -> Bool
+isImportFact FactImport{} = True
+isImportFact _            = False
+
+modText :: ModuleName -> Text
+modText (ModuleName t) = t
+
+-- | T5 用的最小 'SourceFile'(只有 @sfPath@ / @sfModule@ 影響對映)。
+srcFile :: FilePath -> Maybe ModuleName -> SourceFile
+srcFile p m = SourceFile
+  { sfPath = p, sfModule = m, sfOwners = [], sfIncluded = True }
+
+-- extraction/F004 T1: 前置 1 的契約更新(NameSpace 四值、FactRef.frGenerated)
+testNamespaceAndGenerated :: TestTree
+testNamespaceAndGenerated = testCase "test_namespace_and_generated" $ do
+  -- 四個建構子皆可構造且互異;Ord 序即契約序(graph-core 的鑄造規則依賴它)
+  let allNs = [ValueNs, DataConNs, TypeNs, FieldNs]
+  length (nubOrd allNs) @?= 4
+  sort [FieldNs, TypeNs, DataConNs, ValueNs] @?= allNs
+  -- FactRef 可帶 frGenerated 且欄位取值正確(位置 pattern,見 'refOf')
+  let tgt = qn "Demo.Core" "greet" ValueNs
+      src = Just (qn "Demo.App" "run" ValueNs)
+      fr g = FactRef (mn "Demo.App") src tgt g "src/Demo/App.hs" 8
+  refOf (fr True)  @?= Just (mn "Demo.App", src, tgt, True,  "src/Demo/App.hs", 8)
+  refOf (fr False) @?= Just (mn "Demo.App", src, tgt, False, "src/Demo/App.hs", 8)
+  -- 只差 frGenerated 的兩筆分得開(釘住規則 8 的排序依據含這個欄位)
+  assertBool "frGenerated separates by Eq"  (fr False /= fr True)
+  compare (fr False) (fr True) @?= LT
+  -- declKindOf 的值域落在 DeclKind 內(四值全覆蓋,無 partial)
+  map declKindOf allNs @?= [ValueDecl, DataDecl, DataDecl, ValueDecl]
+
+-- extraction/F004 T2: 前置 2——CLI --hiedb / --db 補接(缺陷修補)
+testHiedbDbFlags :: TestTree
+testHiedbDbFlags = testCase "test_hiedb_db_flags" $ do
+  -- 不給 → Nothing(其餘八個欄位維持預設)
+  d <- expectExtractCmd ["extract"]
+  d @?= baseExtractCmd
+  ecHiedbExe d @?= Nothing
+  ecDbPath d   @?= Nothing
+  -- 給了 → 逐字進 ExtractCmd,且只動這兩個欄位
+  c <- expectExtractCmd
+    ["extract", "--hiedb", "C:/tools/hiedb.exe", "--db", "/tmp/x.sqlite"]
+  ecHiedbExe c @?= Just "C:/tools/hiedb.exe"
+  ecDbPath c   @?= Just "/tmp/x.sqlite"
+  c @?= baseExtractCmd
+    { ecHiedbExe = Just "C:/tools/hiedb.exe", ecDbPath = Just "/tmp/x.sqlite" }
+  -- toExtractOptions 逐字透傳(釘住「寫死 Nothing」的缺陷已修)
+  let xo = toExtractOptions c
+  XT.hiedbExe xo @?= Just "C:/tools/hiedb.exe"
+  XT.dbPath xo   @?= Just "/tmp/x.sqlite"
+  let xo0 = toExtractOptions baseExtractCmd
+  XT.hiedbExe xo0 @?= Nothing
+  XT.dbPath xo0   @?= Nothing
+  -- 缺參數 → exit 1 且訊息點名旗標
+  forM_ ["--hiedb", "--db"] $ \flag -> do
+    (msg, code) <- expectParseFailure ["extract", flag]
+    code @?= ExitFailure 1
+    assertHasAll ("missing " <> flag <> " argument") (T.pack msg) [flag]
+  -- --help 列出兩個旗標(system.md CLI 頂層契約的落地證明)
+  (helpMsg, helpCode) <- expectParseFailure ["extract", "--help"]
+  helpCode @?= ExitSuccess
+  assertHasAll "extract help" (T.pack helpMsg) ["--hiedb", "--db"]
+
+-- extraction/F004 T3: 後端值與註冊表(不需 hiedb;探測不過也留得下報告)
+testHiedbFactsSmoke :: TestTree
+testHiedbFactsSmoke = testCase "test_hiedb_facts_smoke" $ do
+  bName hiedbBackend  @?= hiedbName
+  bLevel hiedbBackend @?= DeclLevel
+  -- 註冊表併排註冊,順序為 [import-scan, hiedb](規則 8:順序即報告序)
+  pm <- loadProjectMeta (defOpts projFixture)
+  r <- extract (extOpts Auto) pm
+  map brBackend (erReports r) @?= [importScanName, hiedbName]
+  -- HiedbOnly 時 import-scan 未選中,hiedb 那筆仍在
+  rH <- extract (extOpts HiedbOnly) pm
+  scanRep <- reportFor importScanName rH
+  brUsed scanRep @?= False
+  _ <- reportFor hiedbName rH
+  pure ()
+
+-- extraction/F004 T4: occ 前綴判讀與 DeclKind 粗推(純函數)
+testParseOcc :: TestTree
+testParseOcc = testCase "test_parse_occ" $ do
+  let p = parseOcc . T.pack
+      ok o ns = Just (T.pack o, ns)
+  p "v:foo"           @?= ok "foo" ValueNs
+  p "c:Red"           @?= ok "Red" DataConNs
+  p "t:Color"         @?= ok "Color" TypeNs
+  p "fConfig:cfgName" @?= ok "cfgName" FieldNs     -- 父型別丟棄(假設 A9)
+  p "f:x"             @?= ok "x" FieldNs           -- 空父型別亦屬 f 前綴
+  -- 含冒號的運算子:切在第一個冒號
+  p "c::|"            @?= ok ":|" DataConNs
+  p "v:.:+:"          @?= ok ".:+:" ValueNs
+  p "v:"              @?= ok "" ValueNs
+  -- 不認得的前綴 → Nothing(假設 A2:含型別變數 z:)
+  forM_ ["z:a", "foo", "", "q:x", "vv:x", ":x"] $ \s ->
+    assertBool ("expected Nothing for " <> show s) (p s == Nothing)
+  -- declKindOf 四值對映
+  declKindOf ValueNs   @?= ValueDecl
+  declKindOf FieldNs   @?= ValueDecl
+  declKindOf DataConNs @?= DataDecl
+  declKindOf TypeNs    @?= DataDecl
+
+-- extraction/F004 T5: 絕對 hs_src → repo 相對 sfPath 的兩層對映(純函數)
+testResolveModuleSource :: TestTree
+testResolveModuleSource = testCase "test_resolve_module_source" $ do
+  let core = srcFile "src/Demo/Core.hs" (Just (mn "Demo.Core"))
+      app  = srcFile "src/Demo/App.hs" (Just (mn "Demo.App"))
+      shortCore = srcFile "Core.hs" (Just (mn "Core"))
+      hs = Just . T.pack
+  -- 反斜線正規化 + 後綴比對,回傳 sfPath 原文
+  resolveModuleSource [core, app] (mn "Demo.Core")
+    (hs "C:\\proj\\src\\Demo\\Core.hs") @?= Just "src/Demo/Core.hs"
+  resolveModuleSource [core, app] (mn "Demo.Core")
+    (hs "/home/u/proj/src/Demo/Core.hs") @?= Just "src/Demo/Core.hs"
+  -- 同時有短長兩個候選 → 取最長(與清單順序無關)
+  forM_ [[shortCore, core], [core, shortCore]] $ \sfs ->
+    resolveModuleSource sfs (mn "Demo.Core")
+      (hs "C:\\proj\\src\\Demo\\Core.hs") @?= Just "src/Demo/Core.hs"
+  -- 邊界必須落在 '/':部分片段不命中,退路也不中 → Nothing
+  resolveModuleSource [srcFile "emo/Core.hs" Nothing] (mn "Demo.Core")
+    (hs "C:\\proj\\src\\Demo\\Core.hs") @?= Nothing
+  -- 整串相等也算命中
+  resolveModuleSource [core] (mn "Demo.Core") (hs "src/Demo/Core.hs")
+    @?= Just "src/Demo/Core.hs"
+  -- hs_src = NULL → 退回 sfModule 唯一比對
+  resolveModuleSource [core, app] (mn "Demo.App") Nothing @?= Just "src/Demo/App.hs"
+  -- 後綴落空時也走退路
+  resolveModuleSource [core, app] (mn "Demo.App") (hs "D:\\other\\Nope.hs")
+    @?= Just "src/Demo/App.hs"
+  -- 兩筆同名(兩個 Main)→ 落空
+  let mainA = srcFile "app/Main.hs" (Just (mn "Main"))
+      mainB = srcFile "exe/Main.hs" (Just (mn "Main"))
+  resolveModuleSource [mainA, mainB] (mn "Main") Nothing @?= Nothing
+  -- 零筆 → 落空
+  resolveModuleSource [core] (mn "Nowhere") Nothing @?= Nothing
+  resolveModuleSource [] (mn "Demo.Core") (hs "C:\\proj\\src\\Demo\\Core.hs") @?= Nothing
+
+-- extraction/F004 T6: fromDecl 最內層挑選與破雷(抽取規則 4)
+testPickFromDecl :: TestTree
+testPickFromDecl = testCase "test_pick_from_decl" $ do
+  pickFromDecl [] @?= Nothing
+  -- 兩層巢狀 → 取內層
+  let outer = ((1, 1, 20, 1), qn "M" "X" TypeNs)
+      inner = ((3, 1, 5, 10), qn "M" "go" ValueNs)
+  pickFromDecl [outer, inner] @?= Just (snd inner)
+  pickFromDecl [inner, outer] @?= Just (snd inner)
+  -- 三層巢狀 → 取最內
+  let mid = ((2, 1, 10, 1), qn "M" "mid" ValueNs)
+  pickFromDecl [outer, mid, inner] @?= Just (snd inner)
+  pickFromDecl [inner, mid, outer] @?= Just (snd inner)
+  -- 同 span 的 c:QueryNode 與 t:QueryNode(C3 實測情形)→ 依建構子序取
+  -- DataConNs 那個,且與輸入順序無關
+  let dc = ((4, 1, 4, 20), qn "M" "QueryNode" DataConNs)
+      ty = ((4, 1, 4, 20), qn "M" "QueryNode" TypeNs)
+  pickFromDecl [dc, ty] @?= Just (snd dc)
+  pickFromDecl [ty, dc] @?= Just (snd dc)
+  -- 同 span 同 namespace → 依 occ 字典序
+  let occA = ((4, 1, 4, 20), qn "M" "aaa" ValueNs)
+      occB = ((4, 1, 4, 20), qn "M" "bbb" ValueNs)
+  pickFromDecl [occB, occA] @?= Just (snd occA)
+  -- 起點相同、終點不同 → 取終點較早者(span 較小)
+  let wide   = ((7, 1, 30, 1), qn "M" "wide" ValueNs)
+      narrow = ((7, 1, 9, 1), qn "M" "narrow" ValueNs)
+  pickFromDecl [wide, narrow] @?= Just (snd narrow)
+  -- 同列不同欄的起點 → 取較晚起點(較內層)
+  let colOuter = ((7, 1, 9, 1), qn "M" "outer" ValueNs)
+      colInner = ((7, 5, 9, 1), qn "M" "inner" ValueNs)
+  pickFromDecl [colOuter, colInner] @?= Just (snd colInner)
+
+-- extraction/F004 T9: fixture 的形狀與四 namespace / 產生碼樣本的來源
+testHiedbFactsFixture :: TestTree
+testHiedbFactsFixture = testCase "test_hiedb_facts_fixture" $ do
+  -- 恰好兩個 .hs 與兩個 .hie(釘住 F003 的 IndexStats 2 0 1 不被本次擴充破壞)
+  hs  <- listFilesRec (hiedbFixture </> "src")
+  hie <- listFilesRec (hiedbFixture </> ".hie")
+  sort (map takeFileName hs)  @?= ["App.hs", "Core.hs"]
+  sort (map takeFileName hie) @?= ["App.hie", "Core.hie"]
+  -- .hie 為真實檔且與本 GHC 同版(升版時這裡先紅,指向重產指令)
+  forM_ hie $ \p -> do
+    bytes <- BS.readFile p
+    assertBool ("empty .hie: " <> p) (BS.length bytes > 0)
+    BS.take 3 bytes @?= TE.encodeUtf8 (T.pack "HIE")
+    case BS.split 10 (BS.drop 3 (BS.take 64 bytes)) of
+      (_hieVer : ghcVer : _) ->
+        TE.decodeUtf8 ghcVer @?= T.pack (showVersion fullCompilerVersion)
+      _ -> assertFailure ("unrecognised .hie header: " <> p)
+  -- 四 namespace 與產生碼樣本的來源不得被後人改掉
+  core <- readUtf8 (hiedbFixture </> "src" </> "Demo" </> "Core.hs")
+  assertHasAll "fixture Core.hs" core
+    ["data Config", "cfgName", "deriving (Eq, Show)", "data Color"]
+  app <- readUtf8 (hiedbFixture </> "src" </> "Demo" </> "App.hs")
+  assertHasAll "fixture App.hs" app ["Demo.Core", "greet", "run"]
+
+-- | 遞迴列出目錄下所有檔案(T9 用來數 fixture 的 @.hs@ \/ @.hie@)。
+--
+-- 產生 @.hie@ 的指令(__不入測試流程__,GHC 升版時在
+-- @test\/fixtures\/hiedb\/@ 下重跑一次):
+--
+-- > ghc -fno-code -fwrite-ide-info -hiedir .hie -isrc src/Demo/App.hs src/Demo/Core.hs
+listFilesRec :: FilePath -> IO [FilePath]
+listFilesRec dir = do
+  entries <- listDirectory dir
+  parts <- mapM step entries
+  pure (concat parts)
+ where
+  step e = do
+    let p = dir </> e
+    isDir <- doesDirectoryExist p
+    if isDir then listFilesRec p else pure [p]
+
+-- extraction/F004 T8(不需 hiedb):後端註冊後探測失敗 → 降級但不失敗
+testHiedbBackendRegistered :: TestTree
+testHiedbBackendRegistered = testCase "test_hiedb_backend_registered" $ do
+  pm <- loadProjectMeta (defOpts projFixture)
+  let missing = hiedbFixture </> "no-such-hiedb-binary"
+      opts = (extOpts Auto)
+        { XT.rootDir = projFixture, XT.hiedbExe = Just missing }
+  res <- extract opts pm
+  erLevel res @?= ModuleLevel
+  map brBackend (erReports res) @?= [importScanName, hiedbName]
+  hr <- reportFor hiedbName res
+  brUsed hr @?= False
+  assertBool ("degrade reason must name the executable: " <> T.unpack (brDetail hr))
+    (T.pack "hiedb executable " `T.isPrefixOf` brDetail hr)
+  sr <- reportFor importScanName res
+  brUsed sr @?= True
+  -- import-scan 的事實照出(projFixture 無 import 行,故以 FactModule 為證);
+  -- 失敗的 hiedb 後端一筆 decl 層事實都不留
+  assertBool "import-scan facts must survive the degrade"
+    (not (null (erFacts res)))
+  mapMaybe declOf (erFacts res) @?= []
+  mapMaybe refOf (erFacts res) @?= []
+
+-- extraction/F004 T7: readIndexFacts 主流程(驗收標準 2、4)
+testReadIndexFacts :: TestTree
+testReadIndexFacts = testCase "test_read_index_facts" $
+  withHiedbScratch "f004facts" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    h <- expectRight =<< ensureIndex (hiedbOpts root) pm
+    (facts, warns) <- readIndexFacts h pm
+    -- 回傳警告的開頭是 ihNotes(F003 A2 的 .knot/ 首建提示唯一出口)
+    let notes = ihNotes h
+    assertBool "ihNotes must be non-empty on a fresh tree" (not (null notes))
+    take (length notes) warns @?= notes
+    let decls = mapMaybe declOf facts
+        refs  = mapMaybe refOf facts
+        occOf (q, _, _, _) = qnOcc q
+        nsOf (q, _, _, _) = qnSpace q
+    assertBool "expected decl facts" (not (null decls))
+    assertBool "expected ref facts" (not (null refs))
+    -- 驗收標準 2:四種 namespace 齊備
+    sort (nubOrd (map nsOf decls)) @?= [ValueNs, DataConNs, TypeNs, FieldNs]
+    forM_ [ ("greet", ValueNs), ("Color", TypeNs)
+          , ("Red", DataConNs), ("cfgName", FieldNs) ] $ \(o, ns) ->
+      assertBool ("missing FactDecl " <> show o <> " in " <> show ns)
+        (any (\d -> occOf d == T.pack o && nsOf d == ns) decls)
+    -- 驗收標準 4:每筆事實的檔案都對得回 pmSources
+    let paths = Set.fromList (map sfPath (pmSources pm))
+    forM_ decls $ \(_, _, fp, _) ->
+      assertBool ("fdFile not in pmSources: " <> fp) (Set.member fp paths)
+    forM_ refs $ \(_, _, _, _, fp, _) ->
+      assertBool ("frFile not in pmSources: " <> fp) (Set.member fp paths)
+    -- 產生的事實一律不含 FactModule / FactImport / FactInstance(規則 2 / C4)
+    length (filter (\f -> declOf f == Nothing && refOf f == Nothing) facts) @?= 0
+    -- 拿掉一個 SourceFile → 該 module 的事實消失且恰多一則警告
+    let pm' = pm { pmSources =
+          [ sf | sf <- pmSources pm, not ("Core.hs" `isInfixOf` sfPath sf) ] }
+    (facts', warns') <- readIndexFacts h pm'
+    length warns' @?= length warns + 1
+    let extra = drop (length warns) warns'
+    assertBool ("extra warning must name the module: " <> show extra)
+      (any (hasText "Demo.Core" . ewMessage) extra)
+    assertBool "Demo.Core decls must be gone"
+      (not (any (\(_, _, fp, _) -> "Core.hs" `isInfixOf` fp)
+              (mapMaybe declOf facts')))
+
+-- extraction/F004 T8(需 hiedb):兩後端並存、事實合流,以及 ensureIndex
+-- 失敗時的 HiedbFactsError 通道
+testHiedbBackendLive :: TestTree
+testHiedbBackendLive = testCase "test_hiedb_backend_live" $ do
+  withHiedbScratch "f004backend" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    res <- extract ((extOpts Auto) { XT.rootDir = root }) pm
+    erLevel res @?= DeclLevel
+    map brBackend (erReports res) @?= [importScanName, hiedbName]
+    forM_ (erReports res) $ \r -> do
+      brUsed r @?= True
+      brDetail r @?= T.empty
+    assertBool "import-scan facts present" (any isImportFact (erFacts res))
+    assertBool "hiedb ref facts present"
+      (not (null (mapMaybe refOf (erFacts res))))
+    assertBool "hiedb decl facts present"
+      (not (null (mapMaybe declOf (erFacts res))))
+  -- ensureIndex 必失敗(0 byte 假 .hie)→ brUsed = False + "hiedb index failed: "
+  withHiedbScratch "f004boom" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    hie <- case pmHie pm of
+      Nothing -> assertFailure "scratch tree must expose a .hie directory"
+      Just x  -> pure x
+    let bad = ".hie/Demo/Bad.hie"
+    BS.writeFile (root </> bad) BS.empty
+    let pmBad = pm { pmHie = Just hie { hieFiles = hieFiles hie <> [bad] } }
+    res <- extract ((extOpts Auto) { XT.rootDir = root }) pmBad
+    hr <- reportFor hiedbName res
+    brUsed hr @?= False
+    assertBool ("detail must carry the index-failure prefix: "
+                  <> T.unpack (brDetail hr))
+      (hasText "hiedb index failed: " (brDetail hr))
+    erLevel res @?= ModuleLevel
+    assertBool "import-scan facts survive" (any isImportFact (erFacts res))
+
+-- extraction/F004 T10: 端到端驗收(驗收標準 1、3、5)
+testHiedbFactsAcceptance :: TestTree
+testHiedbFactsAcceptance = testCase "test_hiedb_facts_acceptance" $
+  withHiedbScratch "f004accept" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    h <- expectRight =<< ensureIndex (hiedbOpts root) pm
+    (facts, _) <- readIndexFacts h pm
+    let refs = mapMaybe refOf facts
+    -- (a) 驗收標準 1:跨 module 呼叫的 frFromDecl 指向正確的頂層宣告
+    let target = qn "Demo.Core" "greet" ValueNs
+        inRun  = Just (qn "Demo.App" "run" ValueNs)
+        hits = [ (d, fp) | (m, d, t, _, fp, _) <- refs
+               , m == mn "Demo.App", t == target ]
+    assertBool "expected a cross-module ref to Demo.Core.greet" (not (null hits))
+    -- 全部都掛在 Demo.App 的來源檔上(fdFile / frFile 取 sfPath 原文)
+    forM_ hits $ \(_, fp) -> fp @?= "src/Demo/App.hs"
+    -- 寫在 run 的函式體內那筆 → frFromDecl 指向 run(驗收標準 1)
+    assertBool ("expected a greet ref resolved to Demo.App.run, got: " <> show hits)
+      (any ((== inRun) . fst) hits)
+    -- import 行上的同一個名字落在任何宣告之外 → Nothing(LEFT JOIN 的用途:
+    -- 這種事實不能漏,graph-core 以來源 module 節點為源處理)
+    assertBool ("expected an unresolved greet ref (import line), got: " <> show hits)
+      (any ((== Nothing) . fst) hits)
+    -- (b) 驗收標準 3:與 refs 表逐筆對帳 frGenerated
+    rows <- withConnection (ihDbPath h) $ \c ->
+      query_ c (Query (T.pack
+        "SELECT occ, mod, sl, is_generated FROM refs"))
+        :: IO [(Text, Text, Int, Bool)]
+    assertBool "refs table must be non-empty" (not (null rows))
+    let dbSet = Set.fromList
+          [ (m, occ, ns, sl, g)
+          | (rawOcc, m, sl, g) <- rows
+          , Just (occ, ns) <- [parseOcc rawOcc] ]
+        factSet = Set.fromList
+          [ (modText (qnModule t), qnOcc t, qnSpace t, ln, g)
+          | (_, _, t, g, _, ln) <- refs ]
+    factSet @?= dbSet
+    assertBool "fixture must carry at least one is_generated = 1 ref"
+      (any (\(_, _, _, _, g) -> g) (Set.toList dbSet))
+    -- (c) 驗收標準 5:連續兩次結果完全相同
+    (f1, w1) <- readIndexFacts h pm
+    (f2, w2) <- readIndexFacts h pm
+    f2 @?= f1
+    w2 @?= w1
+    f1 @?= facts
+
+-- extraction/F004 T11: knot-hs 自身唯讀驗收(需 hiedb 且自身有 .hie)
+testHiedbFactsSelfcheck :: TestTree
+testHiedbFactsSelfcheck = testCase "test_hiedb_facts_selfcheck" $ do
+  pm <- loadProjectMeta (defOpts ".")
+  case pmHie pm of
+    Just hie | not (null (hieFiles hie)) -> do
+      knotBefore <- doesDirectoryExist ".knot"
+      tmp <- getTemporaryDirectory
+      let db = tmp </> "knot-hs-f004-self" </> "self.sqlite"
+      removePathForcibly (takeDirectory db)
+      res <- extract ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just db }) pm
+      erLevel res @?= DeclLevel
+      map brBackend (erReports res) @?= [importScanName, hiedbName]
+      forM_ (erReports res) $ \r -> brUsed r @?= True
+      let decls = mapMaybe declOf (erFacts res)
+          refs  = mapMaybe refOf (erFacts res)
+      assertBool "self decl facts" (not (null decls))
+      assertBool "self ref facts" (not (null refs))
+      -- 自身是單套件專案 → 不該有「對映不到」的警告
+      let unmapped =
+            [ w | w <- erWarnings res, hasText "cannot map indexed module" (ewMessage w) ]
+      assertBool ("unexpected unmapped modules: " <> show unmapped) (null unmapped)
+      -- 唯讀驗收:目標專案內不得新建 .knot/
+      doesDirectoryExist ".knot" >>= (@?= knotBefore)
+      putStrLn ("[selfcheck/F004] hieFiles=" <> show (length (hieFiles hie))
+        <> " decls=" <> show (length decls)
+        <> " refs=" <> show (length refs)
+        <> " generated=" <> show (length [ () | (_, _, _, g, _, _) <- refs, g ])
+        <> " warnings=" <> show (length (erWarnings res)))
+      forM_ (erWarnings res) $ \w ->
+        putStrLn ("[selfcheck/F004] warn " <> T.unpack (ewSource w)
+          <> ": " <> T.unpack (ewMessage w))
+      removePathForcibly (takeDirectory db)
+    _ -> putStrLn
+      "[skip] test_hiedb_facts_selfcheck: knot-hs itself has no .hie files \
+      \(build with -fwrite-ide-info -hiedir .hie to enable this check)"
 
 --------------------------------------------------------------------------------
 -- graph-core/F001 module-graph
@@ -3379,7 +3836,7 @@ expectQueryCmd argv = do
     CmdQuery q   -> pure q
     CmdExtract _ -> assertFailure ("expected CmdQuery for " <> show argv)
 
--- | 八個欄位皆為預設的 'ExtractCmd'(測試各自只改需要的欄位)。
+-- | 十個欄位皆為預設的 'ExtractCmd'(測試各自只改需要的欄位)。
 baseExtractCmd :: ExtractCmd
 baseExtractCmd = ExtractCmd
   { ecPath         = "."
@@ -3388,11 +3845,13 @@ baseExtractCmd = ExtractCmd
   , ecModuleOnly   = False
   , ecIncludeTests = False
   , ecHieDir       = Nothing
+  , ecHiedbExe     = Nothing
+  , ecDbPath       = Nothing
   , ecStrict       = False
   , ecSummary      = Nothing
   }
 
--- | 八個欄位皆非預設的 'ExtractCmd'(對映斷言的來源)。
+-- | 十個欄位皆非預設的 'ExtractCmd'(對映斷言的來源)。
 fullExtractCmd :: ExtractCmd
 fullExtractCmd = ExtractCmd
   { ecPath         = "proj"
@@ -3401,6 +3860,8 @@ fullExtractCmd = ExtractCmd
   , ecModuleOnly   = True
   , ecIncludeTests = True
   , ecHieDir       = Just "dist/hie"
+  , ecHiedbExe     = Just "C:/tools/hiedb.exe"
+  , ecDbPath       = Just "/tmp/idx.sqlite"
   , ecStrict       = True
   , ecSummary      = Nothing
   }
@@ -3503,10 +3964,11 @@ testExtractFlagsParse = testCase "test_extract_flags_parse" $ do
   -- 全預設
   d <- expectExtractCmd ["extract"]
   d @?= baseExtractCmd
-  -- 全給定:八個欄位逐一等於預期值
+  -- 全給定:十個欄位逐一等於預期值
   full <- expectExtractCmd
     [ "extract", "proj", "-o", "x.json", "--backend", "imports"
-    , "--module-only", "--include-tests", "--hiedir", "dist/hie", "--strict"
+    , "--module-only", "--include-tests", "--hiedir", "dist/hie"
+    , "--hiedb", "C:/tools/hiedb.exe", "--db", "/tmp/idx.sqlite", "--strict"
     ]
   full @?= fullExtractCmd
   -- --backend 三個取值
@@ -3544,8 +4006,9 @@ testExtractOptionsMapping = testCase "test_extract_options_mapping" $ do
   hieDirOverride mo @?= Just "dist/hie"
   XT.rootDir xo @?= "proj"
   backendChoice xo @?= ImportsOnly
-  hiedbExe xo @?= Nothing           -- 假設 A8:契約卡六旗標不含 --hiedb
-  dbPath xo @?= Nothing             -- 假設 A8:契約卡六旗標不含 --db
+  -- extraction/F004 前置 2:兩個旗標已補接,逐字透傳(不再寫死 Nothing)
+  hiedbExe xo @?= Just "C:/tools/hiedb.exe"
+  dbPath xo @?= Just "/tmp/idx.sqlite"
   moduleOnly bo @?= True
   ET.rootDir eo @?= "proj"
   ET.outputPath eo @?= "x.json"

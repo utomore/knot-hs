@@ -75,7 +75,10 @@ data Command
   | CmdQuery QueryCmd
   deriving (Eq, Show)
 
--- | @knot extract [PATH]@ 的六個旗標 + C6 的 @--summary@。
+-- | @knot extract [PATH]@ 的八個旗標 + C6 的 @--summary@。
+--
+-- 欄位序即 'extractParser' 的解析序(applicative 串接),兩者必須一致;
+-- 順序照 system.md「CLI 介面(頂層契約)」的旗標列表。
 data ExtractCmd = ExtractCmd
   { ecPath         :: FilePath           -- ^ 位置參數 PATH,預設 "."
   , ecOutput       :: Maybe FilePath     -- ^ --output
@@ -83,6 +86,8 @@ data ExtractCmd = ExtractCmd
   , ecModuleOnly   :: Bool               -- ^ --module-only
   , ecIncludeTests :: Bool               -- ^ --include-tests
   , ecHieDir       :: Maybe FilePath     -- ^ --hiedir
+  , ecHiedbExe     :: Maybe FilePath     -- ^ --hiedb
+  , ecDbPath       :: Maybe FilePath     -- ^ --db
   , ecStrict       :: Bool               -- ^ --strict
   , ecSummary      :: Maybe SummaryMode  -- ^ --summary;Nothing = 寫 codegraph.json
   }
@@ -147,6 +152,14 @@ extractParser = ExtractCmd
         (strOption
           (long "hiedir" <> metavar "DIR"
             <> help "override the .hie directory"))
+  <*> optional
+        (strOption
+          (long "hiedb" <> metavar "PATH"
+            <> help "override the hiedb executable location"))
+  <*> optional
+        (strOption
+          (long "db" <> metavar "FILE"
+            <> help "override the index location (default: <PATH>/.knot/hiedb.sqlite)"))
   <*> switch
         (long "strict"
           <> help "exit 1 when anything was skipped")
@@ -231,16 +244,17 @@ toMetaOptions c = MetaOptions
   , hieDirOverride = ecHieDir c
   }
 
--- | @PATH@ / @--backend@ → extraction 的選項。
+-- | @PATH@ / @--backend@ / @--hiedb@ / @--db@ → extraction 的選項。
 --
--- @hiedbExe@ 與 @dbPath@ 一律 'Nothing':契約卡的六旗標不含 @--db@ \/
--- @--hiedb@,新增旗標屬契約面(假設 A8)。
+-- 四個欄位全部逐字透傳;@--hiedb@ 與 @--db@ 對映 system.md「CLI 介面
+-- (頂層契約)」明列的兩個旗標,@--db@ 是唯讀驗收的載重旗標(改道後
+-- 目標專案內不會被建 @.knot\/@)。
 toExtractOptions :: ExtractCmd -> XT.ExtractOptions
 toExtractOptions c = XT.ExtractOptions
   { XT.rootDir       = ecPath c
   , XT.backendChoice = ecBackend c
-  , XT.hiedbExe      = Nothing
-  , XT.dbPath        = Nothing
+  , XT.hiedbExe      = ecHiedbExe c
+  , XT.dbPath        = ecDbPath c
   }
 
 -- | @--module-only@ → graph-core 的選項。
