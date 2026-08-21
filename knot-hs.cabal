@@ -46,9 +46,13 @@ library
 executable knot
     hs-source-dirs:   app
     main-is:          Main.hs
-    other-modules:    Knot.App.Summary
+    other-modules:    Knot.App.Cli
+                      Knot.App.Report
+                      Knot.App.Run
+                      Knot.App.Summary
     build-depends:    base ^>=4.22
                     , knot-hs
+                    , optparse-applicative ^>=0.19
                     , text
     ghc-options:      -Wall
     default-language: GHC2024
@@ -57,7 +61,10 @@ test-suite knot-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test, app
     main-is:          Main.hs
-    other-modules:    Knot.App.Summary
+    other-modules:    Knot.App.Cli
+                      Knot.App.Report
+                      Knot.App.Run
+                      Knot.App.Summary
     build-depends:    base ^>=4.22
                     , aeson ^>=2.3
                     , bytestring
@@ -66,6 +73,7 @@ test-suite knot-test
                     , filepath
                     , hedgehog
                     , knot-hs
+                    , optparse-applicative ^>=0.19
                     , process
                     , tasty
                     , tasty-hedgehog

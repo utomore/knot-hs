@@ -3,7 +3,7 @@ id: F004
 type: feature
 title: cli-wiring
 description: knot extract / query 兩子命令的參數解析與四子系統管線組裝
-status: open
+status: done
 created: 2026-08-21
 updated: 2026-08-21
 depends-on: [F001, F002, F003, project-meta/F001, project-meta/F002, project-meta/F003, extraction/F001, extraction/F002, graph-core/F001]
@@ -498,38 +498,38 @@ executable 內部匯出,不進 library `exposed-modules`,因此**不擴大 libra
 
 ## TodoList
 
-- [ ] T1: `Knot.App.Cli` 的 DTO 與頂層 parser 骨架——`Command` / `ExtractCmd` / `SummaryMode` /
+- [x] T1: `Knot.App.Cli` 的 DTO 與頂層 parser 骨架——`Command` / `ExtractCmd` / `SummaryMode` /
       `QueryCmd`(`Eq`/`Show`)、`cliParserInfo`(`hsubparser` 掛 `extract` / `query`,頂層
       `<**> helper`);`knot-hs.cabal` 的 **executable 與 test-suite 兩段**各加
       `optparse-applicative ^>=0.19` 與四個 `other-modules`;library 段零變動、`version` 不動;
       `cabal build all --enable-tests` 在 `-Wall` 下零警告
       (`QueryCmd` 內嵌 `QueryCommand`,故本項需要 `F002` / `F003` 已落地)  `dep: F002, F003`
-- [ ] T2: `extract` 子命令的解析——位置參數 `PATH`(預設 `"."`)與六個旗標
+- [x] T2: `extract` 子命令的解析——位置參數 `PATH`(預設 `"."`)與六個旗標
       (`--output` / `--backend` / `--module-only` / `--include-tests` / `--hiedir` / `--strict`)
       + `--summary meta|facts|graph`;`--backend` 與 `--summary` 以 `eitherReader` 限定取值,
       非法值的訊息列出合法選項  `dep: T1`
-- [ ] T3: 旗標 → Options DTO 的四個純對映函式——`toMetaOptions` / `toExtractOptions` /
+- [x] T3: 旗標 → Options DTO 的四個純對映函式——`toMetaOptions` / `toExtractOptions` /
       `toBuildOptions` / `toExportOptions`,含 `defaultOutputPath` 預設、`commitPolicy = AutoDetect`、
       `hiedbExe`/`dbPath` 為 `Nothing`;**同名 `rootDir` 以 qualified import 處理**
       (`XT.` / `ET.`,不新增語言擴充、不動 library DTO)  `dep: T2`
-- [ ] T4: `query` 子命令的解析——`--graph FILE`(預設 `codegraph.json`)+ 四個子命令
+- [x] T4: `query` 子命令的解析——`--graph FILE`(預設 `codegraph.json`)+ 四個子命令
       `find KEYWORD` / `reachable ID [--reverse]` / `path FROM TO` / `rank [--top N]`(N 預設 10),
       各自對映成正確的 `QueryCommand` 建構子與 `Direction`  `dep: T1`
-- [ ] T5: `Knot.App.Report` 的五條通道行渲染 + `emitNotes`——
+- [x] T5: `Knot.App.Report` 的五條通道行渲染 + `emitNotes`——
       `metaNoteLines` / `extractNoteLines`(含 `erLevel` 與 `brUsed == False` 的降級行)/
       **`graphNoteLines`(`cgWarnings`,硬性要求)** / `exportNoteLines` / `queryNoteLines`;
       空輸入回 `[]`、空清單不寫任何 byte  `dep: T1`
-- [ ] T6: `runExtractCmd`——四站管線組裝、`--summary` 三條路徑各只跑到需要的那一站、
+- [x] T6: `runExtractCmd`——四站管線組裝、`--summary` 三條路徑各只跑到需要的那一站、
       預設路徑寫 `codegraph.json` 並印 `wrote` 行、五條通道印 stderr(**含 `cgWarnings`**)、
       `IOException` 收斂成 exit 1、`--strict` 的跳檔判定  `dep: T3, T5`
-- [ ] T7: `runQueryCmd`——`loadQueryGraph` → `LoadError` exit 1(訊息含路徑與問題)、
+- [x] T7: `runQueryCmd`——`loadQueryGraph` → `LoadError` exit 1(訊息含路徑與問題)、
       `queryGraphNotes` 印 stderr、起點/終點不存在時印 `node not found` 但仍 exit 0、
       成功(含空結果)`renderResult` 走 stdout 且 exit 0  `dep: T4, T5`
-- [ ] T8: `runCommand` 分派 + `Main.hs` 改寫——`main` 只剩
+- [x] T8: `runCommand` 分派 + `Main.hs` 改寫——`main` 只剩
       `execParser >>= runCommand stdout stderr >>= exitWith`;移除既有 `getArgs` 解析與
       `--facts` / `--graph` 舊旗標(改由 `--summary` 承接);頂層/子命令 `--help` exit 0、
       未知子命令與缺參數 exit 1 且訊息走 stderr  `dep: T6, T7`
-- [ ] T9: **兩個唯讀標的手動實跑**(D5 前例,非自動化)——MagicFarmer 與 particle-magic 各跑一次
+- [x] T9: **兩個唯讀標的手動實跑**(D5 前例,非自動化)——MagicFarmer 與 particle-magic 各跑一次
       `knot extract <標的> --output <knot-hs 暫存>/…json`(**標的專案零寫入**),
       產出檔以 dev-flow `scan-graph.mjs` 解析成功;particle-magic 應出現
       `graph: …` 的同名 module 碰撞警告(驗收標準 9 的實地證明)  `dep: T8`
@@ -609,6 +609,92 @@ executable 內部匯出,不進 library `exposed-modules`,因此**不擴大 libra
 
 ## 實作備註
 
-(撰寫時留空;開發過程中與設計的偏差記錄於此。executable 內部匯出的清單已預先登記在
-「新增的介面」,供 build-log 階段一發現 2 所指的 `G-E001` 一併評估——本 feature 的匯出全部在
-executable 段,不擴大 library 公開面。)
+(executable 內部匯出的清單已預先登記在「新增的介面」,供 build-log 階段一發現 2 所指的
+`G-E001` 一併評估——本 feature 的匯出全部在 executable 段,不擴大 library 公開面。)
+
+### 前置真實簽名複驗(2026-08-21,實作階段)
+
+設計階段標「簽名來自設計文檔而非原始碼」的五列(`F002` / `F003`)全部打開真實原始碼複驗,
+**簽名零落差**,設計不需修正:
+
+| 複驗項 | 真實出處 | 結果 |
+|---|---|---|
+| `loadQueryGraph :: FilePath -> IO (Either LoadError QueryGraph)` | `src/Knot/Query.hs:52` | 相符 |
+| `queryGraphNotes :: QueryGraph -> [(Text, Int)]` | `src/Knot/Query/Load.hs:91`,由 `Knot.Query` 轉匯出 | 相符 |
+| `runQuery :: QueryGraph -> QueryCommand -> QueryResult` | `src/Knot/Query/Engine.hs:49` | 相符 |
+| `renderResult :: QueryResult -> Text` | `src/Knot/Query/Render.hs:39` | 相符 |
+| `LoadError` 三建構子 / `QueryCommand` 四建構子 / `Direction` / `QueryResult` 四建構子 / `NodeId` / `QueryNode` / `qgNodes` | `src/Knot/Query/Types.hs:29-93` | 相符 |
+
+匯出面與上游三個子系統同樣逐檔複驗(`src/Knot/Export.hs:33`、`src/Knot/Export/Types.hs:21-46`、
+`src/Knot/Meta.hs:29`、`src/Knot/Meta/Types.hs:22-93`、`src/Knot/Extract.hs:19`、
+`src/Knot/Extract/Types.hs:33-103`、`src/Knot/Graph.hs:37`、`src/Knot/Graph/Types.hs:34-90`),
+全部與「使用到的既有串接介面」表一致。
+
+兩個實作面細節(不影響契約):
+
+1. `Knot.Query.Types` 只匯出 `NodeId (..)`,**沒有 `unNodeId` 具名選擇器** → `Knot.App.Run` 的
+   `missingNodeLines` 以建構子模式比對(`nid@(QT.NodeId t) <- endpoints`)取出 `Text`
+2. `Knot.Query` 只匯出**抽象**的 `QueryGraph`(無 `(..)`)→ 端點存在性檢查要用的 `qgNodes` / `qnId`
+   自 `Knot.Query.Types` 取(qualified `QT.`,與設計文檔「使用到的既有串接介面」所列出處一致)
+
+### 與設計的偏差(1 處)
+
+- **`extractNoteLines` 的 `extract: level …` 行改為「標頭行」語意**:設計的行格式表把它列為無條件輸出,
+  但同節又要求「五條通道空輸入一律回 `[]`(不產生噪音行)」、T5 亦明文斷言。兩者在
+  「無降級、無警告」的預設路徑上互斥(每次成功匯出都會多出一行 stderr)。
+  採取:**降級報告與警告皆為空時整條通道回 `[]`**,非空時以 `extract: level <erLevel>` 為標頭行領頭。
+  ADR-002 的「降級告知」不受影響——降級行本來就只在 `brUsed == False` 時產生,而它一產生就會帶出標頭行。
+  T5 的四條斷言(三行內容、`brUsed = True` 不產生行、空輸入回 `[]`)全部維持原樣通過。
+
+### 其餘落地說明
+
+- **同名欄位**:`XT.` / `ET.` qualified import 如期解決 `rootDir` 碰撞;`Knot.App.Cli` 以
+  `XT.ExtractOptions { XT.rootDir = … }` / `ET.ExportOptions { ET.rootDir = … }` 建構,
+  **未新增 `DuplicateRecordFields` / `OverloadedRecordDot`,未動任何 library DTO 欄位名**。
+  `test/Main.hs` 另補一條 `import qualified Knot.Export.Types as ET`(匯出面裸選擇器用)
+- **同名型別**:`Knot.App.Cli` 只從 `Knot.Query` 取 `NodeId (..)`;`Knot.App.Run` 對 `CodeGraph`
+  只明列 `CodeGraph (..)`(不含 `NodeId`),查詢面型別一律 `QT.`
+- **T6(b) 的碰撞暫存專案**用 module 名 `Dup`(兩個 `hs-source-dirs` 各一份 `Dup.hs`),
+  跑完真實四站管線後 stderr 確實出現 `graph: Dup: … disambiguated: a/Dup.hs, b/Dup.hs`,
+  且同一次輸入加 `--strict` 後 exit 1 並多出 `strict: 1 warnings`——硬性驗收項的端到端防線成立
+- **`cabal` 變更**如設計:executable 與 test-suite 兩段各加 `optparse-applicative ^>=0.19` 與四個
+  `other-modules`;library 段零變動;`version` 維持 `0.0.1.0`
+- **舊旗標**:`app/Main.hs` 的 `getArgs` 解析與 `--facts` / `--graph` 已移除(假設 A11),
+  語意由 `--summary facts` / `--summary graph` 承接;`Main.hs` 只剩
+  `execParser cliParserInfo >>= runCommand stdout stderr >>= exitWith` 一行
+
+### 測試結果
+
+`cabal build all --enable-tests` 零警告(**自身新增程式碼**);全量重編後 `test/Main.hs` 仍有
+既有的 8 筆 `-Wincomplete-record-selectors`(1246:19、1246:29、1248:9、1249:9、1250:20、
+1373:19、1373:29、1375:8,全部落在 extraction 的 `Fact` 部分選擇器),屬既有負債,未觸碰。
+
+`cabal test --enable-tests`:**All 92 tests passed**(既有 84 全綠 + 本 feature 新增 8)。
+
+### T9:兩個唯讀標的手動實跑(2026-08-21)
+
+`--output` 一律改道到 `C:/Users/User/AppData/Local/Temp/`,**兩個標的專案零寫入**
+(實跑前後 `git status` 逐字相同:MagicFarmer 維持既有的 2 個 modified 檔,particle-magic 乾淨)。
+
+| 標的 | exit | 節點 | 邊 | `graph:` 警告 | `scan-graph.mjs` |
+|---|---|---|---|---|---|
+| MagicFarmer | 0 | 60 | 247 | 0 | 解析成功;`imports 247`,commit `93d883dcb3f9` |
+| particle-magic | 0 | 46 | 127 | **1** | 解析成功;`imports 127`,commit `372514e71f32` |
+
+particle-magic 的那 1 條即驗收標準 9 的實地證明:
+
+```
+graph: Main: module declared in 5 source files; node ids disambiguated:
+  app/Main.hs, examples/haskell/Main.hs, tools/InspectMain.hs, tools/Main.hs, tools/SchemaMain.hs
+```
+
+(階段一 graph-core 實測為 1 條同名 `Main` 碰撞,此處一致;`knot query --graph … find Main` 亦確認
+五個節點各自帶消歧 id `Main@<file>`。)`scan-graph.mjs` 兩份都能取出節點/邊/relation 分布與 hub 排名,
+其「圖建於 commit ≠ 目前 HEAD」「code-paths 未填」兩項提示是拿標的專案的圖對 knot-hs 的 `.design`
+比對的必然結果,與本 feature 無關。
+
+### 手動 `--help` 驗收
+
+`knot --help`(exit 0)列出 `extract` / `query` 兩個子命令;`knot extract --help`(exit 0)列出
+`PATH` 與七個旗標(六旗標 + `--summary`)含預設值;`knot query --help`(exit 0)列出 `--graph`
+(預設 `"codegraph.json"`)與 `find` / `reachable` / `path` / `rank` 四個子命令。

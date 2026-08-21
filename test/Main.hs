@@ -1,7 +1,7 @@
 -- | project-meta(F001 scan-baseline、F002 cabal-components、F003 hie-discovery)、
 -- extraction(F001 fact-contract、F002 import-scan)、graph-core(F001
 -- module-graph)與 export-query(F001 json-export、F002 graph-load、
--- F003 query-commands)的 1-to-1 測試。
+-- F003 query-commands、F004 cli-wiring)的 1-to-1 測試。
 module Main (main) where
 
 import Control.Exception (throwIO)
@@ -30,7 +30,23 @@ import System.Directory
   )
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.IO
+  ( Handle
+  , IOMode (WriteMode)
+  , hSetEncoding
+  , hSetNewlineMode
+  , noNewlineTranslation
+  , utf8
+  , withFile
+  )
 import System.Process (readProcessWithExitCode)
+
+import Options.Applicative
+  ( ParserResult (..)
+  , defaultPrefs
+  , execParserPure
+  , renderFailure
+  )
 
 import Hedgehog (Gen, annotate, assert, evalIO, failure, forAll, property, (===))
 import qualified Hedgehog.Gen as Gen
@@ -39,6 +55,26 @@ import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 import Test.Tasty.Hedgehog (testProperty)
 
+import Knot.App.Cli
+  ( Command (..)
+  , ExtractCmd (..)
+  , QueryCmd (..)
+  , SummaryMode (..)
+  , cliParserInfo
+  , toBuildOptions
+  , toExportOptions
+  , toExtractOptions
+  , toMetaOptions
+  )
+import Knot.App.Report
+  ( emitNotes
+  , exportNoteLines
+  , extractNoteLines
+  , graphNoteLines
+  , metaNoteLines
+  , queryNoteLines
+  )
+import Knot.App.Run (runCommand, runExtractCmd, runQueryCmd)
 import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummary)
 import Knot.Export (writeCodegraph)
 import Knot.Export.Commit (detectCommit)
@@ -49,6 +85,9 @@ import Knot.Export.Types
   , ExportReport (..)
   , defaultOutputPath
   )
+-- F004:'ExportOptions' 與 'ExtractOptions' 的 @rootDir@ 同名,裸選擇器不可用
+-- → 匯出面的裸取值走 qualified(沿用 F001 假設 A7 留下的 'XT' 慣例)。
+import qualified Knot.Export.Types as ET
 import Knot.Extract (extract)
 import Knot.Extract.Backend
   ( Backend (..)
@@ -188,6 +227,7 @@ tests = testGroup "knot-hs"
   , exportQueryF001Tests
   , exportQueryF002Tests
   , exportQueryF003Tests
+  , exportQueryF004Tests
   ]
 
 f001Tests :: TestTree
@@ -2843,3 +2883,493 @@ genQueryLink ids =
 queryRelPool :: [String]
 queryRelPool =
   map T.unpack (dependencyRelations <> structuralRelations) <> ["foo"]
+
+--------------------------------------------------------------------------------
+-- export-query / F004 cli-wiring
+--------------------------------------------------------------------------------
+
+exportQueryF004Tests :: TestTree
+exportQueryF004Tests = testGroup "export-query/F004 cli-wiring"
+  -- T9 是「兩個唯讀標的手動實跑」,非自動化(D5 前例):實跑輸出與
+  -- scan-graph.mjs 的對帳結果記在 F004 文檔的「實作備註」。
+  [ testCliToplevelParse       -- T1
+  , testExtractFlagsParse      -- T2
+  , testExtractOptionsMapping  -- T3
+  , testQueryFlagsParse        -- T4
+  , testReportNoteLines        -- T5
+  , testRunExtract             -- T6
+  , testRunQuery               -- T7
+  , testRunCommandDispatch     -- T8
+  ]
+
+--------------------------------------------------------------------------------
+-- F004 測試輔助
+--------------------------------------------------------------------------------
+
+-- | 純解析:不碰 getArgs、不 exit(Extra.hs:151-155)。
+parseCli :: [String] -> ParserResult Command
+parseCli = execParserPure defaultPrefs cliParserInfo
+
+expectParse :: [String] -> IO Command
+expectParse argv = case parseCli argv of
+  Success c -> pure c
+  Failure f -> assertFailure
+    ("expected a successful parse of " <> show argv <> ", got: "
+      <> fst (renderFailure f "knot"))
+  CompletionInvoked _ -> assertFailure ("unexpected completion: " <> show argv)
+
+-- | 解析失敗時取出 (訊息, exit code)(Extra.hs:344)。
+expectParseFailure :: [String] -> IO (String, ExitCode)
+expectParseFailure argv = case parseCli argv of
+  Failure f -> pure (renderFailure f "knot")
+  Success c -> assertFailure
+    ("expected a parse failure for " <> show argv <> ", got: " <> show c)
+  CompletionInvoked _ -> assertFailure ("unexpected completion: " <> show argv)
+
+expectExtractCmd :: [String] -> IO ExtractCmd
+expectExtractCmd argv = do
+  c <- expectParse argv
+  case c of
+    CmdExtract e -> pure e
+    CmdQuery _   -> assertFailure ("expected CmdExtract for " <> show argv)
+
+expectQueryCmd :: [String] -> IO QueryCmd
+expectQueryCmd argv = do
+  c <- expectParse argv
+  case c of
+    CmdQuery q   -> pure q
+    CmdExtract _ -> assertFailure ("expected CmdQuery for " <> show argv)
+
+-- | 八個欄位皆為預設的 'ExtractCmd'(測試各自只改需要的欄位)。
+baseExtractCmd :: ExtractCmd
+baseExtractCmd = ExtractCmd
+  { ecPath         = "."
+  , ecOutput       = Nothing
+  , ecBackend      = Auto
+  , ecModuleOnly   = False
+  , ecIncludeTests = False
+  , ecHieDir       = Nothing
+  , ecStrict       = False
+  , ecSummary      = Nothing
+  }
+
+-- | 八個欄位皆非預設的 'ExtractCmd'(對映斷言的來源)。
+fullExtractCmd :: ExtractCmd
+fullExtractCmd = ExtractCmd
+  { ecPath         = "proj"
+  , ecOutput       = Just "x.json"
+  , ecBackend      = ImportsOnly
+  , ecModuleOnly   = True
+  , ecIncludeTests = True
+  , ecHieDir       = Just "dist/hie"
+  , ecStrict       = True
+  , ecSummary      = Nothing
+  }
+
+-- | UTF-8、無換行轉換的暫存檔 Handle:注入執行層後讀回原樣 byte。
+withNoteHandle :: FilePath -> (Handle -> IO a) -> IO a
+withNoteHandle p act = withFile p WriteMode $ \h -> do
+  hSetEncoding h utf8
+  hSetNewlineMode h noNewlineTranslation
+  act h
+
+-- | 注入兩個 'Handle' 跑一次執行層,回 (結果, stdout, stderr)。
+withCaptured :: FilePath -> (Handle -> Handle -> IO a) -> IO (a, Text, Text)
+withCaptured dir act = do
+  let outP = dir </> "capture-stdout.txt"
+      errP = dir </> "capture-stderr.txt"
+  r <- withNoteHandle outP (\hO -> withNoteHandle errP (\hE -> act hO hE))
+  o <- readUtf8 outP
+  e <- readUtf8 errP
+  pure (r, o, e)
+
+readUtf8 :: FilePath -> IO Text
+readUtf8 p = TE.decodeUtf8 <$> BS.readFile p
+
+writeUtf8 :: FilePath -> String -> IO ()
+writeUtf8 p = BS.writeFile p . TE.encodeUtf8 . T.pack
+
+hasText :: String -> Text -> Bool
+hasText needle hay = T.pack needle `T.isInfixOf` hay
+
+-- | 斷言 haystack 含全部片段(訊息把 haystack 原樣貼出來)。
+assertHasAll :: String -> Text -> [String] -> IO ()
+assertHasAll what hay needles = forM_ needles $ \n ->
+  assertBool (what <> " should contain " <> show n <> ", got: " <> show hay)
+    (hasText n hay)
+
+-- | 在 @dir@ 下建一個「兩個 hs-source-dirs 各宣告同一個 module 名」的最小
+-- 專案,回傳專案根目錄。走完真實管線後 @cgWarnings@ 必為 1 條
+-- (@src/Knot/Graph.hs@ 的 collisionWarnings)。
+mkCollisionProject :: FilePath -> IO FilePath
+mkCollisionProject dir = do
+  let projDir = dir </> "collide"
+  createDirectoryIfMissing True (projDir </> "a")
+  createDirectoryIfMissing True (projDir </> "b")
+  writeUtf8 (projDir </> "collide.cabal") (unlines
+    [ "cabal-version:      3.4"
+    , "name:               collide"
+    , "version:            0.1.0.0"
+    , "build-type:         Simple"
+    , ""
+    , "library"
+    , "    hs-source-dirs:   a"
+    , "    exposed-modules:  Dup"
+    , "    build-depends:    base"
+    , "    default-language: GHC2024"
+    , ""
+    , "executable collide-exe"
+    , "    hs-source-dirs:   b"
+    , "    main-is:          Dup.hs"
+    , "    build-depends:    base"
+    , "    default-language: GHC2024"
+    ])
+  writeUtf8 (projDir </> "a" </> "Dup.hs") "module Dup where\n"
+  writeUtf8 (projDir </> "b" </> "Dup.hs") "module Dup where\n"
+  pure projDir
+
+-- export-query/F004 T1: 頂層解析、--help、未知子命令與四個 CLI DTO
+-- (驗收標準 4、5)
+testCliToplevelParse :: TestTree
+testCliToplevelParse = testCase "test_cli_toplevel_parse" $ do
+  -- --help 走 stdout、exit 0(Extra.hs:202),訊息同時提到兩個子命令
+  (helpMsg, helpCode) <- expectParseFailure ["--help"]
+  helpCode @?= ExitSuccess
+  assertHasAll "top-level help" (T.pack helpMsg) ["extract", "query"]
+  -- 無子命令 / 未知子命令:exit 1(infoFailureCode,Builder.hs:518)
+  (_, noneCode) <- expectParseFailure []
+  noneCode @?= ExitFailure 1
+  (bogusMsg, bogusCode) <- expectParseFailure ["bogus"]
+  bogusCode @?= ExitFailure 1
+  assertHasAll "unknown command message" (T.pack bogusMsg) ["bogus"]
+  -- hsubparser 自動替每個子命令掛的 --help(Extra.hs:88-96)
+  forM_ [["extract", "--help"], ["query", "--help"], ["query", "find", "--help"]]
+    (\argv -> do
+      (_, c) <- expectParseFailure argv
+      assertBool (show argv <> " --help should exit 0") (c == ExitSuccess))
+  -- 四個 CLI DTO 各建一值並比對 Eq
+  let q = QueryCmd { qcFile = "g.json", qcCommand = QT.FindNodes (T.pack "Demo") }
+  CmdExtract baseExtractCmd @?= CmdExtract baseExtractCmd
+  CmdQuery q @?= CmdQuery q
+  assertBool "CmdExtract /= CmdQuery" (CmdExtract baseExtractCmd /= CmdQuery q)
+  assertBool "ExtractCmd Eq separates fields" (baseExtractCmd /= fullExtractCmd)
+  qcFile q @?= "g.json"
+  qcCommand q @?= QT.FindNodes (T.pack "Demo")
+  [SummaryMeta, SummaryFacts, SummaryGraph] @?= [SummaryMeta, SummaryFacts, SummaryGraph]
+  assertBool "SummaryMeta /= SummaryGraph" (SummaryMeta /= SummaryGraph)
+
+-- export-query/F004 T2: extract 的位置參數與七個旗標(驗收標準 1、3、5)
+testExtractFlagsParse :: TestTree
+testExtractFlagsParse = testCase "test_extract_flags_parse" $ do
+  -- 全預設
+  d <- expectExtractCmd ["extract"]
+  d @?= baseExtractCmd
+  -- 全給定:八個欄位逐一等於預期值
+  full <- expectExtractCmd
+    [ "extract", "proj", "-o", "x.json", "--backend", "imports"
+    , "--module-only", "--include-tests", "--hiedir", "dist/hie", "--strict"
+    ]
+  full @?= fullExtractCmd
+  -- --backend 三個取值
+  forM_ [("auto", Auto), ("imports", ImportsOnly), ("hiedb", HiedbOnly)]
+    (\(s, v) -> do
+      c <- expectExtractCmd ["extract", "--backend", s]
+      ecBackend c @?= v)
+  (bm, bc) <- expectParseFailure ["extract", "--backend", "bogus"]
+  bc @?= ExitFailure 1
+  assertHasAll "backend error" (T.pack bm) ["auto", "imports", "hiedb", "bogus"]
+  -- --summary 三個取值(C6)
+  forM_ [("meta", SummaryMeta), ("facts", SummaryFacts), ("graph", SummaryGraph)]
+    (\(s, v) -> do
+      c <- expectExtractCmd ["extract", "--summary", s]
+      ecSummary c @?= Just v)
+  (sm, sc) <- expectParseFailure ["extract", "--summary", "bogus"]
+  sc @?= ExitFailure 1
+  assertHasAll "summary error" (T.pack sm) ["meta", "facts", "graph", "bogus"]
+  -- 缺參數與多餘位置參數
+  (om, oc) <- expectParseFailure ["extract", "--output"]
+  oc @?= ExitFailure 1
+  assertHasAll "missing-argument error" (T.pack om) ["--output"]
+  (_, xc) <- expectParseFailure ["extract", "a", "b"]
+  xc @?= ExitFailure 1
+
+-- export-query/F004 T3: 旗標 → 四個 Options DTO 的純對映(驗收標準 1)
+testExtractOptionsMapping :: TestTree
+testExtractOptionsMapping = testCase "test_extract_options_mapping" $ do
+  let mo = toMetaOptions fullExtractCmd
+      xo = toExtractOptions fullExtractCmd
+      bo = toBuildOptions fullExtractCmd
+      eo = toExportOptions fullExtractCmd
+  root mo @?= "proj"
+  includeTests mo @?= True
+  hieDirOverride mo @?= Just "dist/hie"
+  XT.rootDir xo @?= "proj"
+  backendChoice xo @?= ImportsOnly
+  hiedbExe xo @?= Nothing           -- 假設 A8:契約卡六旗標不含 --hiedb
+  dbPath xo @?= Nothing             -- 假設 A8:契約卡六旗標不含 --db
+  moduleOnly bo @?= True
+  ET.rootDir eo @?= "proj"
+  ET.outputPath eo @?= "x.json"
+  ET.commitPolicy eo @?= AutoDetect -- 假設 A6:無對應旗標,固定 AutoDetect
+  -- --output 未給時走 defaultOutputPath(釘住 F001 假設 A2 的分工)
+  let noOut = fullExtractCmd { ecOutput = Nothing }
+  ET.outputPath (toExportOptions noOut) @?= defaultOutputPath "proj"
+  -- 三個 DTO 的路徑欄位同源
+  [ root (toMetaOptions noOut)
+    , XT.rootDir (toExtractOptions noOut)
+    , ET.rootDir (toExportOptions noOut)
+    ] @?= replicate 3 (ecPath noOut)
+
+-- export-query/F004 T4: query 的 --graph 與四個子命令(驗收標準 2)
+testQueryFlagsParse :: TestTree
+testQueryFlagsParse = testCase "test_query_flags_parse" $ do
+  q1 <- expectQueryCmd ["query", "find", "Demo"]
+  qcFile q1 @?= "codegraph.json"          -- 假設 A3 的預設值
+  qcCommand q1 @?= QT.FindNodes (T.pack "Demo")
+  q2 <- expectQueryCmd ["query", "--graph", "out/g.json", "find", "x"]
+  qcFile q2 @?= "out/g.json"              -- 假設 A3 的改道
+  q3 <- expectQueryCmd ["query", "reachable", "A"]
+  qcCommand q3 @?= QT.Reachable (qid "A") QT.Forward
+  q4 <- expectQueryCmd ["query", "reachable", "A", "--reverse"]
+  qcCommand q4 @?= QT.Reachable (qid "A") QT.Reverse
+  q5 <- expectQueryCmd ["query", "path", "A", "B"]
+  qcCommand q5 @?= QT.ShortestPath (qid "A") (qid "B")
+  (_, pc) <- expectParseFailure ["query", "path", "A"]
+  pc @?= ExitFailure 1
+  q6 <- expectQueryCmd ["query", "rank"]
+  qcCommand q6 @?= QT.RankConnectivity 10 -- 預設 10
+  q7 <- expectQueryCmd ["query", "rank", "--top", "3"]
+  qcCommand q7 @?= QT.RankConnectivity 3
+  (_, tc) <- expectParseFailure ["query", "rank", "--top", "zzz"]
+  tc @?= ExitFailure 1
+  (fm, fc) <- expectParseFailure ["query", "find"]
+  fc @?= ExitFailure 1
+  assertHasAll "missing KEYWORD error" (T.pack fm) ["KEYWORD"]
+  (_, xc) <- expectParseFailure ["query", "bogus"]
+  xc @?= ExitFailure 1
+
+-- export-query/F004 T5: 五條通道的純渲染 + emitNotes(驗收標準 8、9)
+testReportNoteLines :: TestTree
+testReportNoteLines = testCase "test_report_note_lines" $ do
+  -- 通道 1:pmWarnings
+  let pm1 = emptyMeta
+        { pmWarnings = [MetaWarning "app/Main.hs" (T.pack "no module header")] }
+  case metaNoteLines pm1 of
+    [l] -> assertHasAll "meta line" l ["meta:", "app/Main.hs", "no module header"]
+    other -> assertFailure ("expected one meta line, got: " <> show other)
+  metaNoteLines emptyMeta @?= []
+  -- 通道 2:erLevel / erReports / erWarnings
+  let er1 = ExtractResult
+        { erFacts    = []
+        , erLevel    = ModuleLevel
+        , erReports  =
+            [ BackendReport (T.pack "hiedb") False (T.pack "not registered")
+            , BackendReport (T.pack "import-scan") True T.empty
+            ]
+        , erWarnings = [ExtractWarning (T.pack "src/A.hs") (T.pack "unreadable")]
+        }
+  case extractNoteLines er1 of
+    [lv, dg, wn] -> do
+      assertHasAll "level line" lv ["extract: level", "ModuleLevel"]
+      assertHasAll "degrade line" dg ["extract: backend", "hiedb", "not registered"]
+      assertHasAll "warning line" wn ["extract:", "src/A.hs", "unreadable"]
+      assertBool ("a used backend must not produce a line: " <> show [lv, dg, wn])
+        (not (hasText "import-scan" (T.unlines [lv, dg, wn])))
+    other -> assertFailure ("expected three extract lines, got: " <> show other)
+  -- 只有 brUsed = True 的報告 → 零噪音行
+  extractNoteLines er1
+    { erReports  = [BackendReport (T.pack "import-scan") True T.empty]
+    , erWarnings = []
+    } @?= []
+  extractNoteLines (ExtractResult [] ModuleLevel [] []) @?= []
+  -- 通道 3(硬性要求):cgWarnings
+  let cg1 = (graphWith [] [])
+        { cgWarnings =
+            [GraphWarning (T.pack "Main") (T.pack "declared in 2 source files")] }
+  case graphNoteLines cg1 of
+    [l] -> assertHasAll "graph line" l
+      ["graph:", "Main", "declared in 2 source files"]
+    other -> assertFailure ("expected one graph line, got: " <> show other)
+  graphNoteLines (graphWith [] []) @?= []
+  -- 通道 4:xrNotes
+  case exportNoteLines (ExportReport "g.json" 1 2 [T.pack "dropped external edges: 3"]) of
+    [l] -> assertHasAll "export line" l ["export:", "dropped external edges: 3"]
+    other -> assertFailure ("expected one export line, got: " <> show other)
+  exportNoteLines (ExportReport "g.json" 0 0 []) @?= []
+  -- 通道 5:未知 relation
+  let twoNodes = [jsonNode "A" "A" "src/A.hs", jsonNode "B" "B" "src/B.hs"]
+  unknownG <- case parseAt "g.json" (fixtureJson twoNodes [jsonLink "A" "B" "foo"]) of
+    Right g -> pure g
+    Left e  -> assertFailure ("unknown-relation fixture should load: " <> show e)
+  case queryNoteLines unknownG of
+    [l] -> assertHasAll "query note line" l
+      ["query: unknown relation", "foo", "1", "edges"]
+    other -> assertFailure ("expected one query note line, got: " <> show other)
+  cleanG <- case parseAt "g.json" (fixtureJson twoNodes [jsonLink "A" "B" "imports"]) of
+    Right g -> pure g
+    Left e  -> assertFailure ("clean fixture should load: " <> show e)
+  queryNoteLines cleanG @?= []
+  -- emitNotes:空清單零 byte,兩行各以 \n 結尾
+  withExportDir "f004-notes" (\dir -> do
+    (_, empty0, _) <- withCaptured dir (\hO _ -> emitNotes hO [])
+    empty0 @?= T.empty
+    (_, two, _) <- withCaptured dir
+      (\hO _ -> emitNotes hO [T.pack "alpha", T.pack "beta"])
+    two @?= T.pack "alpha\nbeta\n")
+
+-- export-query/F004 T6: runExtractCmd 的四站管線與五條 stderr 通道
+-- (驗收標準 3、7、8、9)
+testRunExtract :: TestTree
+testRunExtract = testCase "test_run_extract" $
+  withExportDir "f004-extract" $ \dir -> do
+    -- (a) 真實 fixture 走完匯出路徑
+    let out = dir </> "cg.json"
+        cmdA = baseExtractCmd { ecPath = graphFixture, ecOutput = Just out }
+    (codeA, outA, errA) <- withCaptured dir (\hO hE -> runExtractCmd hO hE cmdA)
+    codeA @?= ExitSuccess
+    wroteFile <- doesFileExist out
+    assertBool ("output file exists: " <> out) wroteFile
+    loaded <- loadQueryGraph out
+    case loaded of
+      Right _ -> pure ()
+      Left e  -> assertFailure ("exported graph should load back: " <> show e)
+    assertHasAll "extract stdout" outA ["wrote ", out, " nodes, ", " edges"]
+    assertHasAll "extract stderr" errA ["export:"]   -- 驗收標準 8:xrNotes
+    -- (b) 硬性要求的端到端:自建同名 module 碰撞專案 → cgWarnings 走 stderr
+    projDir <- mkCollisionProject dir
+    let cmdB = baseExtractCmd { ecPath = projDir }   -- --output 未給 → 預設路徑
+    (codeB, outB, errB) <- withCaptured dir (\hO hE -> runExtractCmd hO hE cmdB)
+    codeB @?= ExitSuccess
+    assertHasAll "collision warning on stderr" errB
+      ["graph:", "Dup", "disambiguated", "a/Dup.hs", "b/Dup.hs"]
+    -- 預設輸出路徑 = <PATH>/codegraph.json(F001 假設 A2 的分工)
+    defaultWrote <- doesFileExist (defaultOutputPath projDir)
+    assertBool ("default output path was used: " <> defaultOutputPath projDir)
+      defaultWrote
+    assertHasAll "default-path stdout" outB [defaultOutputPath projDir]
+    -- 驗收標準 7:同一次輸入,--strict 把跳檔轉成 exit 1
+    (codeS, _, errS) <- withCaptured dir
+      (\hO hE -> runExtractCmd hO hE cmdB { ecStrict = True })
+    codeS @?= ExitFailure 1
+    assertHasAll "strict stderr" errS ["strict:", "graph:"]
+    -- (c) 三個 --summary 模式逐字元等於既有 render 函式,且都不產出 codegraph.json
+    pm <- loadProjectMeta (defOpts graphFixture)
+    er <- extract ((extOpts Auto) { XT.rootDir = graphFixture }) pm
+    let cg = buildGraph defBuildOpts pm er
+        summaryOut = dir </> "summary-should-not-exist.json"
+        summaryCmd m = baseExtractCmd
+          { ecPath = graphFixture, ecOutput = Just summaryOut, ecSummary = Just m }
+    forM_ [ (SummaryMeta,  renderMetaSummary pm)
+          , (SummaryFacts, renderFactSummary er)
+          , (SummaryGraph, renderGraphSummary cg)
+          ] (\(mode, expected) -> do
+      (codeM, outM, _) <- withCaptured dir
+        (\hO hE -> runExtractCmd hO hE (summaryCmd mode))
+      codeM @?= ExitSuccess
+      outM @?= expected
+      leaked <- doesFileExist summaryOut
+      assertBool (show mode <> " must not write codegraph.json") (not leaked))
+    -- (d) 寫不出去的路徑 → IOException 收斂成 exit 1,不拋未捕捉例外
+    let blocker = dir </> "blocker"
+    writeUtf8 blocker "not a directory\n"
+    (codeD, _, errD) <- withCaptured dir (\hO hE -> runExtractCmd hO hE
+      baseExtractCmd { ecPath = graphFixture, ecOutput = Just (blocker </> "x.json") })
+    codeD @?= ExitFailure 1
+    assertHasAll "export failure stderr" errD ["export:"]
+
+-- export-query/F004 T7: runQueryCmd 的載入、通道 5、端點提示與 exit code
+-- (驗收標準 6、8)
+testRunQuery :: TestTree
+testRunQuery = testCase "test_run_query" $
+  withExportDir "f004-query" $ \dir -> do
+    let out = dir </> "cg.json"
+    (code0, _, _) <- withCaptured dir (\hO hE -> runExtractCmd hO hE
+      baseExtractCmd { ecPath = graphFixture, ecOutput = Just out })
+    code0 @?= ExitSuccess
+    loadedG <- loadQueryGraph out
+    g <- case loadedG of
+      Right x -> pure x
+      Left e  -> assertFailure ("fixture graph should load: " <> show e)
+    -- 命中:stdout 等於 renderResult,exit 0
+    let findCmd = QueryCmd { qcFile = out, qcCommand = QT.FindNodes (T.pack "Demo") }
+    (code1, out1, _) <- withCaptured dir (\hO hE -> runQueryCmd hO hE findCmd)
+    code1 @?= ExitSuccess
+    out1 @?= renderResult (runQuery g (qcCommand findCmd))
+    assertBool ("a hit should list nodes: " <> show out1) (T.length out1 > 0)
+    -- 查無結果:一樣 exit 0(驗收標準 6)
+    let missCmd = QueryCmd { qcFile = out, qcCommand = QT.FindNodes (T.pack "zzz") }
+    (code2, out2, _) <- withCaptured dir (\hO hE -> runQueryCmd hO hE missCmd)
+    code2 @?= ExitSuccess
+    out2 @?= renderResult (runQuery g (qcCommand missCmd))
+    -- LoadFileMissing → exit 1,訊息含路徑
+    let gone = dir </> "nope.json"
+    (code3, _, err3) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+      QueryCmd { qcFile = gone, qcCommand = QT.RankConnectivity 3 })
+    code3 @?= ExitFailure 1
+    assertHasAll "missing-file stderr" err3 ["query:", takeFileName gone]
+    -- LoadParseError → exit 1,訊息指出問題
+    let badP = dir </> "bad.json"
+    writeUtf8 badP "{"
+    (code4, _, err4) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+      QueryCmd { qcFile = badP, qcCommand = QT.RankConnectivity 3 })
+    code4 @?= ExitFailure 1
+    assertHasAll "parse-error stderr" err4 ["query:", takeFileName badP]
+    -- LoadSchemaError(缺 nodes)→ exit 1
+    let schemaP = dir </> "schema.json"
+    writeUtf8 schemaP "{\"directed\":true,\"links\":[]}"
+    (code5, _, err5) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+      QueryCmd { qcFile = schemaP, qcCommand = QT.RankConnectivity 3 })
+    code5 @?= ExitFailure 1
+    assertHasAll "schema-error stderr" err5 ["query:", "nodes"]
+    -- 未知 relation:exit 0,但 stderr 有通道 5 的提示(驗收標準 8)
+    let relP = dir </> "rel.json"
+        twoNodes = [jsonNode "A" "A" "src/A.hs", jsonNode "B" "B" "src/B.hs"]
+    writeUtf8 relP (fixtureJson twoNodes [jsonLink "A" "B" "foo"])
+    (code6, _, err6) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+      QueryCmd { qcFile = relP, qcCommand = QT.RankConnectivity 3 })
+    code6 @?= ExitSuccess
+    assertHasAll "unknown-relation stderr" err6
+      ["query: unknown relation", "foo", "1", "edges"]
+    -- 起點不存在:印提示但仍 exit 0(假設 A4)
+    (code7, _, err7) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+      QueryCmd { qcFile = out, qcCommand = QT.Reachable (qid "NoSuchNode") QT.Forward })
+    code7 @?= ExitSuccess
+    assertHasAll "node-not-found stderr" err7 ["query: node not found: NoSuchNode"]
+    -- 兩端都存在但不連通:零提示、空結果、exit 0
+    (code8, out8, err8) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+      QueryCmd { qcFile = relP, qcCommand = QT.ShortestPath (qid "A") (qid "B") })
+    code8 @?= ExitSuccess
+    assertBool ("existing endpoints need no hint: " <> show err8)
+      (not (hasText "node not found" err8))
+    out8 @?= renderResult (QT.PathResult Nothing)
+
+-- export-query/F004 T8: runCommand 分派與解析層↔執行層的接縫
+-- (驗收標準 4、5)。app/Main.hs 因模組名衝突不進 test-suite,其
+-- 「只剩 execParser / runCommand / exitWith」以人工複核。
+testRunCommandDispatch :: TestTree
+testRunCommandDispatch = testCase "test_run_command_dispatch" $
+  withExportDir "f004-dispatch" $ \dir -> do
+    let out = dir </> "cg.json"
+    -- execParserPure 解出的 Command 直接餵給 runCommand,走完一次 extract
+    ec <- expectParse ["extract", graphFixture, "-o", out]
+    (code1, out1, _) <- withCaptured dir (\hO hE -> runCommand hO hE ec)
+    code1 @?= ExitSuccess
+    wrote <- doesFileExist out
+    assertBool "CmdExtract dispatches to the export path" wrote
+    assertHasAll "dispatch extract stdout" out1 ["wrote "]
+    -- 再走完一次 query;查詢路徑不產生任何檔案
+    qc <- expectParse ["query", "--graph", out, "find", "Demo"]
+    (code2, out2, _) <- withCaptured dir (\hO hE -> runCommand hO hE qc)
+    code2 @?= ExitSuccess
+    assertHasAll "dispatch query stdout" out2 ["found"]
+    strayed <- doesFileExist (dir </> "codegraph.json")
+    assertBool "CmdQuery dispatches to the query path (no file written)"
+      (not strayed)
+    -- 兩條路徑的 stdout 明顯不同(分派沒有走錯)
+    assertBool "extract and query stdout differ" (out1 /= out2)
+    -- 驗收標準 4、5:--help exit 0、未知子命令 exit 1
+    (_, helpCode) <- expectParseFailure ["--help"]
+    helpCode @?= ExitSuccess
+    (_, unknownCode) <- expectParseFailure ["nope"]
+    unknownCode @?= ExitFailure 1
+
