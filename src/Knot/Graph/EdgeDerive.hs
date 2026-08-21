@@ -3,10 +3,14 @@
 -- Level 2 契約:@.design/subsystems/graph-core/design.md@「模組間公開介面」。
 -- 'deriveEdges' 依 A3 裁決回傳三元組(補上警告通道)。
 --
--- 階段一(F001)只推導 @FactImport@ → 'RImports';@FactRef@ / @FactInstance@
--- 屬階段二 @F003@ decl-edges,本階段原樣略過不 crash。
--- edge-derive **不鑄造任何 id**,只從既有節點取 'gnId'(NodeId 的唯一構造
--- 入口在 node-mint)。
+-- F001 推導 @FactImport@ → 'RImports';F002 另推導 @FactDecl@ /
+-- @FactInstance@ → 'RContains'。@FactRef@ 與 @FactInstance@ 的
+-- 'RImplements' 屬階段二 @F003@ decl-edges,本階段原樣略過不 crash。
+--
+-- 端點取得:module 端沿用 F001 的 @(gnLabel, gnFile)@ 節點索引;decl /
+-- instance 端走 node-mint 的 'declNodeIndex' 與 'mintInstanceId'
+-- (F002 假設 A8 + 編排者裁決)——'NodeId' 的建構子仍**只**出現在
+-- node-mint,edge-derive 只是呼叫鑄造/索引函式再以節點集合驗證存在性。
 module Knot.Graph.EdgeDerive
   ( deriveEdges
   , EdgeStats (..)
@@ -20,8 +24,15 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Knot.Extract.Types (Fact (..))
+import Knot.Extract.Types (Fact (..), QualName (..))
 import Knot.Graph.FactGate (GatedFacts (..))
+import Knot.Graph.NodeMint
+  ( declNodeIndex
+  , disambiguate
+  , mintInstanceId
+  , moduleFiles
+  , moduleOfFile
+  )
 import Knot.Graph.Types
   ( GraphEdge (..)
   , GraphNode (..)
@@ -39,19 +50,24 @@ data EdgeStats = EdgeStats
   }
   deriving (Eq, Show)
 
--- | 單筆 @FactImport@ 的判定結果(內部狀態,不匯出)。
+-- | 單筆事實的判定結果(內部狀態,不匯出)。
 data Outcome
   = External ModuleName    -- ^ 規則 1:目標非內部 → 丟棄並計統計
-  | Unresolved GraphWarning-- ^ 來源/目標解析不到節點 → 丟棄並發警告,不計統計
+  | Unresolved GraphWarning-- ^ 來源/目標解析不到節點 → 丟棄並發**逐筆**警告,不計統計
+  | Skipped (Text, Text)   -- ^ 規則 4b:@(gwSource, 原因)@ → 彙整計數後每鍵一則警告
   | SelfLoop               -- ^ 規則 4:解析後兩端同一節點 → 丟棄,不計統計不發警告
   | Derived GraphEdge      -- ^ 產出一條邊(尚未去重)
 
 -- | 事實 × 節點集合 → 邊集合。
 --
 -- 逐筆 @FactImport@ 依「外部判定 → 目標解析 → 來源解析 → 自環 → 產出」的
--- 順序判定(順序即優先序),再套用組裝規則 5 的去重:相同
+-- 順序判定(順序即優先序);逐筆 @FactDecl@ / @FactInstance@ 依「內部性
+-- (規則 4b)→ 端點解析 → 自環 → 產出」判定,產出 'RContains'
+-- (module → decl / instance,'geLine' 取宣告行;F002 假設 A5)。
+--
+-- 兩條判定鏈的原始邊進**同一個**去重表(組裝規則 5:相同
 -- @(geSource, geTarget, geRelation)@ 合併為一條,'geLine' 取組內**最小**
--- 行號(最早的證據行;取極小值而非輸入序第一筆,使結果不隨事實序改變)。
+-- 行號),鍵含 relation 故不互相污染。
 deriveEdges :: GatedFacts -> [GraphNode] -> ([GraphEdge], EdgeStats, [GraphWarning])
 deriveEdges gated nodes = (edges, stats, warnings)
  where
@@ -67,9 +83,18 @@ deriveEdges gated nodes = (edges, stats, warnings)
 
   nodesNamed m = Map.findWithDefault [] m byName
 
-  outcomes =
+  -- decl / instance 端點解析的共用素材(與 node-mint 同一份輸入 → 判定必然一致)
+  facts    = gfFacts gated
+  files    = moduleFiles facts
+  fileMods = moduleOfFile facts
+  nodeIds  = Set.fromList (map gnId nodes)
+  declIdx  = declNodeIndex gated nodes
+
+  outcomes = importOutcomes <> declOutcomes <> instanceOutcomes
+
+  importOutcomes =
     [ classify from to file ln
-    | FactImport{fiFrom = from, fiTo = to, fiFile = file, fiLine = ln} <- gfFacts gated
+    | FactImport{fiFrom = from, fiTo = to, fiFile = file, fiLine = ln} <- facts
     ]
 
   -- 判定順序即優先序:外部 → 目標解析 → 來源解析 → 自環 → 產出
@@ -112,9 +137,95 @@ deriveEdges gated nodes = (edges, stats, warnings)
     , gwMessage = T.concat [msg, T.pack "; import edge dropped at line ", T.pack (show ln)]
     }
 
+  ------------------------------------------------------------------
+  -- 組裝規則 2 的 FactDecl / FactInstance 列:RContains(module → decl)
+  ------------------------------------------------------------------
+
+  declOutcomes =
+    [ classifyDecl q file ln
+    | FactDecl{fdName = q, fdFile = file, fdLine = ln} <- facts
+    ]
+
+  -- 規則 4b:module 非內部 / 端點解析不到 → 不產邊、**不**計
+  -- esDroppedExternal(那不是「指向外部套件」),改彙整為警告(假設 A4)。
+  classifyDecl q file ln
+    | qnModule q `Set.notMember` gfInternal gated =
+        Skipped (moduleText (qnModule q), T.pack "declaring module is not internal")
+    | otherwise = case declNodeOf q file of
+        Nothing  -> Skipped (moduleText (qnModule q)
+                     , T.pack "no declaration node for " <> qnOcc q)
+        Just tgt -> case sourceNode (qnModule q) file of
+          Nothing -> Skipped (moduleText (qnModule q)
+                      , T.pack "no node for the declaring module")
+          Just src
+            | src == tgt -> SelfLoop
+            | otherwise  -> Derived GraphEdge
+                { geSource   = src
+                , geTarget   = tgt
+                , geRelation = RContains
+                , geLine     = Just ln
+                }
+
+  -- declNodeIndex 建立時已以節點集合守門 → 查得到即代表節點存在。
+  -- FactDecl 自帶檔案線索,故以 fdFile 收斂 D1 消歧組。
+  declNodeOf q file =
+    case [nid | (f, nid) <- Map.findWithDefault [] q declIdx, f == file] of
+      [nid] -> Just nid
+      _     -> Nothing
+
+  instanceOutcomes =
+    [ classifyInstance hd file ln
+    | FactInstance{fiInstHead = hd, fiInstFile = file, fiInstLine = ln} <- facts
+    ]
+
+  -- instance 的宣告 module 由 fiInstFile 反查 FactModule(A3 裁決),
+  -- **不是** qnModule fiClass(那是 class 定義處的 module)。
+  classifyInstance hd file ln = case Map.lookup file fileMods of
+    Nothing -> Skipped (T.pack file, T.pack "no module declared in this file")
+    Just m
+      | m `Set.notMember` gfInternal gated ->
+          Skipped (T.pack file, T.pack "declaring module is not internal")
+      | otherwise -> instanceContains m hd file ln
+
+  -- instance 端點解析 + RContains 產出(F003 的 RImplements 來源端沿用同一條路徑)
+  instanceContains m hd file ln
+    | tgt `Set.notMember` nodeIds =
+        Skipped (T.pack file, T.pack "no instance node for " <> hd)
+    | otherwise = case sourceNode m file of
+        Nothing -> Skipped (T.pack file, T.pack "no node for the declaring module")
+        Just src
+          | src == tgt -> SelfLoop
+          | otherwise  -> Derived GraphEdge
+              { geSource   = src
+              , geTarget   = tgt
+              , geRelation = RContains
+              , geLine     = Just ln
+              }
+   where
+    tgt = mintInstanceId m (disambiguate files m file) hd
+
+  ------------------------------------------------------------------
+
   externals = [m | External m <- outcomes]
-  warnings  = [w | Unresolved w <- outcomes]
   rawEdges  = [e | Derived e <- outcomes]
+
+  -- 假設 A4:跳過的事實以 (gwSource, 原因) 彙整計數,每個相異鍵一則警告
+  -- (逐筆會刷屏);Map 的鍵序即決定性輸出序。
+  skipCounts :: Map (Text, Text) Int
+  skipCounts = Map.fromListWith (+) [(k, 1 :: Int) | Skipped k <- outcomes]
+
+  warnings = [w | Unresolved w <- outcomes] <>
+    [ GraphWarning
+        { gwSource  = src
+        , gwMessage = T.concat
+            [ reason
+            , T.pack "; "
+            , T.pack (show n)
+            , T.pack " fact(s) skipped, no contains edge"
+            ]
+        }
+    | ((src, reason), n) <- Map.toList skipCounts
+    ]
 
   -- 規則 5:去重分組(鍵 → (最小行號, 組大小))
   grouped :: Map (NodeId, NodeId, Relation) (Maybe Int, Int)

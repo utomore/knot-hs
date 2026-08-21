@@ -153,7 +153,16 @@ import qualified Knot.Extract.Types as XT
 import Knot.Graph (buildGraph)
 import Knot.Graph.EdgeDerive (EdgeStats (..), deriveEdges)
 import Knot.Graph.FactGate (GatedFacts (..), gateFacts)
-import Knot.Graph.NodeMint (mintModuleId, mintNodes, moduleFiles)
+import Knot.Graph.NodeMint
+  ( declNodeIndex
+  , disambiguate
+  , mintDeclId
+  , mintInstanceId
+  , mintModuleId
+  , mintNodes
+  , moduleFiles
+  , moduleOfFile
+  )
 import Knot.Graph.Types
   ( BuildOptions (..)
   , CodeGraph (..)
@@ -277,6 +286,7 @@ tests mHiedb = testGroup "knot-hs"
   , extractionF003Tests mHiedb
   , extractionF004Tests mHiedb
   , graphCoreF001Tests
+  , graphCoreF002Tests
   , exportQueryF001Tests
   , exportQueryF002Tests
   , exportQueryF003Tests
@@ -2314,15 +2324,40 @@ nid = NodeId . T.pack
 defBuildOpts :: BuildOptions
 defBuildOpts = BuildOptions { moduleOnly = False }
 
--- | 事實流 → CodeGraph 的測試捷徑(ProjectMeta 在階段一不被 fact-gate 讀取)。
+-- | 事實流 → CodeGraph 的測試捷徑。
+--
+-- F002 起 fact-gate 會讀 @pmSources@(組裝規則 3),故只有**純 module 層**
+-- 事實流才可以配 'emptyMeta';含 decl 層事實者一律走 'graphFacts' + 'metaFor'。
 graphOf :: BuildOptions -> [Fact] -> CodeGraph
-graphOf opts facts = buildGraph opts emptyMeta
+graphOf = graphFacts emptyMeta
+
+-- | 事實流 + 手工 'ProjectMeta' → CodeGraph(F002 E3:手工事實流,不碰 hiedb)。
+graphFacts :: ProjectMeta -> BuildOptions -> [Fact] -> CodeGraph
+graphFacts pm opts facts = buildGraph opts pm
   ExtractResult { erFacts = facts, erLevel = ModuleLevel, erReports = [], erWarnings = [] }
 
--- | 事實流 → (邊, 統計, 警告) 的測試捷徑。
+-- | 事實流 → (邊, 統計, 警告) 的測試捷徑(純 module 層用)。
 edgesOf :: [Fact] -> ([GraphEdge], EdgeStats, [GraphWarning])
-edgesOf facts = deriveEdges gated (mintNodes gated)
- where gated = gateFacts emptyMeta facts
+edgesOf = edgesWith emptyMeta
+
+-- | 事實流 + 手工 'ProjectMeta' → (邊, 統計, 警告)。
+edgesWith :: ProjectMeta -> [Fact] -> ([GraphEdge], EdgeStats, [GraphWarning])
+edgesWith pm facts = deriveEdges gated (mintNodes gated)
+ where gated = gateFacts pm facts
+
+-- | 手工 'ProjectMeta':@pmSources@ 涵蓋指定路徑,即組裝規則 3 (a) 條件的
+-- 比對母體(F002 假設 A2:全部條目,不限 @sfIncluded@)。
+metaFor :: [FilePath] -> ProjectMeta
+metaFor paths = ProjectMeta
+  { pmPackages = []
+  , pmSources  = [SourceFile p Nothing [] True | p <- paths]
+  , pmHie      = Nothing
+  , pmWarnings = []
+  }
+
+-- | 節點集合裡的 module 節點(F002 起 'mintNodes' 會混入 decl / instance)。
+moduleNodesOf :: [GraphNode] -> [GraphNode]
+moduleNodesOf ns = [n | n <- ns, gnKind n == ModuleNode]
 
 -- | 邊的可比對三元組(不含證據行)。
 edgeTriple :: GraphEdge -> (NodeId, Relation, NodeId)
@@ -2401,7 +2436,12 @@ ghostMeta = ProjectMeta
   , pmWarnings = []
   }
 
--- graph-core T2: fact-gate 的內部集合(D2)、原樣通過、gfFiltered 恆 0
+-- graph-core T2: fact-gate 的內部集合(D2)、module 層原樣通過、規則 3 生效
+--
+-- F002 T6 更新(假設 A6):規則 3 實作後,@ghostMeta@ 不涵蓋
+-- @src/Demo/Core.hs@ → 該筆 @FactDecl@ 由 (a) 條件濾除、@gfFiltered@ 為 1。
+-- 原本的「事實原樣通過、gfFiltered == 0」改以「涵蓋該檔的 ProjectMeta」表述,
+-- 兩種情境都保留,不刪測試。
 testGateFacts :: TestTree
 testGateFacts = testCase "test_gate_facts" $ do
   let g = gateFacts ghostMeta gateFixtureFacts
@@ -2412,20 +2452,39 @@ testGateFacts = testCase "test_gate_facts" $ do
   -- D2:pmSources.sfModule 的 Ghost 不得進內部集合
   assertBool "pmSources-only module stays out (D2)"
     (mn "Ghost" `Set.notMember` gfInternal g)
-  -- 事實原樣通過(含 FactDecl,不 crash)
-  gfFacts g @?= gateFixtureFacts
-  assertBool "FactDecl passes through"
-    (any (\f -> case f of FactDecl{} -> True; _ -> False) (gfFacts g))
-  gfFiltered g @?= 0
+  -- module 層事實原樣通過(不受規則 3 影響,假設 A1);FactDecl 被 (a) 濾除
+  gfFacts g @?= filter isModuleLayerFact gateFixtureFacts
+  assertBool "FactDecl filtered out by rule 3 (a)"
+    (not (any isDeclFact (gfFacts g)))
+  gfFiltered g @?= 1
+  -- 檔案落在 pmSources 時同一筆 FactDecl 原樣通過、gfFiltered 回到 0
+  let g2 = gateFacts (metaFor ["src/Demo/Core.hs"]) gateFixtureFacts
+  gfFacts g2 @?= gateFixtureFacts
+  assertBool "FactDecl passes through" (any isDeclFact (gfFacts g2))
+  gfFiltered g2 @?= 0
+  Set.toList (gfInternal g2) @?= sort [mn "Demo.Core", mn "Main"]
+
+-- | 規則 3 只適用 decl 層事實(假設 A1);這兩個判定供測試對帳用。
+isModuleLayerFact, isDeclFact :: Fact -> Bool
+isModuleLayerFact FactModule{} = True
+isModuleLayerFact FactImport{} = True
+isModuleLayerFact _            = False
+isDeclFact FactDecl{} = True
+isDeclFact _          = False
 
 -- graph-core T3: id 鑄造(D1)與 module 節點
+--
+-- F002 T6 更新(假設 A6):原本靠 'emptyMeta' 讓 @FactDecl@ 進不了
+-- node-mint,結論成立的理由已被規則 3 取代 → 改配涵蓋該檔的
+-- 'ProjectMeta',讓 @FactDecl@ 通過閘門,斷言 **module 節點清單不變**
+-- (decl 節點另由 graph-core/F002 的測試涵蓋),保持原測試意圖。
 testMintModuleNodes :: TestTree
 testMintModuleNodes = testCase "test_mint_module_nodes" $ do
   -- 契約簽名兩個分支(A2 裁決)
   mintModuleId (mn "Demo.Core") Nothing @?= nid "Demo.Core"
   mintModuleId (mn "Main") (Just "app/Main.hs") @?= nid "Main@app/Main.hs"
-  let g = gateFacts emptyMeta gateFixtureFacts
-      nodes = mintNodes g
+  let g = gateFacts (metaFor ["src/Demo/Core.hs"]) gateFixtureFacts
+      nodes = moduleNodesOf (mintNodes g)
   -- 單一來源檔 → 裸名;同名兩檔 → 整組消歧
   map gnId nodes @?=
     [nid "Main@app/Main.hs", nid "Main@test/Main.hs", nid "Demo.Core"]
@@ -2435,13 +2494,13 @@ testMintModuleNodes = testCase "test_mint_module_nodes" $ do
   -- 消歧只反映在 id 與 gnFile;gnLabel 維持裸名(假設 A5)
   map gnLabel nodes @?= map T.pack ["Main", "Main", "Demo.Core"]
   map gnFile nodes @?= ["app/Main.hs", "test/Main.hs", "src/Demo/Core.hs"]
-  -- 重複 FactModule 只產一個節點;FactDecl 不產節點
-  let dup = gateFacts emptyMeta
+  -- 重複 FactModule 只產一個節點(FactDecl 通過閘門也不改 module 節點清單)
+  let dup = gateFacts (metaFor ["src/A.hs"])
         [ FactModule "src/A.hs" (mn "A")
         , FactModule "src/A.hs" (mn "A")
         , FactDecl (qn "A" "x" ValueNs) ValueDecl "src/A.hs" 4
         ]
-  map gnId (mintNodes dup) @?= [nid "A"]
+  map gnId (moduleNodesOf (mintNodes dup)) @?= [nid "A"]
   -- moduleFiles:同名組有兩個相異檔
   let files = moduleFiles gateFixtureFacts
   fmap Set.toList (Map.lookup (mn "Main") files) @?= Just ["app/Main.hs", "test/Main.hs"]
@@ -2566,25 +2625,40 @@ assembleFacts =
   , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
   ]
 
+-- | T6 的手工 'ProjectMeta':涵蓋 'assembleFacts' 觸及的四個檔案
+-- (F002 起 @FactDecl@ 要通過組裝規則 3 才進得了 node-mint)。
+assembleMeta :: ProjectMeta
+assembleMeta = metaFor
+  ["app/Main.hs", "test/Main.hs", "src/Demo/Core.hs", "src/Demo/Render.hs"]
+
 -- graph-core T6: graph-assemble 的統計、警告彙整與 D5 穩定排序
+--
+-- F002 T6 更新(假設 A6):`F001` 驗收標準 5 的原文即註明「尚無 decl 事實」,
+-- 該前提已被 F002 取代——@moduleOnly@ 兩取值的輸出**必須不同**。改為:
+-- @False@ 時比 `F001` 原結果多 1 個 decl 節點 + 1 條 @RContains@、其餘四項
+-- 統計與兩則警告不變;@True@ 時逐欄回到 `F001` 的原斷言(含
+-- @gsFilteredGenerated == 0@)。不刪除任何斷言。
 testBuildGraphAssemble :: TestTree
 testBuildGraphAssemble = testCase "test_build_graph_assemble" $ do
-  let g = graphOf defBuildOpts assembleFacts
-  -- 節點依 NodeId 遞增
+  let g = graphFacts assembleMeta defBuildOpts assembleFacts
+  -- 節點依 NodeId 遞增(F001 的四個 module 節點 + F002 的一個 decl 節點)
   map gnId (cgNodes g) @?=
-    [ nid "Demo.Core", nid "Demo.Render"
+    [ nid "Demo.Core", nid "Demo.Core.render", nid "Demo.Render"
     , nid "Main@app/Main.hs", nid "Main@test/Main.hs" ]
   assertBool "cgNodes sorted by NodeId"
     (let ids = map gnId (cgNodes g) in and (zipWith (<) ids (drop 1 ids)))
+  map gnKind (cgNodes g) @?=
+    [ModuleNode, DeclNode ValueDecl, ModuleNode, ModuleNode, ModuleNode]
   -- 邊依 (source, relation, target) 遞增;重複 import 合併且取最早行
   map edgeTriple (cgEdges g) @?=
-    [ (nid "Demo.Render", RImports, nid "Demo.Core")
+    [ (nid "Demo.Core", RContains, nid "Demo.Core.render")
+    , (nid "Demo.Render", RImports, nid "Demo.Core")
     , (nid "Main@app/Main.hs", RImports, nid "Demo.Core")
     ]
-  map geLine (cgEdges g) @?= [Just 4, Just 6]
+  map geLine (cgEdges g) @?= [Just 20, Just 4, Just 6]
   assertBool "cgEdges sorted by (source, relation, target)"
     (let ks = map edgeTriple (cgEdges g) in and (zipWith (<) ks (drop 1 ks)))
-  -- GraphStats 四欄
+  -- GraphStats 四欄(decl 事實全部通過閘門 → gsFilteredGenerated 仍為 0)
   cgStats g @?= GraphStats
     { gsDroppedExternal    = 2
     , gsTopExternalTargets = [(mn "Data.Text", 2)]
@@ -2604,9 +2678,20 @@ testBuildGraphAssemble = testCase "test_build_graph_assemble" $ do
     (any ((T.pack "ambiguous" `T.isInfixOf`) . gwMessage) (cgWarnings g))
   length (cgWarnings g) @?= 2
   -- 反轉輸入事實序 → 結果完全相同(釘住排序而非輸入序)
-  graphOf defBuildOpts (reverse assembleFacts) @?= g
-  -- moduleOnly True/False 輸出相同(本階段尚無 decl 事實邏輯)
-  graphOf (BuildOptions { moduleOnly = True }) assembleFacts @?= g
+  graphFacts assembleMeta defBuildOpts (reverse assembleFacts) @?= g
+  -- moduleOnly = True:decl 節點與 RContains 消失,逐欄回到 F001 的原輸出
+  let gm = graphFacts assembleMeta (BuildOptions { moduleOnly = True }) assembleFacts
+  map gnId (cgNodes gm) @?=
+    [ nid "Demo.Core", nid "Demo.Render"
+    , nid "Main@app/Main.hs", nid "Main@test/Main.hs" ]
+  map edgeTriple (cgEdges gm) @?=
+    [ (nid "Demo.Render", RImports, nid "Demo.Core")
+    , (nid "Main@app/Main.hs", RImports, nid "Demo.Core")
+    ]
+  map geLine (cgEdges gm) @?= [Just 4, Just 6]
+  cgStats gm @?= cgStats g            -- 含 gsFilteredGenerated == 0
+  cgWarnings gm @?= cgWarnings g
+  assertBool "moduleOnly output now differs from the full graph" (gm /= g)
 
 -- | graph fixture 的期望節點 id(依 NodeId 遞增)。
 graphFixtureNodeIds :: [NodeId]
@@ -2733,6 +2818,414 @@ testRenderGraphSummary = testCase "test_render_graph_summary" $ do
     (T.pack "  ! Main: declared in 2 source files" `T.isInfixOf` out)
   -- 輸出順序固定(決定性)
   renderGraphSummary g @?= out
+
+--------------------------------------------------------------------------------
+-- graph-core/F002 decl-nodes
+--------------------------------------------------------------------------------
+
+-- | 委派決策 E3:本 group 一律用手工 @[Fact]@ 事實流 + 手工 'ProjectMeta',
+-- 不依賴 hiedb、不讀 @.hie@、不 shell out。
+--
+-- T6(@F001@ 既有測試對帳)不另立測試:依假設 A6 就地更新
+-- @test_gate_facts@ / @test_mint_module_nodes@ / @test_build_graph_assemble@
+-- 三條(見 graph-core/F001 group)。
+graphCoreF002Tests :: TestTree
+graphCoreF002Tests = testGroup "graph-core/F002 decl-nodes"
+  [ testGateGeneratedFilter    -- T1
+  , testMintDeclIds            -- T2
+  , testMintDeclNodes          -- T3
+  , testContainsEdges          -- T4
+  , testModuleOnlyDecl         -- T5
+  , testDeclGraphDeterministic -- T7
+  ]
+
+isDeclNode :: GraphNode -> Bool
+isDeclNode n = case gnKind n of
+  DeclNode{} -> True
+  _          -> False
+
+-- | T1 樣本:module 層 3 筆(檔案刻意不在 @pmSources@)+ decl 層 12 筆
+-- (通過 3、濾除 9,三個條件各自與交集都有代表)。
+gateRule3Facts :: [Fact]
+gateRule3Facts =
+  [ FactModule "src/Demo/Core.hs" (mn "Demo.Core")
+  , FactModule "src/Ghost.hs" (mn "Ghost")
+  , FactImport (mn "Ghost") (mn "Demo.Core") "src/Ghost.hs" 2
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
+  , FactDecl (qn "Demo.Core" "gone" ValueNs) ValueDecl "src/Absent.hs" 5
+  , FactDecl (qn "Demo.Core" "zero" ValueNs) ValueDecl "src/Demo/Core.hs" 0
+  , FactDecl (qn "Demo.Core" "neg" ValueNs) ValueDecl "src/Demo/Core.hs" (-1)
+  , FactDecl (qn "Demo.Core" "both" ValueNs) ValueDecl "src/Absent.hs" 0
+  , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
+      False "src/Demo/Core.hs" 30
+  , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
+      True "src/Demo/Core.hs" 31
+  , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
+      False "src/Absent.hs" 32
+  , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
+      False "src/Demo/Core.hs" 0
+  , FactInstance (qn "Demo.Core" "Renderable" TypeNs) (T.pack "Renderable Sprite")
+      "src/Demo/Core.hs" 40
+  , FactInstance (qn "Demo.Core" "Renderable" TypeNs) (T.pack "Renderable Ghost")
+      "src/Absent.hs" 41
+  , FactInstance (qn "Demo.Core" "Renderable" TypeNs) (T.pack "Renderable Zero")
+      "src/Demo/Core.hs" 0
+  ]
+
+-- F002 T1: 組裝規則 3 的三條件(C4)、計數語意與 module 層豁免(假設 A1)
+testGateGeneratedFilter :: TestTree
+testGateGeneratedFilter = testCase "test_gate_generated_filter" $ do
+  let g = gateFacts (metaFor ["src/Demo/Core.hs"]) gateRule3Facts
+  -- 通過者:module 層 3 筆原樣(fmFile 不在 pmSources 也一律通過,假設 A1)
+  -- + 檔案在 pmSources 且行號 > 0 且非產生碼的 decl / ref / instance 各 1
+  gfFacts g @?=
+    [ FactModule "src/Demo/Core.hs" (mn "Demo.Core")
+    , FactModule "src/Ghost.hs" (mn "Ghost")
+    , FactImport (mn "Ghost") (mn "Demo.Core") "src/Ghost.hs" 2
+    , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
+    , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
+        False "src/Demo/Core.hs" 30
+    , FactInstance (qn "Demo.Core" "Renderable" TypeNs) (T.pack "Renderable Sprite")
+        "src/Demo/Core.hs" 40
+    ]
+  -- gfFiltered = 濾除筆數(不是條件命中次數)
+  gfFiltered g @?= 9
+  gfFiltered g @?= length gateRule3Facts - length (gfFacts g)
+  -- gfInternal 與過濾前相同(module 層不受規則 3 影響)
+  Set.toList (gfInternal g) @?= sort [mn "Demo.Core", mn "Ghost"]
+  -- (c) 條件:檔案與行號都合法,只因 frGenerated = True 被濾除
+  let gGen = gateFacts (metaFor ["src/A.hs"])
+        [ FactModule "src/A.hs" (mn "A")
+        , FactRef (mn "A") Nothing (qn "A" "x" ValueNs) True "src/A.hs" 9
+        ]
+  map isModuleLayerFact (gfFacts gGen) @?= [True]
+  gfFiltered gGen @?= 1
+  -- 一筆同時違反 (a) 與 (b) 只算一次
+  let gBoth = gateFacts (metaFor ["src/A.hs"])
+        [ FactModule "src/A.hs" (mn "A")
+        , FactDecl (qn "A" "both" ValueNs) ValueDecl "src/Absent.hs" 0
+        ]
+  gfFiltered gBoth @?= 1
+  -- 空 pmSources:decl 層全滅、module 層全存
+  let gEmpty = gateFacts emptyMeta gateRule3Facts
+  gfFacts gEmpty @?= filter isModuleLayerFact gateRule3Facts
+  gfFiltered gEmpty @?= 12
+
+-- F002 T2: 鑄造規則表其餘兩列 + 兩個非契約面工具
+testMintDeclIds :: TestTree
+testMintDeclIds = testCase "test_mint_decl_ids" $ do
+  -- 驗收標準 1:同名型別與值鑄出不同 id(C2:#t 只對 TypeNs)
+  mintDeclId (qn "Demo.Core" "Foo" TypeNs) Nothing    @?= nid "Demo.Core.Foo#t"
+  mintDeclId (qn "Demo.Core" "Foo" DataConNs) Nothing @?= nid "Demo.Core.Foo"
+  mintDeclId (qn "Demo.Core" "Foo" ValueNs) Nothing   @?= nid "Demo.Core.Foo"
+  mintDeclId (qn "Demo.Core" "Foo" FieldNs) Nothing   @?= nid "Demo.Core.Foo"
+  assertBool "type id never collides with the term id"
+    (mintDeclId (qn "Demo.Core" "Foo" TypeNs) Nothing
+       /= mintDeclId (qn "Demo.Core" "Foo" DataConNs) Nothing)
+  -- C3:decl 層沿用所屬 module 的消歧結果
+  mintDeclId (qn "Main" "main" ValueNs) (Just "app/Main.hs")
+    @?= nid "Main@app/Main.hs.main"
+  mintDeclId (qn "Main" "main" ValueNs) (Just "test/Main.hs")
+    @?= nid "Main@test/Main.hs.main"
+  -- 驗收標準 2:instance id 含渲染標頭,且對同輸入恆定
+  mintInstanceId (mn "Demo.Core") Nothing (T.pack "Renderable Sprite")
+    @?= nid "Demo.Core#i:Renderable Sprite"
+  mintInstanceId (mn "Main") (Just "app/Main.hs") (T.pack "Show Foo")
+    @?= nid "Main@app/Main.hs#i:Show Foo"
+  mintInstanceId (mn "Demo.Core") Nothing (T.pack "Renderable Sprite")
+    @?= mintInstanceId (mn "Demo.Core") Nothing (T.pack "Renderable Sprite")
+  -- 非契約面 disambiguate:碰撞組回 Just file、非碰撞組與未知 module 回 Nothing
+  let files = moduleFiles gateFixtureFacts
+  disambiguate files (mn "Main") "app/Main.hs"        @?= Just "app/Main.hs"
+  disambiguate files (mn "Main") "test/Main.hs"       @?= Just "test/Main.hs"
+  disambiguate files (mn "Demo.Core") "src/Demo/Core.hs" @?= Nothing
+  disambiguate files (mn "Absent") "src/Absent.hs"    @?= Nothing
+  -- 非契約面 moduleOfFile:由 FactModule 建出檔案 → module 對映
+  let fileMods = moduleOfFile gateFixtureFacts
+  Map.lookup "app/Main.hs" fileMods      @?= Just (mn "Main")
+  Map.lookup "test/Main.hs" fileMods     @?= Just (mn "Main")
+  Map.lookup "src/Demo/Core.hs" fileMods @?= Just (mn "Demo.Core")
+  Map.lookup "src/Absent.hs" fileMods    @?= Nothing
+
+-- | T3/T4/T5/T7 共用:非碰撞 module + 碰撞組 + 同名型別/建構子
+-- + 非內部 module 的 decl + instance。
+declFixtureFacts :: [Fact]
+declFixtureFacts =
+  [ FactModule "src/Demo/Core.hs" (mn "Demo.Core")
+  , FactModule "app/Main.hs" (mn "Main")
+  , FactModule "test/Main.hs" (mn "Main")
+  , FactDecl (qn "Demo.Core" "Foo" TypeNs) DataDecl "src/Demo/Core.hs" 10
+  , FactDecl (qn "Demo.Core" "Foo" DataConNs) DataDecl "src/Demo/Core.hs" 10
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
+  , FactDecl (qn "Main" "main" ValueNs) ValueDecl "app/Main.hs" 3
+  , FactDecl (qn "Main" "main" ValueNs) ValueDecl "test/Main.hs" 4
+  , FactDecl (qn "Ext.Pkg" "helper" ValueNs) ValueDecl "src/Ext.hs" 7
+  , FactInstance (qn "Demo.Class" "Renderable" TypeNs) (T.pack "Renderable Sprite")
+      "src/Demo/Core.hs" 40
+  ]
+
+declFixtureMeta :: ProjectMeta
+declFixtureMeta =
+  metaFor ["src/Demo/Core.hs", "app/Main.hs", "test/Main.hs", "src/Ext.hs"]
+
+-- F002 T3: mintNodes 產出 decl / instance 節點,module 層行為不變
+testMintDeclNodes :: TestTree
+testMintDeclNodes = testCase "test_mint_decl_nodes" $ do
+  let gated = gateFacts declFixtureMeta declFixtureFacts
+      nodes = mintNodes gated
+      byId i = find ((== nid i) . gnId) nodes
+  gfFiltered gated @?= 0     -- 事實全部落在 pmSources 且行號合法
+  -- module 節點清單與 F001 完全相同(不改 module 層行為)
+  map gnId (moduleNodesOf nodes) @?=
+    [nid "Demo.Core", nid "Main@app/Main.hs", nid "Main@test/Main.hs"]
+  -- decl 節點:通過閘門且 module 為內部者各一個(碰撞組兩個 Main.main 相異)
+  sort (map gnId (filter isDeclNode nodes)) @?= sort
+    [ nid "Demo.Core.Foo#t", nid "Demo.Core.Foo", nid "Demo.Core.render"
+    , nid "Main@app/Main.hs.main", nid "Main@test/Main.hs.main"
+    ]
+  case byId "Demo.Core.render" of
+    Nothing -> assertFailure "no node for Demo.Core.render"
+    Just n  -> do
+      gnKind n  @?= DeclNode ValueDecl
+      gnLabel n @?= T.pack "render"      -- gnLabel 是 occ 名,不帶消歧與 #t
+      gnFile n  @?= "src/Demo/Core.hs"
+      gnLine n  @?= Just 20
+  case byId "Demo.Core.Foo#t" of
+    Nothing -> assertFailure "no node for Demo.Core.Foo#t"
+    Just n  -> do
+      gnKind n  @?= DeclNode DataDecl
+      gnLabel n @?= T.pack "Foo"
+      gnLine n  @?= Just 10
+  case byId "Main@test/Main.hs.main" of
+    Nothing -> assertFailure "no node for Main@test/Main.hs.main"
+    Just n  -> do
+      gnLabel n @?= T.pack "main"
+      gnFile n  @?= "test/Main.hs"
+      gnLine n  @?= Just 4
+  -- instance 節點(A3:<mod-id> 由 fiInstFile 反查,不是 qnModule fiClass)
+  case byId "Demo.Core#i:Renderable Sprite" of
+    Nothing -> assertFailure "no node for the instance"
+    Just n  -> do
+      gnKind n  @?= InstanceNode
+      gnLabel n @?= T.pack "Renderable Sprite"
+      gnFile n  @?= "src/Demo/Core.hs"
+      gnLine n  @?= Just 40
+  assertBool "instance id never uses the class module"
+    (all ((/= nid "Demo.Class#i:Renderable Sprite") . gnId) nodes)
+  -- 組裝規則 1:qnModule 非內部 → 不產節點(也不 crash)
+  byId "Ext.Pkg.helper" @?= Nothing
+  -- 假設 A9:同 id 的兩筆 decl 靜默合併為一個節點;
+  -- 合併保留 (gnFile, gnLine) 最小者 → 對事實流重排序不敏感(規則 7)
+  let dupFacts =
+        [ FactModule "src/A.hs" (mn "A")
+        , FactDecl (qn "A" "name" FieldNs) ValueDecl "src/A.hs" 9
+        , FactDecl (qn "A" "name" FieldNs) ValueDecl "src/A.hs" 4
+        ]
+      dupNodes fs = filter isDeclNode (mintNodes (gateFacts (metaFor ["src/A.hs"]) fs))
+  map gnId (dupNodes dupFacts) @?= [nid "A.name"]
+  map gnLine (dupNodes dupFacts) @?= [Just 4]
+  dupNodes (reverse dupFacts) @?= dupNodes dupFacts
+  -- 非契約面 declNodeIndex:結構性守門「查得到 ⇒ 節點存在」
+  let idx = declNodeIndex gated nodes
+  Map.lookup (qn "Demo.Core" "render" ValueNs) idx
+    @?= Just [("src/Demo/Core.hs", nid "Demo.Core.render")]
+  Map.lookup (qn "Main" "main" ValueNs) idx @?= Just
+    [ ("app/Main.hs", nid "Main@app/Main.hs.main")
+    , ("test/Main.hs", nid "Main@test/Main.hs.main")
+    ]
+  Map.lookup (qn "Ext.Pkg" "helper" ValueNs) idx @?= Nothing
+  Map.lookup (qn "Demo.Core" "render" ValueNs)
+    (declNodeIndex gated [n | n <- nodes, gnId n /= nid "Demo.Core.render"])
+    @?= Nothing
+
+-- F002 T4: RContains 推導、統計歸屬(假設 A4)與「明確不做」的反向斷言
+testContainsEdges :: TestTree
+testContainsEdges = testCase "test_contains_edges" $ do
+  let (edges, st, ws) = edgesWith declFixtureMeta declFixtureFacts
+  -- 驗收標準 4:每個 decl / instance 節點恰一條來自所屬 module 的 RContains
+  map edgeTriple edges @?=
+    [ (nid "Demo.Core", RContains, nid "Demo.Core#i:Renderable Sprite")
+    , (nid "Demo.Core", RContains, nid "Demo.Core.Foo")
+    , (nid "Demo.Core", RContains, nid "Demo.Core.Foo#t")
+    , (nid "Demo.Core", RContains, nid "Demo.Core.render")
+    , (nid "Main@app/Main.hs", RContains, nid "Main@app/Main.hs.main")
+    , (nid "Main@test/Main.hs", RContains, nid "Main@test/Main.hs.main")
+    ]
+  map geLine edges @?= [Just 40, Just 10, Just 10, Just 20, Just 3, Just 4]
+  -- 碰撞組:app/Main.hs 的 main 由 Main@app/Main.hs 擁有,不是 Main@test/Main.hs
+  assertBool "collision group ownership stays per-file"
+    (GraphEdge (nid "Main@app/Main.hs") (nid "Main@app/Main.hs.main") RContains (Just 3)
+       `elem` edges)
+  -- 明確不做:輸出中完全沒有 RCalls / RUses / RImplements
+  assertBool "no calls/uses/implements yet"
+    (all ((`elem` [RImports, RContains]) . geRelation) edges)
+  -- 假設 A4:module 非內部 → 不產邊、不計 esDroppedExternal、彙整為一則警告
+  esDroppedExternal st @?= 0
+  esTopExternal st @?= []
+  esDeduped st @?= 0
+  case ws of
+    [w] -> do
+      gwSource w @?= T.pack "Ext.Pkg"
+      assertBool "warning says why" (T.pack "not internal" `T.isInfixOf` gwMessage w)
+      assertBool "warning carries the count"
+        (T.pack "1 fact(s) skipped" `T.isInfixOf` gwMessage w)
+    _ -> assertFailure ("expected exactly one warning, got: " <> show ws)
+  -- 每個相異來源一則警告(帶筆數),不逐筆刷屏
+  let (e3, st3, ws3) = edgesWith (metaFor ["src/E.hs"])
+        [ FactModule "src/A.hs" (mn "A")
+        , FactDecl (qn "Ext" "a" ValueNs) ValueDecl "src/E.hs" 1
+        , FactDecl (qn "Ext" "b" ValueNs) ValueDecl "src/E.hs" 2
+        , FactDecl (qn "Ext" "c" ValueNs) ValueDecl "src/E.hs" 3
+        ]
+  e3 @?= []
+  esDroppedExternal st3 @?= 0
+  case ws3 of
+    [w] -> do
+      gwSource w @?= T.pack "Ext"
+      assertBool "aggregated count is 3"
+        (T.pack "3 fact(s) skipped" `T.isInfixOf` gwMessage w)
+    _ -> assertFailure ("expected exactly one warning, got: " <> show ws3)
+  -- 規則 5:重複 FactDecl 合併為一條、geLine 取最小、計入 esDeduped
+  let (e2, st2, ws2) = edgesWith (metaFor ["src/A.hs"])
+        [ FactModule "src/A.hs" (mn "A")
+        , FactDecl (qn "A" "x" ValueNs) ValueDecl "src/A.hs" 40
+        , FactDecl (qn "A" "x" ValueNs) ValueDecl "src/A.hs" 12
+        ]
+  map edgeTriple e2 @?= [(nid "A", RContains, nid "A.x")]
+  map geLine e2 @?= [Just 12]
+  esDeduped st2 @?= 1
+  ws2 @?= []
+  -- instance 的檔案查不到 FactModule → 不產邊、不計統計、彙整為一則警告
+  let (e4, st4, ws4) = edgesWith (metaFor ["src/Orphan.hs"])
+        [ FactModule "src/A.hs" (mn "A")
+        , FactInstance (qn "A" "C" TypeNs) (T.pack "C T") "src/Orphan.hs" 5
+        ]
+  e4 @?= []
+  esDroppedExternal st4 @?= 0
+  map gwSource ws4 @?= [T.pack "src/Orphan.hs"]
+
+-- | T5/T7 樣本:decl 事實流 + 內部/外部 import + 一筆會被規則 3 濾除的宣告。
+moduleOnlyFacts :: [Fact]
+moduleOnlyFacts = declFixtureFacts <>
+  [ FactImport (mn "Main") (mn "Demo.Core") "app/Main.hs" 2
+  , FactImport (mn "Main") (mn "Data.Text") "app/Main.hs" 3
+  , FactDecl (qn "Demo.Core" "generated" ValueNs) ValueDecl "src/Demo/Core.hs" 0
+  ]
+
+-- F002 T5: 組裝規則 6 與驗收標準 3 / 5
+testModuleOnlyDecl :: TestTree
+testModuleOnlyDecl = testCase "test_module_only_decl" $ do
+  let gFull = graphFacts declFixtureMeta defBuildOpts moduleOnlyFacts
+      gMod  = graphFacts declFixtureMeta (BuildOptions { moduleOnly = True }) moduleOnlyFacts
+  -- 驗收標準 5:moduleOnly = True 時 decl 節點與 RContains 完全不出現
+  forM_ (cgNodes gMod) $ \n -> gnKind n @?= ModuleNode
+  forM_ (cgEdges gMod) $ \e -> geRelation e @?= RImports
+  -- 規則 6:decl 層事實不計入統計
+  gsFilteredGenerated (cgStats gMod) @?= 0
+  -- 驗收標準 3:moduleOnly = False 時濾除數如實計入
+  gsFilteredGenerated (cgStats gFull) @?= 1
+  assertBool "decl nodes present" (any isDeclNode (cgNodes gFull))
+  assertBool "instance node present"
+    (any ((== InstanceNode) . gnKind) (cgNodes gFull))
+  assertBool "contains edges present"
+    (any ((== RContains) . geRelation) (cgEdges gFull))
+  -- 兩者的 module 節點與 imports 邊完全相同
+  moduleNodesOf (cgNodes gFull) @?= cgNodes gMod
+  [e | e <- cgEdges gFull, geRelation e == RImports] @?= cgEdges gMod
+  gsDroppedExternal (cgStats gFull) @?= 1
+  gsDroppedExternal (cgStats gMod)  @?= 1
+  gsTopExternalTargets (cgStats gFull) @?= [(mn "Data.Text", 1)]
+  -- D5:混合節點與 relation 下 cgNodes / cgEdges 仍為全序
+  assertBool "cgNodes sorted by NodeId"
+    (let ids = map gnId (cgNodes gFull) in and (zipWith (<) ids (drop 1 ids)))
+  assertBool "cgEdges sorted by (source, relation, target)"
+    (let ks = map edgeTriple (cgEdges gFull) in and (zipWith (<) ks (drop 1 ks)))
+  assertBool "moduleOnly output differs once decl facts exist" (gMod /= gFull)
+
+-- F002 T7: 決定性 + C1 的 instance 全路徑
+testDeclGraphDeterministic :: TestTree
+testDeclGraphDeterministic = testGroup "test_decl_graph_deterministic"
+  [ testCase "manual fact stream: pure and order-insensitive" $ do
+      let g = graphFacts declFixtureMeta defBuildOpts moduleOnlyFacts
+      graphFacts declFixtureMeta defBuildOpts moduleOnlyFacts @?= g
+      graphFacts declFixtureMeta defBuildOpts (reverse moduleOnlyFacts) @?= g
+      assertBool "warnings deduped and sorted"
+        (cgWarnings g == nubOrd (sort (cgWarnings g)))
+  , testCase "C1: instance-only stream walks the whole path" $ do
+      let facts =
+            [ FactModule "src/Demo/Core.hs" (mn "Demo.Core")
+            , FactInstance (qn "Demo.Class" "Renderable" TypeNs)
+                (T.pack "Renderable Sprite") "src/Demo/Core.hs" 40
+            ]
+          g = graphFacts (metaFor ["src/Demo/Core.hs"]) defBuildOpts facts
+      map gnId (cgNodes g) @?=
+        [nid "Demo.Core", nid "Demo.Core#i:Renderable Sprite"]
+      map gnKind (cgNodes g) @?= [ModuleNode, InstanceNode]
+      map edgeTriple (cgEdges g) @?=
+        [(nid "Demo.Core", RContains, nid "Demo.Core#i:Renderable Sprite")]
+      map geLine (cgEdges g) @?= [Just 40]
+      -- 端到端恆 0 條 RImplements 是預期行為(C1),不是缺陷
+      assertBool "no implements edge in F002"
+        (all ((/= RImplements) . geRelation) (cgEdges g))
+      cgWarnings g @?= []
+      cgStats g @?= zeroStats
+  , testProperty "random decl fact streams stay sorted and order-insensitive" $ property $ do
+      rawNames <- forAll (Gen.list (Range.linear 1 4) genModName)
+      let modSpecs =
+            zipWith (\t i -> (ModuleName t, "src/F" <> show i <> ".hs"))
+              rawNames [1 :: Int ..]
+          modFacts = [FactModule f m | (m, f) <- modSpecs]
+          intMods  = nubOrd (map fst modSpecs)
+          pmPaths  = map snd modSpecs <> ["src/Extra.hs"]
+          pm       = metaFor pmPaths
+      declSpecs <- forAll (Gen.list (Range.linear 0 10) (genDeclSpec modSpecs))
+      let declFacts = [FactDecl q ValueDecl f ln | (q, f, ln) <- declSpecs]
+          facts     = modFacts <> declFacts
+          passes (_, f, ln) = f `elem` pmPaths && ln > 0
+          filesMap  = Map.fromListWith Set.union
+            [(m, Set.singleton f) | (m, f) <- modSpecs]
+          modIds    = Set.fromList
+            [mintModuleId m (disambiguate filesMap m f) | (m, f) <- modSpecs]
+          expectedDeclIds = Set.fromList
+            [ mintDeclId q (disambiguate filesMap (qnModule q) f)
+            | d@(q, f, _) <- declSpecs
+            , passes d
+            , qnModule q `elem` intMods
+            , mintModuleId (qnModule q) (disambiguate filesMap (qnModule q) f)
+                `Set.member` modIds
+            ]
+          g = graphFacts pm defBuildOpts facts
+      -- 規則 3:濾除數 == 檔案不在 pmSources 或行號 ≤ 0 的宣告筆數
+      gsFilteredGenerated (cgStats g) === length (filter (not . passes) declSpecs)
+      -- 節點集合 == module 節點 ∪ 通過閘門且 module 為內部的相異 decl id
+      Set.fromList (map gnId (cgNodes g)) === Set.union modIds expectedDeclIds
+      -- 每個 decl 節點恰一條 RContains
+      length [e | e <- cgEdges g, geRelation e == RContains]
+        === Set.size expectedDeclIds
+      -- D5:輸出已排序
+      cgNodes g === sortOn gnId (cgNodes g)
+      cgEdges g === sortOn edgeTriple (cgEdges g)
+      -- 不產懸空端點
+      let ids = Set.fromList (map gnId (cgNodes g))
+      assert (all (\e -> geSource e `Set.member` ids && geTarget e `Set.member` ids)
+                (cgEdges g))
+      -- 純函數 + 對事實序不敏感
+      shuffled <- forAll (Gen.shuffle facts)
+      graphFacts pm defBuildOpts shuffled === g
+  ]
+
+-- | 隨機宣告:module 取自內部組或一個保證外部的名字(genModName 恆大寫開頭,
+-- 故小寫的 @zext@ 絕不相等);檔案混 pmSources 內外;行號混合法與非法。
+genDeclSpec :: [(ModuleName, FilePath)] -> Gen (QualName, FilePath, Int)
+genDeclSpec modSpecs = do
+  (m, f)   <- Gen.element modSpecs
+  external <- Gen.bool
+  occ      <- Gen.element (map T.pack ["x", "y", "Foo", "name"])
+  ns       <- Gen.element [ValueNs, DataConNs, TypeNs, FieldNs]
+  file     <- Gen.element [f, "src/Extra.hs", "src/Absent.hs"]
+  ln       <- Gen.element ([-1, 0] <> [1 .. 20])
+  let owner = if external then ModuleName (T.pack "zext") else m
+  pure (QualName { qnModule = owner, qnOcc = occ, qnSpace = ns }, file, ln)
 
 --------------------------------------------------------------------------------
 -- export-query/F001 json-export

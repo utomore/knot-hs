@@ -3,7 +3,7 @@ id: F002
 type: feature
 title: decl-nodes
 description: 鑄出 decl/instance 節點與 contains 邊並過濾產生碼
-status: open
+status: done
 created: 2026-08-22
 updated: 2026-08-22
 depends-on: [F001, project-meta/F001, extraction/F001, extraction/F004]
@@ -330,13 +330,13 @@ deriveEdges :: GatedFacts -> [GraphNode]
 
 ## TodoList
 
-- [ ] T1: `Knot.Graph.FactGate`——規則 3 三條件過濾(`FactDecl` / `FactInstance` 的 (a)(b);`FactRef` 的 (a)(b)(c)),`srcSet` 由 `pmSources` 的 `sfPath` 建立、字串完全相等比對;`gfFiltered` 計實際濾除筆數;module 層事實不受影響、`gfInternal` 語意不變  `dep: -`
-- [ ] T2: `Knot.Graph.NodeMint` 鑄造面——契約面 `mintDeclId`(`#t` 只對 `TypeNs`)、`mintInstanceId`(`#i:` 前綴),兩者皆以 `mintModuleId` 為基底;非契約面 `disambiguate`(由 `F001` 內部 where 提升)與 `moduleOfFile`  `dep: T1`
-- [ ] T3: `Knot.Graph.NodeMint` 節點面——`mintNodes` 擴充產出 decl 節點(`DeclNode fdKind`、`gnLabel = qnOcc`、`gnLine = Just fdLine`)與 instance 節點(`InstanceNode`、`gnLabel = fiInstHead`);內部判定(`gfInternal`)與 module 節點存在性守門;三種節點統一 `nubOrdOn gnId` 去重  `dep: T2`
-- [ ] T4: `Knot.Graph.EdgeDerive`——新增 `FactDecl` / `FactInstance` → `RContains`(module → decl / instance,`geLine` 取宣告行);端點以 node-mint 的鑄造函式計算並驗證存在性;解析不到的來源彙整為每個 module / 檔案一則 `GraphWarning`;沿用既有去重與統計,**不**碰 `RCalls` / `RUses` / `RImplements`  `dep: T3`
-- [ ] T5: 端到端串接複驗——`gsFilteredGenerated` 接上 `gfFiltered`;`moduleOnly = True` 時 decl 節點、`RContains` 與過濾統計全為零(規則 6 + 驗收標準 5);`cgNodes` / `cgEdges` 在三種節點與兩種 relation 下仍為 D5 全序。`Knot.Graph` 與 `knot-hs.cabal` 預期零改動,若實際需要改動則記入「實作備註」  `dep: T4`
-- [ ] T6: `F001` 既有測試對帳——依「實作方式 › 6」的對照表更新 `test_gate_facts` / `test_mint_module_nodes` / `test_build_graph_assemble` 三條測試至新行為,不刪除任何測試;確認 `test_build_graph_deterministic` 的兩條端到端與 property 不受影響  `dep: T5`
-- [ ] T7: 決定性與 C1 instance 路徑——以手工 `[Fact]` 事實流(E3:不依賴 hiedb、不讀 `.hie`、不 shell out)驗證同輸入兩次結果相等、事實流重排序不改變輸出;hedgehog property 以隨機 decl 事實流驗排序與純函數性;instance 節點全路徑以手工 `FactInstance` 驗收(端到端恆 0 是預期行為)  `dep: T6`
+- [x] T1: `Knot.Graph.FactGate`——規則 3 三條件過濾(`FactDecl` / `FactInstance` 的 (a)(b);`FactRef` 的 (a)(b)(c)),`srcSet` 由 `pmSources` 的 `sfPath` 建立、字串完全相等比對;`gfFiltered` 計實際濾除筆數;module 層事實不受影響、`gfInternal` 語意不變  `dep: -`
+- [x] T2: `Knot.Graph.NodeMint` 鑄造面——契約面 `mintDeclId`(`#t` 只對 `TypeNs`)、`mintInstanceId`(`#i:` 前綴),兩者皆以 `mintModuleId` 為基底;非契約面 `disambiguate`(由 `F001` 內部 where 提升)與 `moduleOfFile`  `dep: T1`
+- [x] T3: `Knot.Graph.NodeMint` 節點面——`mintNodes` 擴充產出 decl 節點(`DeclNode fdKind`、`gnLabel = qnOcc`、`gnLine = Just fdLine`)與 instance 節點(`InstanceNode`、`gnLabel = fiInstHead`);內部判定(`gfInternal`)與 module 節點存在性守門;三種節點統一 `nubOrdOn gnId` 去重  `dep: T2`
+- [x] T4: `Knot.Graph.EdgeDerive`——新增 `FactDecl` / `FactInstance` → `RContains`(module → decl / instance,`geLine` 取宣告行);端點以 node-mint 的鑄造函式計算並驗證存在性;解析不到的來源彙整為每個 module / 檔案一則 `GraphWarning`;沿用既有去重與統計,**不**碰 `RCalls` / `RUses` / `RImplements`  `dep: T3`
+- [x] T5: 端到端串接複驗——`gsFilteredGenerated` 接上 `gfFiltered`;`moduleOnly = True` 時 decl 節點、`RContains` 與過濾統計全為零(規則 6 + 驗收標準 5);`cgNodes` / `cgEdges` 在三種節點與兩種 relation 下仍為 D5 全序。`Knot.Graph` 與 `knot-hs.cabal` 預期零改動,若實際需要改動則記入「實作備註」  `dep: T4`
+- [x] T6: `F001` 既有測試對帳——依「實作方式 › 6」的對照表更新 `test_gate_facts` / `test_mint_module_nodes` / `test_build_graph_assemble` 三條測試至新行為,不刪除任何測試;確認 `test_build_graph_deterministic` 的兩條端到端與 property 不受影響  `dep: T5`
+- [x] T7: 決定性與 C1 instance 路徑——以手工 `[Fact]` 事實流(E3:不依賴 hiedb、不讀 `.hie`、不 shell out)驗證同輸入兩次結果相等、事實流重排序不改變輸出;hedgehog property 以隨機 decl 事實流驗排序與純函數性;instance 節點全路徑以手工 `FactInstance` 驗收(端到端恆 0 是預期行為)  `dep: T6`
 
 ## 1-to-1 測試對照表
 
@@ -361,8 +361,48 @@ deriveEdges :: GatedFacts -> [GraphNode]
 - A7: node-mint 的契約簽名 `mintNodes :: GatedFacts -> [GraphNode]` **沒有警告通道**,故「跳過某筆 decl」在 node-mint 只能靜默 → 採取:警告一律由 edge-derive(契約已有第三分量)發出,node-mint 與 edge-derive 用同一組判定函式保證兩者跳過的集合一致 → 影響:若要求 node-mint 自報跳過,須改 Level 2 的 `mintNodes` 簽名為三元組(**Level 2 契約變更**)
 - A8: edge-derive 要產 `RContains` 就必須知道 decl 節點的 id,但 `GraphNode` 的五個欄位**無法**還原 `(module, occ, namespace)` 三元組(`gnLabel` 只有 occ 名,同檔的 `Foo#t` 與 `Foo` 會撞),而 `deriveEdges` 的第二參數在 Level 2 契約裡是 `[GraphNode]` → 採取:edge-derive **呼叫 node-mint 的 `mintDeclId` / `mintInstanceId` / `mintModuleId`** 計算端點 id,再以節點集合驗證存在性;`NodeId` 建構子仍只在 node-mint 出現,符合 Level 2「唯一構造入口在 node-mint」(被放寬的只是 `F001` haddock 那句階段性自我約束「edge-derive 不鑄造任何 id」)→ 影響:若裁定 edge-derive 完全不得呼叫鑄造函式,唯一出路是把 `deriveEdges` 的第二參數改為 node-mint 產出的節點索引 DTO(**Level 2 契約變更**),`F003` 也會一併受益
 - A9: 同 id 的兩個 decl 節點(`DuplicateRecordFields` 下同 module 的兩個同名欄位選擇器)合併時,是否要有統計欄位未明 → 採取:以既有的 `nubOrdOn gnId` 靜默合併,**不**計入 `gsDedupedEdges`(那是邊的統計),`GraphStats` 不加欄位 → 影響:若要求可觀測,需為 `GraphStats` 新增「合併節點數」欄位(**Level 2 契約變更**);design.md 目前把這列為「extraction 契約的粗度,graph-core 不補救」,故傾向維持現狀
+- A11(**實作時新增**): 撰寫時假定「decl 節點依 `gnId` 去重(`nubOrdOn`)」即滿足規則 7,實作後由 T7 的 hedgehog property **實測推翻**——`nubOrdOn` 保留輸入序第一筆,而同 id 的兩筆 `FactDecl`(同 `QualName` + 同檔 + 不同行,或同 `QualName` + 不同檔)其 `gnFile` / `gnLine` 相異,事實流一重排就鑄出不同的節點 → 採取:node-mint 的節點去重改為「保留 `(gnFile, gnLine, gnKind)` **最小**者」(私有 `dedupeNodes`,輸出序仍為各 id 首次出現序),與 edge-derive `geLine` 取極小值同一理由;`moduleOfFile` 的 `Map.fromList` 同理改為 `Map.fromListWith min`(同檔宣告多個 module 名的病態輸入)。**契約簽名零變更**,屬內部實作自主權 → 影響:若編排者要求「合併時保留輸入序第一筆」,規則 7(決定性)就不成立,`buildGraph` 對事實流重排序不再冪等
+- A12(**實作時新增**): 編排者裁決「node-mint 增設非契約面的 `QualName → NodeId` 索引函式,索引建立時就以節點集合守門」,而本文檔的假設 A8 採的是「edge-derive 直接呼叫 `mintDeclId` + `Set NodeId` 驗證」;同時 `F003` 的 T1 已把該索引寫成 `declNodeIndex :: GatedFacts -> [GraphNode] -> Map QualName [(FilePath, NodeId)]` → 採取:**本 feature 就實作 `declNodeIndex`**(簽名與 `F003` 文檔一字不差),`RContains` 的 decl 端點改走它;instance 端點仍走「`moduleOfFile` 反查 → `disambiguate` → `mintInstanceId` → 節點集合驗證」(`F003` 明載沿用此路徑,不另建第二條)。module 端點沿用 `F001` 既有的 `sourceNode`,**一字不改** → 影響:`F003` 的 T1 已由本 feature 完成,該 feature 只需消費並補其 1-to-1 測試 `test_decl_node_index`;若編排者要求 `declNodeIndex` 留給 `F003`,把 node-mint 的該函式與 edge-derive 的 `declNodeOf` 拿掉、退回 A8 的原方案即可
 - A10: `--backend hiedb` 單跑時,事實流沒有任何 `FactModule`(規則 2 明定 `FactModule` 是 import-scan 的唯一職責),故 `gfInternal` 為空、所有 decl 皆被判為非內部、整圖為空 → 採取:**不特別處理**,由 A4 的彙整警告如實呈現。這是 D2(內部集合來自 `FactModule`)的既有推論,不是本 feature 引入的行為 → 影響:若裁定 `--backend hiedb` 應可獨立產圖,須放寬 D2(改由 `pmSources.sfModule` 或事實流的 `frFromModule` / `qnModule` 補充內部集合),那是 `F001` 契約層級的變更
 
 ## 實作備註
 
-(撰寫時留空)
+**改動檔案**(4 個,全部是既有檔案的擴充;`knot-hs.cabal` 與 `src/Knot/Graph.hs` 零改動,`git diff --stat` 實測為空):
+
+```text
+src/Knot/Graph/FactGate.hs     T1
+src/Knot/Graph/NodeMint.hs     T2 T3
+src/Knot/Graph/EdgeDerive.hs   T4
+test/Main.hs                   T6(更新 F001 三條)+ graph-core/F002 group 六條
+```
+
+**與文檔的偏差(兩處,皆屬內部實作自主權,契約簽名零變更)**:
+
+1. **節點去重改為取極小代表**(假設 A11):文檔「實作方式 › 3」寫的 `nubOrdOn gnId` 保留輸入序第一筆,實測不滿足規則 7。改用私有 `dedupeNodes`(保留 `(gnFile, gnLine, gnKind)` 最小者)。這是 T7 的 property **實際抓出來的缺陷**,不是預防性改寫:反例 `module Aa` + 兩筆 `Aa.Foo`(同檔、行號 1 與 2)在 `Gen.shuffle` 後 `gnLine` 會在 `Just 1` / `Just 2` 之間跳動。
+2. **decl 端點改走 `declNodeIndex`**(假設 A12):依編排者對 A8 的裁決,並與 `F003` 文檔的簽名對齊。
+
+**與 `F003` 的介面對帳**(簽名逐字比對,全部一致):
+
+| 介面 | 出處 | 狀態 |
+|---|---|---|
+| `mintDeclId :: QualName -> Maybe FilePath -> NodeId` | 本文檔介面表 / design.md | 一字不差 |
+| `mintInstanceId :: ModuleName -> Maybe FilePath -> Text -> NodeId` | 本文檔介面表 / design.md | 一字不差 |
+| `disambiguate :: Map ModuleName (Set FilePath) -> ModuleName -> FilePath -> Maybe FilePath` | 本文檔介面表 | 一字不差 |
+| `moduleOfFile :: [Fact] -> Map FilePath ModuleName` | 本文檔介面表 | 一字不差(內部改用 `fromListWith min`,見 A11) |
+| `declNodeIndex :: GatedFacts -> [GraphNode] -> Map QualName [(FilePath, NodeId)]` | `F003` 文檔「新增的介面」 | 一字不差(見 A12) |
+| `gateFacts` / `mintNodes` / `deriveEdges` / `EdgeStats` / `buildGraph` | design.md | 簽名完全未動 |
+
+`Knot.Graph.EdgeDerive` 另留了兩個具名 where binding 供 `F003` 直接接手:`instanceContains`(instance 端點解析,`RImplements` 的來源端沿用)與 `Skipped (Text, Text)` 建構子(可彙整的跳過理由,`F003` 文檔明載「直接沿用、不另加」)。
+
+**T5 端到端複驗**(`knot-hs` 自身,`--backend auto`,索引寫到專案外暫存目錄,唯讀):
+
+```text
+graph: 654 nodes, 710 edges, 0 warnings
+stats: dropped-external=168, filtered-generated=846, deduped-edges=2, top-external=10
+節點:31 module + 623 decl + 0 instance(C1:instance 端到端恆 0 是預期行為)
+邊  :87 imports + 623 contains + 0 calls/uses/implements
+```
+
+`filtered-generated=846` 與 `F003` 文檔「實作方式 › 9」的預估值**逐筆吻合**(846/7265 = 11.6% 的 `frGenerated` ref);節點數與該表預估的 631 decl 差 8,原因是 `.hie` 為不同一次 build 的產物(該文檔 A10 已預告)。
+
+**順帶查到、不屬本 feature 的觀察**(建議寫進閘門紀錄):端到端 decl 節點含 `$fEqCommand` / `$fShowExtractCmd` 這類 **deriving 產生的 dictionary 宣告**。規則 3 的 (c) 條件只讀 `FactRef.frGenerated`(hiedb 的 `decls` 表無對應欄位),故這些節點目前濾不掉,約佔 decl 節點的一部分,會稀釋 hub 排名。要處理需擴充 extraction 契約(為 `FactDecl` 補 generated 欄位)或在 fact-gate 加 occ 名啟發式——後者與 design.md「不做啟發式」的裁決相衝,故本 feature 不做。
