@@ -636,6 +636,7 @@ executable 內部匯出,不進 library `exposed-modules`,因此**不擴大 libra
    `missingNodeLines` 以建構子模式比對(`nid@(QT.NodeId t) <- endpoints`)取出 `Text`
 2. `Knot.Query` 只匯出**抽象**的 `QueryGraph`(無 `(..)`)→ 端點存在性檢查要用的 `qgNodes` / `qnId`
    自 `Knot.Query.Types` 取(qualified `QT.`,與設計文檔「使用到的既有串接介面」所列出處一致)
+   ——**此條已於階段二閘門作廢**,見下方「階段二閘門:`missingNodeLines` 改走 `queryGraphHasNode`」
 
 ### 與設計的偏差(1 處)
 
@@ -662,6 +663,34 @@ executable 內部匯出,不進 library `exposed-modules`,因此**不擴大 libra
 - **舊旗標**:`app/Main.hs` 的 `getArgs` 解析與 `--facts` / `--graph` 已移除(假設 A11),
   語意由 `--summary facts` / `--summary graph` 承接;`Main.hs` 只剩
   `execParser cliParserInfo >>= runCommand stdout stderr >>= exitWith` 一行
+
+### 階段二閘門:`missingNodeLines` 改走 `queryGraphHasNode`(2026-08-21)
+
+階段二 `arch-audit` 發現 1(中):`missingNodeLines` 為了判斷「查詢的起點/終點 id 是否存在」,
+**繞過 Level 2 契約直接讀 `Knot.Query.Types` 的 `qgNodes` / `qnId`**,讓 `design.md`「`QueryGraph`
+的內容屬 Level 3」這個承諾失效。根因是契約缺一條通道——`runQuery` 對「id 不存在」與
+「存在但無鄰居」都回空結果,呼叫端分不出來,而 CLI 需要對前者給明確訊息。
+
+**裁決落地**:契約新增 `queryGraphHasNode :: QueryGraph -> NodeId -> Bool`
+(`design.md`「對外契約 › 查詢面」已由編排者寫入),並依此改實作:
+
+| 位置 | 變更 |
+|---|---|
+| `src/Knot/Query/Load.hs` | 新增 `queryGraphHasNode`,以 `Map.member nid (qgIndex g)` 做 **O(log n)** 查詢(不再線性掃);與 `queryGraphNotes` 同層級、同風格,library 仍**全程不印** |
+| `src/Knot/Query.hs` | 匯出清單加入 `queryGraphHasNode`(轉匯出,不重新定義) |
+| `app/Knot/App/Run.hs` | `missingNodeLines` 的存在性判斷改呼叫 `queryGraphHasNode`;**移除 `import qualified Knot.Query.Types as QT`**——`NodeId (..)` 的建構子模式比對改自 `Knot.Query` 取(它本來就匯出 `NodeId (..)`),組裝層自此**零 `Knot.Query.Types` 依賴**,不再觸及 `QueryGraph` 的任何內部欄位 |
+
+原本註解所稱「走線性掃是為了不在 executable 段新增 `containers` 依賴」的顧慮**同時消失**:
+查詢移進 library 內做,executable 段的 `build-depends` 一字未改。
+
+**行為零變動**:存在性判斷的語意仍是「id 是否在 `qgNodes` 收錄的全部節點內」——`qgIndex` 的鍵集
+與 `qgNodes` 的 id 集恆等(兩者同源於載入步驟 5),故只被結構類邊(如 `contains`)連到的節點
+依查詢規則 3 一樣算「存在」。提示行**只影響訊息、不影響 exit code**(假設 A4:起點不存在仍 exit 0)。
+
+**測試**:`export-query/F002` 新增 T6 `test_query_graph_has_node`(存在回 `True`、不存在回 `False`、
+只被 `contains` / `method` 連到的節點回 `True`、空圖全 `False`、`qgIndex` 鍵集對帳 `qgNodes`、
+`Knot.Query` 轉匯出面);`F004` T7 補兩條回歸(`ShortestPath` 兩端皆不存在 → 兩條提示且 exit 0;
+只被結構類邊連到的節點 → 零提示且 exit 0)。合計 **All 93 tests passed**(既有 92 全綠)。
 
 ### 測試結果
 

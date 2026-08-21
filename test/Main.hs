@@ -161,6 +161,7 @@ import Knot.Query.Load
   , classifyRelation
   , dependencyRelations
   , parseQueryGraph
+  , queryGraphHasNode
   , queryGraphNotes
   , structuralRelations
   )
@@ -2192,6 +2193,7 @@ exportQueryF002Tests = testGroup "export-query/F002 graph-load"
   , testParseQueryGraphOk            -- T3
   , testParseQueryGraphErrors        -- T4
   , testLoadQueryGraphIoRoundtrip    -- T5
+  , testQueryGraphHasNode            -- T6(階段二閘門裁決補的契約)
   ]
 
 -- | 查詢面節點 id 的測試捷徑(qualified,與 graph-core 的 nid 區隔)。
@@ -2454,6 +2456,36 @@ testLoadQueryGraphIoRoundtrip = testCase "test_load_query_graph_io_roundtrip" $
     -- (d) 規則 4:同一個檔案載入兩次結果相等
     again <- loadQueryGraph out
     again @?= Right q
+
+-- export-query/F002 T6: queryGraphHasNode——契約的節點存在性通道
+-- (階段二閘門裁決;組裝層 missingNodeLines 的唯一資料來源)
+testQueryGraphHasNode :: TestTree
+testQueryGraphHasNode = testCase "test_query_graph_has_node" $ do
+  g <- case parseBad okGraphJson of
+    Right x  -> pure x
+    Left err -> assertFailure ("expected a successful load, got: " <> show err)
+  -- 存在的節點一律 True
+  map (queryGraphHasNode g) [qid "A", qid "B", qid "C"] @?= [True, True, True]
+  -- 查詢規則 3:只被結構類邊(contains / method)連到的 D 也算存在
+  -- ——它不在 qgForward / qgReverse / 度數裡,存在性仍為 True
+  assertBool "D is absent from the dependency adjacency"
+    (Map.notMember (qid "D") (QT.qgForward g)
+       && Map.notMember (qid "D") (QT.qgReverse g))
+  queryGraphHasNode g (qid "D") @?= True
+  -- 不存在的 id 回 False(大小寫敏感,與 NodeId 的 Eq 一致)
+  map (queryGraphHasNode g) [qid "Z", qid "", qid "a", qid "AB"]
+    @?= [False, False, False, False]
+  -- 與 qgNodes / qgIndex 的全域對帳:兩者對每個 id 的答案一致
+  map (queryGraphHasNode g) (map QT.qnId (QT.qgNodes g))
+    @?= replicate (length (QT.qgNodes g)) True
+  Map.keys (QT.qgIndex g) @?= map QT.qnId (QT.qgNodes g)
+  -- 空圖:任何 id 都不存在
+  case parseBad "{\"nodes\":[]}" of
+    Right e0 -> queryGraphHasNode e0 (qid "A") @?= False
+    other    -> assertFailure ("empty graph should load, got: " <> show other)
+  -- Knot.Query 的匯出清單已含 queryGraphHasNode(F004 只 import 這一個模組)
+  KQ.queryGraphHasNode g (KQ.NodeId (T.pack "D")) @?= True
+  KQ.queryGraphHasNode g (KQ.NodeId (T.pack "Z")) @?= False
 
 --------------------------------------------------------------------------------
 -- export-query / F003 query-commands
@@ -3335,6 +3367,29 @@ testRunQuery = testCase "test_run_query" $
       QueryCmd { qcFile = out, qcCommand = QT.Reachable (qid "NoSuchNode") QT.Forward })
     code7 @?= ExitSuccess
     assertHasAll "node-not-found stderr" err7 ["query: node not found: NoSuchNode"]
+    -- 回歸(階段二閘門):missingNodeLines 改走 queryGraphHasNode 後行為不變
+    -- (a) ShortestPath 兩端都不存在 → 兩條提示,仍 exit 0
+    (code7b, _, err7b) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+      QueryCmd { qcFile = out
+               , qcCommand = QT.ShortestPath (qid "NoSuchFrom") (qid "NoSuchTo") })
+    code7b @?= ExitSuccess
+    assertHasAll "both-endpoints-missing stderr" err7b
+      ["query: node not found: NoSuchFrom", "query: node not found: NoSuchTo"]
+    -- (b) 只被結構類邊(contains)連到的節點__不__該被判為不存在(規則 3):
+    --     它不在依賴鄰接表裡,但 queryGraphHasNode 回 True → 零提示、exit 0
+    let structP = dir </> "structural.json"
+        sNodes = [ jsonNode "A" "A" "src/A.hs"
+                 , jsonNode "B" "B" "src/B.hs"
+                 , jsonNode "Lonely" "Lonely" "src/Lonely.hs"
+                 ]
+    writeUtf8 structP
+      (fixtureJson sNodes [jsonLink "A" "B" "imports", jsonLink "A" "Lonely" "contains"])
+    (code7c, _, err7c) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+      QueryCmd { qcFile = structP
+               , qcCommand = QT.Reachable (qid "Lonely") QT.Forward })
+    code7c @?= ExitSuccess
+    assertBool ("a structural-only node exists: " <> show err7c)
+      (not (hasText "node not found" err7c))
     -- 兩端都存在但不連通:零提示、空結果、exit 0
     (code8, out8, err8) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
       QueryCmd { qcFile = relP, qcCommand = QT.ShortestPath (qid "A") (qid "B") })

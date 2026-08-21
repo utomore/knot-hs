@@ -51,13 +51,14 @@ import Knot.Meta (loadProjectMeta)
 import Knot.Meta.Types (ProjectMeta (..))
 import Knot.Query
   ( LoadError (..)
+  , NodeId (..)
   , QueryCommand (..)
   , QueryGraph
   , loadQueryGraph
+  , queryGraphHasNode
   , renderResult
   , runQuery
   )
-import qualified Knot.Query.Types as QT
 
 -- | 依 'Command' 分派。
 runCommand :: Handle -> Handle -> Command -> IO ExitCode
@@ -158,13 +159,14 @@ loadErrorText e = case e of
 -- __只影響訊息,不影響 exit code__(假設 A4):'runQuery' 本來就會回空結果,
 -- 契約寫的是「查無結果 exit 0」。
 --
--- 走 @qgNodes@ 的線性比對而非 @qgIndex@,是為了不在 executable 段新增
--- @containers@ 依賴;CLI 一次查詢只掃一次,代價可忽略。
+-- 存在性一律問契約的 'queryGraphHasNode'(階段二閘門裁決):組裝層不讀
+-- 'QueryGraph' 的內部欄位,「內容屬 Level 3」的承諾才成立;查詢在 library
+-- 內走 @qgIndex@ 做 O(log n),executable 段也就不需要 @containers@。
 missingNodeLines :: QueryGraph -> QueryCommand -> [Text]
 missingNodeLines g cmd =
   [ T.concat [T.pack "query: node not found: ", t]
-  | nid@(QT.NodeId t) <- endpoints
-  , not (any ((== nid) . QT.qnId) (QT.qgNodes g))
+  | nid@(NodeId t) <- endpoints
+  , not (queryGraphHasNode g nid)
   ]
  where
   endpoints = case cmd of

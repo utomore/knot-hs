@@ -5,9 +5,10 @@ title: project-meta
 description: 專案發現子系統:cabal component 解析、檔案歸類、.hie 定位與幽靈過濾
 status: active
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-21
 parent: system
 related-adr: [ADR-001]
+code-paths: [src/Knot/Meta, src/Knot/Meta.hs]
 ---
 
 # project-meta 子系統架構

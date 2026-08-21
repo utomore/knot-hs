@@ -8,6 +8,7 @@ created: 2026-08-20
 updated: 2026-08-21
 parent: system
 related-adr: [ADR-003]
+code-paths: [src/Knot/Export, src/Knot/Export.hs, src/Knot/Query, src/Knot/Query.hs, app]
 ---
 
 # export-query 子系統架構
@@ -59,11 +60,14 @@ data ExportReport = ExportReport
 ### 查詢面
 
 ```haskell
-loadQueryGraph  :: FilePath -> IO (Either LoadError QueryGraph)
-queryGraphNotes :: QueryGraph -> [(Text, Int)]                 -- 未知 relation 名 + 邊數
-runQuery        :: QueryGraph -> QueryCommand -> QueryResult   -- 純函數
-renderResult    :: QueryResult -> Text                         -- stdout 文字
+loadQueryGraph    :: FilePath -> IO (Either LoadError QueryGraph)
+queryGraphNotes   :: QueryGraph -> [(Text, Int)]                 -- 未知 relation 名 + 邊數
+queryGraphHasNode :: QueryGraph -> NodeId -> Bool                -- 節點存在性
+runQuery          :: QueryGraph -> QueryCommand -> QueryResult   -- 純函數
+renderResult      :: QueryResult -> Text                         -- stdout 文字
 ```
+
+`queryGraphHasNode` 存在的理由:`runQuery` 對「id 不存在」與「存在但無鄰居」都回空結果,呼叫端無從區分,而 CLI 需要對前者給明確訊息。沒有它,組裝層只能繞過 `QueryGraph` 的抽象直接讀內部欄位——那會讓「內容屬 Level 3」的承諾失效。
 
 ```haskell
 data QueryCommand

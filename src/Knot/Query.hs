@@ -12,6 +12,7 @@ module Knot.Query
   ( -- * 進入點
     loadQueryGraph
   , queryGraphNotes
+  , queryGraphHasNode
   , runQuery
   , renderResult
     -- * DTO
@@ -29,7 +30,7 @@ import qualified Data.Text as T
 import System.IO.Error (isDoesNotExistError)
 
 import Knot.Query.Engine (runQuery)
-import Knot.Query.Load (parseQueryGraph, queryGraphNotes)
+import Knot.Query.Load (parseQueryGraph, queryGraphHasNode, queryGraphNotes)
 import Knot.Query.Render (renderResult)
 import Knot.Query.Types
   ( Direction (..)

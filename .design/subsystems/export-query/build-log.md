@@ -16,9 +16,9 @@ parent: export-query
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | json-export | impl-done |
-| 階段二:S4 查詢 CLI | W2 | graph-load | design-done |
-| 階段二:S4 查詢 CLI | W3 | query-commands | design-done |
-| 階段二:S4 查詢 CLI | W4 | cli-wiring | design-done |
+| 階段二:S4 查詢 CLI | W2 | graph-load | impl-done |
+| 階段二:S4 查詢 CLI | W3 | query-commands | impl-done |
+| 階段二:S4 查詢 CLI | W4 | cli-wiring | impl-done |
 
 開發者決定本次一路跑完整個子系統(階段一 + 階段二)。跨子系統依賴 project-meta、extraction、graph-core 的階段一皆 done 並已 merge 進 main(PR #1、#2,commit 1ea5f27),無等待項。專案尚無 `codegraph.json`,略過 codegraph 對帳。
 
@@ -54,9 +54,9 @@ parent: export-query
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
 | json-export | F001 | F001-json-export.md | 繼承 | 繼承 | impl-done |
-| graph-load | F002 | F002-graph-load.md | 繼承 | 繼承 | design-done |
-| query-commands | F003 | F003-query-commands.md | 繼承 | 繼承 | design-done |
-| cli-wiring | F004 | F004-cli-wiring.md | 繼承 | 繼承 | design-done |
+| graph-load | F002 | F002-graph-load.md | 繼承 | 繼承 | impl-done |
+| query-commands | F003 | F003-query-commands.md | 繼承 | 繼承 | impl-done |
+| cli-wiring | F004 | F004-cli-wiring.md | 繼承 | 繼承 | impl-done |
 
 四個 feature 全部不降級:F001 的決定性序列化與 F004 的跨四子系統組裝都不是樣板工作;F002 / F003 雖然單一入口,但它們是 F004 的前置,設計錯會沿依賴鏈複利。
 
@@ -119,4 +119,45 @@ parent: export-query
 
 ### 階段二:S4 查詢 CLI
 
-(待執行)
+- **F002 graph-load**:Todo 5/5、測試 74/74;`Knot.Query{,.Types,.Load}`,**library 端零 `Knot.Graph.*` / `Knot.Meta.*` 相依**(編排者複驗,唯一命中是註解)
+- **F003 query-commands**:Todo 7/7、測試 84/84;`Knot.Query.{Engine,Render}`,四演算法全私有
+- **F004 cli-wiring**:Todo 9/9、測試 **92/92**;`app/Knot/App/{Cli,Report,Run}.hs` + `Main.hs` 收成單行分派。**中途因 API 錯誤中斷一次**,工作樹無殘留,以 SendMessage 帶 context 續跑完成
+- **六條警告通道全部接上**(階段一發現 1 已解):`pmWarnings`、`erLevel`/`erReports`/`erWarnings`、`cgWarnings`、`xrNotes`、`queryGraphNotes`;`emitNotes` 是整條管線唯一的列印函式,library 仍全程不印
+- **T9 唯讀實跑**(D3 順延的項目,本階段補上):
+
+  | 標的 | exit | 節點 | 邊 | 警告 | scan-graph.mjs |
+  |---|---|---|---|---|---|
+  | MagicFarmer | 0 | 60 | 247 | 0 | 解析成功 |
+  | particle-magic | 0 | 46 | 127 | 1(Main 由 5 個來源檔宣告) | 解析成功 |
+
+  **唯讀性經編排者獨立複驗**:兩標的皆無 `codegraph.json`,particle-magic 工作樹全乾淨;MagicFarmer 的異動全是其領域檔(`History.hs` 等),而 knot 全庫只有 `writeCodegraph` 一條寫入路徑、無寫 `.hs`/`.cabal` 的能力,屬本 session 外的並行編輯
+- **knot 首次掃自己**(端到端跑通):29 節點 / 79 邊;`query path Knot.Export Knot.Meta.Types` 回 `Knot.Export → Knot.Export.Encode → Knot.Meta.Types`——**工具自己印證了階段一的 arch-audit 發現 6**
+- **T4 的反向驗證**:F003 實作把演算法臨時改成錯誤變體(整層佇列依 id 重排),確認 `test_query_path` 真的會失敗(`Beta/Whisky` vs 正解 `Alpha/Xray`),再還原重跑。查詢規則 6 的唯一防線經證實有效
+- **arch-audit subsys 發現**(依嚴重度):
+  1. (中)**`missingNodeLines` 繞過 Level 2 契約**:CLI 需要「節點是否存在」的能力,但契約只有 `runQuery`(回空結果,分不出「不存在」與「存在但無鄰居」),於是直接讀 `Knot.Query.Types` 的 `qgNodes` / `qnId`。與 A5 / C2 / F002 A1 同型——契約沒給通道,實作只好繞道。建議補 `queryGraphHasNode :: QueryGraph -> NodeId -> Bool`
+  2. (中)**`--graph FILE` 是實作新增的旗標**(F004 A3),不在契約卡也不在 system.md。功能上必要(否則 `knot query` 只能讀 cwd 的檔),但兩層契約都沒登記
+  3. (低)**`code-paths` 第一次變成可解**:knot 現在能產出自己的圖,但四份 `design.md` 都沒填 `code-paths`,對映 0%,arch-audit 的圖分析仍吃不出結論
+  4. (低)`extract: level` 行由「無條件輸出」改為「只在通道有話說時輸出」(subagent 自報並記入實作備註),判斷合理但設計文檔的行格式表與實作有落差
+  5. (低)8 筆 `-Wincomplete-record-selectors` 既有負債仍在(階段一發現 7)
+  6. (資訊)`app/Main.hs` 因與 `test/Main.hs` 模組名衝突而不進 test-suite,所以可測邏輯全部下沉到 `Cli`/`Report`/`Run`。這是好設計,值得記為專案慣例
+- **契約卡對帳**:三張卡的負責模組、Level 2 介面、資料流段落與實作相符;`loadQueryGraph` / `queryGraphNotes` / `runQuery` / `renderResult` 四個簽名一字不差
+
+#### 閘門裁決落地(三項)
+
+1. **補 `code-paths`(發現 3)**:四份 `design.md` 的 frontmatter 都補上。比對是精確前綴(`scan-graph.mjs:194` 的 `f === prefix || f.startsWith(prefix + "/")`),所以 `src/Knot/Meta` 與 `src/Knot/Meta.hs` 兩個都要列。**對映從 0% 升到 100%(29/29)**,knot-hs 從此可以 dogfood 自己。圖檔隨用隨產、不進版控。
+
+   首次跑出的子系統依賴矩陣**與 system.md 宣告的單向拓撲完全吻合,無循環依賴**:
+
+   ```
+   export-query → graph-core   7 條      graph-core → extraction    5 條
+   export-query → project-meta 6 條      graph-core → project-meta  5 條
+   export-query → extraction   5 條      extraction → project-meta  4 條
+   ```
+
+   **但 18 條跨界引用要分開讀**:15 條來自 `app/`(cli-assembly,依 D3 掛在 export-query 下,呼叫四個子系統正是它的職責);library 只有 3 條,其中 `Knot.Export` / `Knot.Export.Encode` → `Knot.Graph.Types` 兩條合法(`CodeGraph` 是契約輸入),**只有 `src/Knot/Export/Encode.hs:L38 → Knot.Meta.Types` 是真旁路**——階段一發現 6 至此被工具以精確證據行釘死,成因是 `GraphStats.gsTopExternalTargets :: [(ModuleName, Int)]` 讓 graph-core 的公開 DTO 透出 project-meta 的型別。
+
+   **副作用值得記下**:把 cli-assembly 放進 export-query 的 `code-paths`,會讓依賴矩陣把組裝層的合法呼叫算成 export-query 的跨界引用。日後若覺得矩陣失真,可考慮讓 `app/` 獨立成假想子系統(那是 Level 1 的問題)。
+
+2. **補契約 `queryGraphHasNode`(發現 1)**:已寫進 `design.md` 查詢面,並委派一輪小實作把 `missingNodeLines` 改走契約函式。
+
+3. **`system.md` CLI 契約四處落差(發現 2 + A8/A10)**:開發者裁定現在走 `/system-design` 更新模式補齊。

@@ -15,6 +15,7 @@
 module Knot.Query.Load
   ( -- * 對外契約
     queryGraphNotes
+  , queryGraphHasNode
     -- * 非契約面(1-to-1 測試與 F003 取用)
   , parseQueryGraph
   , RelationClass (..)
@@ -90,6 +91,21 @@ classifyRelation r
 -- library 不印(D8);由 @F004@ 的 CLI 層取來印 stderr(契約 C2)。
 queryGraphNotes :: QueryGraph -> [(Text, Int)]
 queryGraphNotes = qgNotes
+
+--------------------------------------------------------------------------------
+-- 對外契約:節點存在性
+--------------------------------------------------------------------------------
+
+-- | 一個 id 是否為圖中的節點(契約原文簽名)。
+--
+-- 'runQuery' 對「id 不存在」與「存在但無鄰居」都回空結果,呼叫端無從區分;
+-- 這條通道讓 CLI 對前者給明確訊息,而不必繞過 'QueryGraph' 的抽象直接讀內部
+-- 欄位(階段二閘門裁決)。
+--
+-- 走 'qgIndex' 而非掃 @qgNodes@:@Map.member@ 是 O(log n),且 'qgIndex' 收錄
+-- __全部__節點(查詢規則 3),連只被結構類邊(如 @contains@)連到的也在內。
+queryGraphHasNode :: QueryGraph -> NodeId -> Bool
+queryGraphHasNode g nid = Map.member nid (qgIndex g)
 
 --------------------------------------------------------------------------------
 -- 錯誤訊息
