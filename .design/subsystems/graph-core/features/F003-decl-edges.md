@@ -3,7 +3,7 @@ id: F003
 type: feature
 title: decl-edges
 description: 由 ref/instance 事實推導 calls/uses/implements 邊
-status: open
+status: done
 created: 2026-08-22
 updated: 2026-08-22
 depends-on: [F001, F002, project-meta/F001, extraction/F001, extraction/F002, extraction/F004]
@@ -369,13 +369,13 @@ deriveEdges :: GatedFacts -> [GraphNode]
 
 ## TodoList
 
-- [ ] T1: `Knot.Graph.NodeMint` 非契約面 `declNodeIndex`——由 `gfFacts` 的 `FactDecl` 建候選(`mintDeclId fdName (disambiguate files (qnModule fdName) fdFile)`),以傳入節點集合的 `gnId` 守門,值為 `[(FilePath, NodeId)]` 且顯式排序;haddock 標註非契約面  `dep: F002`
-- [ ] T2: `Knot.Graph.EdgeDerive` 的 `FactRef` 主線——`Outcome` 加可彙整的跳過建構子;判定鏈「來源內部性(4b)→ 目標外部(規則 1)→ 目標解析 → 來源解析 → 自環(規則 4)→ 產出」;`relationOf` 以四個顯式 pattern 落實 C2(`ValueNs`/`DataConNs`/`FieldNs` → `RCalls`、`TypeNs` → `RUses`,無 catch-all);`geLine = Just frLine`  `dep: T1`
-- [ ] T3: `frFromDecl` 兩分支的來源解析——`Just q` 走 `declNodeIndex` 並以 `frFile` 收斂消歧組;`Nothing` 走 `F001` 既有的 `sourceNode frFromModule frFile`(**一字不改**),消歧組由 `(module, 檔案)` 精確索引命中  `dep: T2`
-- [ ] T4: `FactInstance` → `RImplements`——來源沿用 `F002` 的 instance 端點解析(`moduleOfFile` → `disambiguate` → `mintInstanceId` → 節點集合驗證),目標走 `declNodeIndex` 查 `fiClass`;外部 class 丟棄並計入 `esDroppedExternal` + 外部次數表;內部但查不到 → 彙整警告  `dep: T2`
-- [ ] T5: 警告彙整——跳過理由以 `Map (Text, Text) Int` 累計,每個相異 `(gwSource, 原因)` 輸出一則帶筆數的 `GraphWarning`;`imports` 的逐筆警告路徑**不動**;`Map` 鍵序即輸出序  `dep: T3, T4`
-- [ ] T6: 收斂複驗——三種新邊與 `RImports` / `RContains` 共用同一個 `grouped` 去重表(`geLine` 取最小、`esDeduped` 累加、不同 relation 不互相污染);`esDroppedExternal` / `esTopExternal` 涵蓋 ref 與 instance 的外部丟棄(E4 不加欄位);`moduleOnly = True` 時三種邊全為零(規則 6,預期零改動,若實際需改動則記入「實作備註」);D5 排序在五種 relation 下成立  `dep: T5`
-- [ ] T7: 決定性與規模對帳——手工 `[Fact]` 事實流(E3:不依賴 hiedb、不讀 `.hie`、不 shell out)驗同輸入兩次結果相等、事實流重排序不改變輸出;hedgehog property 以隨機 decl/ref 事實流驗排序與純函數性;階段閘門另做 knot-hs 自身唯讀實跑,對照「實作方式 › 9」的預估表並把實際值寫入「實作備註」  `dep: T6`
+- [x] T1: `Knot.Graph.NodeMint` 非契約面 `declNodeIndex`——由 `gfFacts` 的 `FactDecl` 建候選(`mintDeclId fdName (disambiguate files (qnModule fdName) fdFile)`),以傳入節點集合的 `gnId` 守門,值為 `[(FilePath, NodeId)]` 且顯式排序;haddock 標註非契約面  `dep: F002`
+- [x] T2: `Knot.Graph.EdgeDerive` 的 `FactRef` 主線——`Outcome` 加可彙整的跳過建構子;判定鏈「來源內部性(4b)→ 目標外部(規則 1)→ 目標解析 → 來源解析 → 自環(規則 4)→ 產出」;`relationOf` 以四個顯式 pattern 落實 C2(`ValueNs`/`DataConNs`/`FieldNs` → `RCalls`、`TypeNs` → `RUses`,無 catch-all);`geLine = Just frLine`  `dep: T1`
+- [x] T3: `frFromDecl` 兩分支的來源解析——`Just q` 走 `declNodeIndex` 並以 `frFile` 收斂消歧組;`Nothing` 走 `F001` 既有的 `sourceNode frFromModule frFile`(**一字不改**),消歧組由 `(module, 檔案)` 精確索引命中  `dep: T2`
+- [x] T4: `FactInstance` → `RImplements`——來源沿用 `F002` 的 instance 端點解析(`moduleOfFile` → `disambiguate` → `mintInstanceId` → 節點集合驗證),目標走 `declNodeIndex` 查 `fiClass`;外部 class 丟棄並計入 `esDroppedExternal` + 外部次數表;內部但查不到 → 彙整警告  `dep: T2`
+- [x] T5: 警告彙整——跳過理由以 `Map (Text, Text) Int` 累計,每個相異 `(gwSource, 原因)` 輸出一則帶筆數的 `GraphWarning`;`imports` 的逐筆警告路徑**不動**;`Map` 鍵序即輸出序  `dep: T3, T4`
+- [x] T6: 收斂複驗——三種新邊與 `RImports` / `RContains` 共用同一個 `grouped` 去重表(`geLine` 取最小、`esDeduped` 累加、不同 relation 不互相污染);`esDroppedExternal` / `esTopExternal` 涵蓋 ref 與 instance 的外部丟棄(E4 不加欄位);`moduleOnly = True` 時三種邊全為零(規則 6,預期零改動,若實際需改動則記入「實作備註」);D5 排序在五種 relation 下成立  `dep: T5`
+- [x] T7: 決定性與規模對帳——手工 `[Fact]` 事實流(E3:不依賴 hiedb、不讀 `.hie`、不 shell out)驗同輸入兩次結果相等、事實流重排序不改變輸出;hedgehog property 以隨機 decl/ref 事實流驗排序與純函數性;階段閘門另做 knot-hs 自身唯讀實跑,對照「實作方式 › 9」的預估表並把實際值寫入「實作備註」  `dep: T6`
 
 ## 1-to-1 測試對照表
 
@@ -402,6 +402,78 @@ deriveEdges :: GatedFacts -> [GraphNode]
 - A9: `--backend hiedb` 單跑時事實流沒有任何 `FactModule`(規則 2 明定那是 import-scan 的唯一職責),`gfInternal` 為空 → 本 feature 的三種邊全部產不出來,且依 A2 全走 4b 警告 → 採取:**不特別處理**,由彙整警告如實呈現;這是 D2 的既有推論(`F002` 假設 A10 已記載),不是本 feature 引入 → 影響:若裁定該模式應可獨立產圖,須放寬 D2(改由 `pmSources.sfModule` 或事實流的 `frFromModule` / `qnModule` 補內部集合),那是 `F001` 契約層級的變更
 - A10: 「實作方式 › 9」的規模預估是以**本文檔撰寫時的 `.hie`** 為樣本算出的(2026-08-22,31 個 module、`includeTests = False`)。`.hie` 隨每次重編改變,span 一動 `refs` 筆數就跟著動 → 採取:預估表附上重現指令與樣本條件,閘門對帳時允許個位數差距;差距大時先查 `.hie` 新鮮度,再查 C2 是否漏分支 → 影響:若閘門要求逐筆對齊,需把 `.hie` 產生步驟固定進驗收腳本(屬驗收流程,不動任何契約)
 
+- A11: `F002` 的三條既有測試(`test_contains_edges`、`test_module_only_decl`、`test_decl_graph_deterministic` 的 C1 子項)在 F003 上線後期望值改變——它們的手工事實流用 `FactInstance (qn "Demo.Class" …)`,而 `Demo.Class` **不在 `gfInternal`**,故 F003 的 `RImplements` 支依組裝規則 1 判為「外部 class」、丟棄並 `esDroppedExternal + 1`(正是驗收標準 5 後半)。`F002` 撰寫時 `RImplements` 尚未實作,故當時的期望值是 0 → 採取:**就地更新三處期望值並加註理由,一條斷言都不刪**(比照 `F002` 以假設 A6 就地更新 `F001` 三條測試的既有先例);`RContains` 面的原斷言全數保留 → 影響:若裁定 F002 的手工事實流本意是「class 在內部」,應改的是 fixture(補一筆 `FactModule "src/Demo/Class.hs"`),那會讓 F002 那三條測試多出一條 `RImplements` 邊,期望值同樣要改
+- A12: 端到端實測值取決於 **hiedb 索引是怎麼建的**——`defs` 表(extraction `qDefs` 的來源)在「`hiedb index .hie` 走目錄」與「`knot extract` 的 driver 逐檔傳檔案清單」兩種建法下**不同**:前者 631 列、後者 623 列,差的 8 列全部是 deriving 產生的 instance 字典(`Knot.Extract.Types` 的 `$fEqBackendChoice` / `$fShowBackendChoice` / `$fShowCapabilityLevel` / `$fShowDeclKind` / `$fShowFact`、`Knot.Meta.Types` 的 `$fShowComponentKind`、`Knot.Query.Types` 的 `$fEqQueryCommand` / `$fShowQueryCommand`)。兩個 DB 的 `mods` / `decls` / `refs` 三表**逐列相同**(已用 SQL 對帳),差異只在 `defs` → 採取:**不調整任何邏輯**,如實回報兩組數字,並以「真實管線(driver 自建索引)」的一組為基準;此為 hiedb 索引順序敏感性,屬 extraction/上游,不在 graph-core 範圍 → 影響:若要讓端到端數字穩定,extraction 需固定索引建法或改用 `decls` 表補足 `defs`(**跨子系統,屬 extraction**)
+
 ## 實作備註
 
-(撰寫時留空)
+### 與設計文檔的差異(全部落在實作自主權內,無契約偏離)
+
+1. **T1 不是新實作,是消費 + 補測試**:`declNodeIndex` 已由 `F002` 依編排者裁決 A12 實作在 `src/Knot/Graph/NodeMint.hs:106`,簽名與本文檔「新增的介面」**逐字相同**(`GatedFacts -> [GraphNode] -> Map QualName [(FilePath, NodeId)]`)。本 feature 只補上 `test_decl_node_index`,一行實作都沒改。
+2. **`Outcome` 的可彙整跳過建構子已存在**:`F002` 已加 `Skipped (Text, Text)`。本 feature 依「實作方式 › 2」的括號指示**沿用不另加**,但把它擴為 `Skipped SkipKind (Text, Text)`——`SkipKind` 是不匯出的內部列舉(`SkipContains` / `SkipRefEdge` / `SkipImplements`),同時是彙整鍵的一部分。理由:同一個 `(gwSource, 原因)` 可能跳過不同種類的邊,訊息尾端的名詞必須跟著換(`F002` 的 `"; N fact(s) skipped, no contains edge"` **一字不動**,ref 走 `"; N ref edge(s) dropped"`、implements 走 `"; N implements edge(s) dropped"`),把種類放進鍵也讓不同種類的跳過不會被合併成一則。
+3. **`RImplements` 是獨立的一支 outcome 清單**:`F002` 的 `classifyInstance` 一筆事實只回一個 `Outcome`,而同一筆 `FactInstance` 現在要產 `RContains` **與** `RImplements` 兩條邊。作法是另開 `implementsOutcomes`(回 `[Outcome]` 再 `concat`),`F002` 的那支完全不動。來源端沿用 `F002` 的 `moduleOfFile` → `disambiguate` → `mintInstanceId` → 節點集合驗證同一條路徑(不重建第二條),依假設 A4 解析失敗時不另發警告。
+4. **`relationOf` 提為 module 頂層私有函式**(帶簽名),四個顯式 pattern、無 catch-all(C2)。測試側另有一份獨立的 `relOfNs` 與它對帳。
+
+`deriveEdges` / `EdgeStats` / `buildGraph` / 全部 DTO / `knot-hs.cabal`(含 `version: 0.0.1.0`)**一個字都沒動**。規則 6(`moduleOnly`)如預估**零改動**,只補測試釘住。
+
+### 改動檔案
+
+- `src/Knot/Graph/EdgeDerive.hs`(唯一的實作改動)
+- `test/Main.hs`(新增 `graph-core/F003 decl-edges` group 共 7 條測試;另依假設 A11 就地更新 `F002` 三處期望值)
+- `src/Knot/Graph/NodeMint.hs`:**未改動**(`declNodeIndex` 已由 `F002` 到位)
+
+### 測試與警告
+
+- `cabal build all --enable-tests`:成功。**完整清掉 `dist-newstyle` 後重建**(依 E2,增量建置不重印警告),lib + exe + test 全量編譯共 **8 筆警告**,全部是 `test/Main.hs:1315/1317/1318/1319/1442/1444` 的既有 `-Wincomplete-record-selectors`(G-E002 追蹤,未修)。**本 feature 新增的程式碼 0 筆警告**。
+- `cabal test`:**All 134 tests passed**(F003 新增 7 條全綠;既有 127 條無回歸,其中 3 條依假設 A11 更新期望值)。
+
+### 端到端實測(knot-hs 自身,`--backend auto`,索引與輸出全部寫在專案外的暫存目錄;`git status` 確認 repo 無新增檔案)
+
+**A. 真實管線(`knot extract` 自建索引,對應 `F002` 閘門基準的量法)**
+
+| 項目 | 實測 |
+|---|---|
+| `cgNodes` | **654**(31 module + 623 decl + 0 instance) |
+| `cgEdges` | **2267**(87 imports + 623 contains + **1246 calls** + **311 uses** + 0 implements) |
+| `gsDroppedExternal` | 3932 |
+| `gsFilteredGenerated` | 846 |
+| `gsDedupedEdges` | 527 |
+| `cgWarnings` | **19**(彙整後;共 25 筆 ref 因目標解析不到而丟棄) |
+
+**B. 本文檔「實作方式 › 9」的重現指令(`hiedb -D <tmp>/f003.sqlite index .hie --src-base-dir .`)**
+
+| 項目 | 實測 | 預估 |
+|---|---|---|
+| `cgNodes` | **662**(31 + 631 + 0) | 662 ✅ |
+| `cgEdges` | **2300** | 2299 |
+| ├ imports | 87 | 86 |
+| ├ contains | 631 | 631 ✅ |
+| ├ calls | **1271** | 1271 ✅ |
+| ├ uses | **311** | 311 ✅ |
+| └ implements | 0 | 0 ✅(C1 預期行為) |
+| `gsDroppedExternal` | 3932 | 3930 |
+| `gsFilteredGenerated` | 846 | 846 ✅ |
+| `gsDedupedEdges` | 527 | 527 ✅ |
+| `cgWarnings` | 0 | 0 ✅ |
+
+**decl 層的五個數字(contains / calls / uses / implements / deduped)與預估逐項相符**;唯二的差距 imports 87 vs 86、`gsDroppedExternal` 3932 vs 3930 都在 **import 側**(`F001` 範圍,本 feature 不觸碰),屬假設 A10 允許的個位數量測漂移。
+
+### 「8 個節點落差」的根因(已查清,未為對數字調整任何邏輯)
+
+`F002` 閘門實測 654(623 decl)、本文檔預估 662(631 decl),差 8。**不是 `.hie` 變了**(`.hie/` 全部 31 個檔的 mtime 均為 2026-08-22 00:27,期間未重產;`refs` 7265 筆、`generated` 846 筆兩邊完全一致),而是**兩次量測用了兩種建索引方式**:
+
+- `hiedb -D db index .hie --src-base-dir .`(走目錄)→ `defs` 表 **631** 列
+- `knot extract` 的 `HiedbDriver`(逐檔傳明確檔案清單)→ `defs` 表 **623** 列
+
+兩個 DB 的 `mods` / `decls` / `refs` 三表**逐列相同**(已 SQL 對帳:`decls` 皆 711 列、`refs` 皆 7265 列、`mods` 皆 31 列且 `hs_src` 完全相同);差異**只在 `defs` 表**,而 extraction 的 `qDefs`(`src/Knot/Extract/HiedbFacts.hs:170`)正是 `FactDecl` 的唯一來源。少掉的 8 列全部是 deriving 產生的 instance 字典:
+
+```
+Knot.Extract.Types : v:$fEqBackendChoice, v:$fShowBackendChoice,
+                     v:$fShowCapabilityLevel, v:$fShowDeclKind, v:$fShowFact
+Knot.Meta.Types    : v:$fShowComponentKind
+Knot.Query.Types   : v:$fEqQueryCommand, v:$fShowQueryCommand
+```
+
+連鎖效果完全自洽:8 個 `FactDecl` 消失 → decl 節點 631→623、`RContains` 631→623、指向它們的 **25 筆 ref** 解析不到 → `RCalls` 1271→1246,並依驗收標準 6 彙整成 **19 則**警告(19 個相異 `(檔案, 原因)` 鍵,筆數合計 25)。這 19 則警告**不是缺陷,是 F003 第一次讓這個上游缺口變得可觀測**——`F002` 只有 `contains` 邊,看不到「有人引用了一個沒被索引的宣告」。
+
+判定:**hiedb 對 `.hie` 索引順序敏感**(`defs` 表的內容隨索引順序改變),屬 extraction/上游,`graph-core` 的三支推導對同一份事實流恆為決定性(134 條測試含 `Gen.shuffle` 重排 property 全綠)。已記為假設 A12,建議編排者轉給 extraction 處理。
