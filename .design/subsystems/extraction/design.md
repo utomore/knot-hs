@@ -119,7 +119,7 @@ data ExtractWarning = ExtractWarning   -- (批次澄清裁定,比照 MetaWarning
 
 4a. **產生碼旗標不由 extraction 判斷**:`FactRef.frGenerated` 原樣轉載 hiedb 的 `refs.is_generated`(2026-08-21 實測本專案 672/4740 = 14% 為 deriving 產生)。extraction **不過濾**、不詮釋;要不要丟棄是 graph-core 的決定(其 `GraphStats.gsFilteredGenerated` 因此有事實可依,不必靠「異常 span」啟發式)。import-scan 後端不產 `FactRef`,不受影響
 5. **相容性探測**:hiedb-driver 需能區分並回報「執行檔不存在」「索引失敗/`.hie` 版本不合」兩類不可用(探測手段屬 Level 3 自主權);extraction 是全系統唯一允許讀 `.hie` 內容的子系統
-6. **索引快取**:預設 `<root>/.knot/hiedb.sqlite`(目標專案內**唯一允許新建**的路徑,`dbPath` 可改道,root 取自 `ExtractOptions.rootDir`);索引重用交給 `hiedb index` 自身的增量機制
+6. **索引快取**:預設 `<root>/.knot/hiedb.sqlite`(目標專案內**唯一允許新建**的路徑,`dbPath` 可改道,root 取自 `ExtractOptions.rootDir`);索引重用交給 `hiedb index` 自身的增量機制。**`dbPath` 為相對路徑時以 `rootDir` 為錨點**,與 project-meta 的 `hieDirOverride` 同語意——同一支 CLI 的兩個路徑覆寫旗標不應有兩套規則;要寫到專案外用絕對路徑(唯讀驗收本來就會給絕對路徑)
 7. **best-effort**:單檔解析失敗、單表查詢失敗 → 警告 + 跳過;整個後端失敗 → 降級 + 報告,不中斷
 8. **決定性**:事實流排序穩定,同樣輸入產生同樣輸出
 
@@ -213,7 +213,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 3 | hiedb-driver | hiedb 探測、相容檢查、index 呼叫、.knot 索引管理 | hiedb-driver | #1 | - |
+| 3 | hiedb-driver | hiedb 探測、相容檢查、index 呼叫、.knot 索引管理 | hiedb-driver | #1 | F003 |
 | 4 | hiedb-facts | 讀 SQLite 出 decl/ref/instance 事實、fromDecl 解析 | hiedb-facts | #3 | - |
 
 (共 4 個 features、2 個階段;全部完成即子系統可交付)

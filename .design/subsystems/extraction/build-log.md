@@ -88,3 +88,36 @@ parent: extraction
 | C4 | hiedb 0.8 的 schema **沒有 instance 表**;本專案 `grep "^instance"` 亦為空(全是 deriving)。`FactInstance` 需要的「class + instance 標頭」無直接來源 | **本階段不產出 `FactInstance`**,建構子保留但零邏輯;`implements` 邊另開 feature。hiedb-facts 契約卡的驗收標準與「明確不做」已改寫 | hiedb-facts 契約卡 |
 
 **留給 graph-core 階段二的前置說明**:C1 與 C2 都動了 graph-core 將要消費的 DTO,但目前 `Knot.Graph.Types` 只 import `DeclKind` 當不透明 payload、尚未 pattern-match `FactRef`,所以**對現有程式碼零影響**。graph-core 的 decl-nodes / decl-edges 開工時要按四值 namespace 鑄 id、並用 `frGenerated` 取代原本規劃的 span 啟發式。
+
+### 階段二 W3 回報後的裁決(2026-08-21)
+
+| 來源 | 假設 / 發現 | 採取的判斷 | 裁決 |
+|---|---|---|---|
+| F003 A1 | `Backend` 值本身與註冊表歸屬未定 | F003 只出 `probeHiedb` **不註冊**,避免 `bRun` 未實作的後端在有 hiedb 的機器上直接壞掉;由 F004 組裝註冊 | 開工前接受 |
+| F003 A2 | `ensureIndex` 簽名無警告通道,但契約卡要「首次建立 `.knot/` 印提示」、library 又不能印 | 提示掛 `IndexHandle` 的 `ihNotes`,F004 的 `bRun` 併入 `[ExtractWarning]` | **裁決:採納**。`IndexHandle` 內容本屬 Level 3,加欄位不動契約簽名;本專案第六次碰到「契約少一條通道」 |
+| F003 A3 | `dbPath` 相對路徑的錨點未定義(採行程 cwd),但 `hieDirOverride` 是 root 相對 | 行程 cwd | **裁決:改為 root 相對**,已回寫抽取規則 6。同一支 CLI 的兩個路徑覆寫旗標不該有兩套規則 |
+| F003 A4 | 相容性檢查深度 | probe 只讀第一個 `.hie` 檔頭(O(1)),混版交給 index 攔 | 接受 |
+| F003 A5 | 規則 8 不拘束 `ihStats` | 它是本次執行的觀測值,兩次不同正是驗收證據 | 接受 |
+| F003 A6 | fixture 測試的唯讀性 | 一律複製到暫存目錄再跑,版控樹全程唯讀 | 接受 |
+| F003 A7 | tasty 無內建 skipped 狀態 | 不加 `tasty-expected-failure`,自行印原因 + 跳過數,佔位節點名含跳過數 | 接受 |
+
+**W3 的額外實測**(subagent 在設計階段自行補做,直接影響設計):
+
+1. `hiedb` **不會自建 `-D` 的父目錄** → exit 1 `ErrorCan'tOpen`;`.knot/` 必須由本 feature 建,那也正好是「首次建立」的判斷點
+2. `hiedb index` **接受單一 `.hie` 檔參數**(help 只寫 DIRECTORY)→ 可逐檔傳 `hieFiles`,天然排除幽靈檔
+3. **對不存在的路徑回 exit 0**(`0 indexed, 0 skipped`)→ exit code 不足以判成功,**必須解析 `Completed!` 計數**
+4. **單一 0-byte 假 `.hie` 會讓整批 exit 1 中止** → project-meta 的幽靈過濾是硬相依;也印證現有 `test/fixtures/hie-conv/.hie/` 的空殼檔不能餵給 hiedb
+5. 重跑實測:第一次 `2 indexed, 0 skipped`,第二次 `0 indexed, 2 skipped` → 驗收標準的「索引重用」改用**計數**而非計時,不受機器速度影響
+6. hiedb 輸出**全走 stderr**,`readCreateProcessWithExitCode` 捕獲兩股即滿足「library 不印」
+7. **`.hie` 檔頭是 `"HIE" + "9141" + \n + "9.14.1" + \n`**,與 `showVersion System.Info.fullCompilerVersion` 格式**完全一致** → ADR-001 的版本鎖可在 probe 階段就地檢出,不必等 index 炸掉
+8. `ghc -fno-code -fwrite-ide-info -hiedir .hie -isrc …` 可直接產 fixture 用的真實 `.hie`(884B / 1026B),不需 cabal、不留 `dist-newstyle`
+
+### 🔴 跨子系統缺口(W3 發現,開發者裁定本次一併補接)
+
+`app/Knot/App/Cli.hs:238-243` 把 `hiedbExe` 與 `dbPath` **寫死 `Nothing`**,haddock 還引用著 export-query F004 的假設 A8(「契約卡的六旗標不含 `--db` / `--hiedb`」);但 `system.md` 的 CLI 契約現已明列這兩個旗標。
+
+**成因是編排者的疏漏**:export-query 階段二閘門裁決 A8「接受」並把兩個旗標補進 `system.md` 時,沒有同時指出既有實作要跟上,導致 Level 1 契約承諾了程式碼沒有的旗標。
+
+**後果**:目前惰性(hiedb 後端尚未註冊),但 **F004 一註冊,對任何專案跑 `knot extract` 都會在對方建 `.knot/` 且無法改道**——直接違反 system.md「驗收標的不得異動」的唯讀例外機制。
+
+**裁決**:本次一併補接,列為 **F004 委派的前置小任務**(兩個旗標 + 兩個欄位賦值),在 hiedb 後端註冊之前完成。
