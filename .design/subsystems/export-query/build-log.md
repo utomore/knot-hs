@@ -16,7 +16,7 @@ parent: export-query
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | json-export | impl-done |
-| 階段二:S4 查詢 CLI | W2 | graph-load | pending |
+| 階段二:S4 查詢 CLI | W2 | graph-load | design-done |
 | 階段二:S4 查詢 CLI | W3 | query-commands | pending |
 | 階段二:S4 查詢 CLI | W4 | cli-wiring | pending |
 
@@ -54,7 +54,7 @@ parent: export-query
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
 | json-export | F001 | F001-json-export.md | 繼承 | 繼承 | impl-done |
-| graph-load | F002 | F002-graph-load.md | 繼承 | 繼承 | pending |
+| graph-load | F002 | F002-graph-load.md | 繼承 | 繼承 | design-done |
 | query-commands | F003 | F003-query-commands.md | 繼承 | 繼承 | pending |
 | cli-wiring | F004 | F004-cli-wiring.md | 繼承 | 繼承 | pending |
 
@@ -71,6 +71,12 @@ parent: export-query
 | F001 A5 | 投影規則 3 不輸出 `geLine`,但下游 `scan-graph.mjs:265` 以 `e.source_location ?? src.source_location` 取循環依賴證據行;S1 的 module 節點 `gnLine` 恆為 `Nothing`,兩層皆空 | 嚴守契約不輸出,列為建議修訂 Level 2 | **開工前裁決:輸出**。編排者複驗下游程式碼屬實,判定為契約起草漏欄(ADR-003 本就寫明 `source_location` 供循環依賴證據行用,IR 的 `geLine` 也已備好資料)。投影規則 3 與 json-export 契約卡已回寫 |
 | F001 A6 | git sha 驗證強度未定 | 去空白後要求字元全落在 `0-9a-f` 且長度 40 或 64 | 接受 |
 | F001 A7 | `ExportOptions.rootDir` 與既有 `ExtractOptions.rootDir` 同名 | 實測 GHC2024 內含 `DisambiguateRecordFields`:記錄建構語法可消歧、裸選擇器不行;一律用記錄建構語法,不新增擴充 | 接受(實作已更正該結論:改用 qualified import,見階段結果) |
+| F002 A1 | 契約的 `QueryCommand` / `QueryResult` 用到 `NodeId`,但「對外契約 › 查詢面」從未定義它 | 查詢面自定義 `newtype NodeId = NodeId Text` | **開工前裁決:採納**。graph-load 手上只有 JSON 字串,而 graph-core 的 `NodeId` 明訂唯一構造入口是 node-mint;ADR-003 也明寫匯出格式 ≠ 內部模型。已寫進 design.md 查詢面契約 |
+| F002 A2 | `links` 頂層鍵缺席的行為未定 | 當空陣列、載入成功(不接受 `edges` 別名) | 待閘門 |
+| F002 A3 | 節點 id 重複的行為未定 | 回 `LoadSchemaError` | 待閘門 |
+| F002 A4 | `RankConnectivity` 的度數算邊數還是相異鄰居數 | 鄰接表去重、度數算邊數,兩者分開存 | **開工前接受**:編排者複驗 `scan-graph.mjs:310-316` 為逐邊累加(跳過結構邊、兩端各 +1),與此判斷一致 |
+| F002 A5 | `directed: false` 要不要告警 | 忽略該欄位,一律當有向(library 無警告通道) | 待閘門 |
+| F002 A6 | `design.md` / ADR-003 的結構類是 3 種,`scan-graph.mjs:64` 實際是 6 種 | 依 design.md 實作 3 種,多的落入 `RelUnknown` | **開工前裁決:補齊到 6 種**。編排者複驗屬實;`knot query` 讀的是任何 codegraph.json(含 graphify 產的其他語言圖),分類必須與唯一下游對齊。design.md 查詢規則 1 與 ADR-003 皆已補 |
 
 ## 階段結果
 

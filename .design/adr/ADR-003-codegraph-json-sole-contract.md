@@ -5,7 +5,7 @@ title: codegraph-json-sole-contract
 description: 對外唯一契約採 dev-flow 的 codegraph.json 格式
 status: accepted
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-21
 ---
 
 # ADR-003: 對外唯一契約採 dev-flow 的 codegraph.json 格式
@@ -24,7 +24,7 @@ accepted
 
 - **必要欄位**:`nodes[].id` / `label` / `source_file`;`links[].source` / `target` / `relation`(source/target 是節點 id,不是索引)
 - **選填欄位**:`source_location`(格式 `L<行>`,循環依賴證據行用)、`confidence`、頂層 `built_at_commit`、頂層 `directed`(缺省時下游當有向)
-- **relation 兩類**:依賴類(`imports` `imports_from` `calls` `uses` `references` `extends` `implements` `inherits` `instantiates` `depends_on`)才算進依賴圖;結構類(`contains` `method` `defines`)不算
+- **relation 兩類**:依賴類(`imports` `imports_from` `calls` `uses` `references` `extends` `implements` `inherits` `instantiates` `depends_on`)才算進依賴圖;結構類(`contains` `method` `defines` `declares` `rationale_for` `part_of`)不算(2026-08-21 對照 `scan-graph.mjs` 的 `STRUCTURAL_RELATIONS` 補齊後三種)
 - `source_file` 一律 repo 相對路徑、正斜線(`code-paths` 前綴比對依據)
 - **輸出位置**:目標專案根目錄 `codegraph.json`(下游搜尋順序的第一位,零設定接上)
 - GHC 抽取的邊 `confidence` 一律 `EXTRACTED`(是事實不是推測)

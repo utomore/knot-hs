@@ -74,6 +74,11 @@ data QueryCommand
 
 data Direction = Forward | Reverse  -- Forward:它依賴誰;Reverse:誰依賴它
 
+newtype NodeId = NodeId Text        -- 查詢面自有,與 graph-core 的同名型別無關:
+                                    -- graph-load 手上只有 JSON 字串,而 graph-core 的
+                                    -- NodeId 唯一構造入口是 node-mint(ADR-003:匯出
+                                    -- 格式 ≠ 內部模型)。查詢面全程不依賴 graph-core
+
 data QueryGraph                     -- 從 codegraph.json 載入的查詢用圖(內容屬 Level 3)
                                     -- 未知 relation 統計以 queryGraphNotes 取出,library 不印
 
@@ -91,7 +96,7 @@ data LoadError
 
 ### 查詢規則(契約的一部分)
 
-1. **依賴類邊才進圖**:`Reachable` / `ShortestPath` / `RankConnectivity` 只走依賴類 relation(`imports`、`imports_from`、`calls`、`uses`、`references`、`extends`、`implements`、`inherits`、`instantiates`、`depends_on`);結構類(`contains`、`method`、`defines`)不算——與 dev-flow `scan-graph.mjs` 語意一致
+1. **依賴類邊才進圖**:`Reachable` / `ShortestPath` / `RankConnectivity` 只走依賴類 relation(`imports`、`imports_from`、`calls`、`uses`、`references`、`extends`、`implements`、`inherits`、`instantiates`、`depends_on`);結構類(`contains`、`method`、`defines`、`declares`、`rationale_for`、`part_of`)不算——與 dev-flow `scan-graph.mjs` 的 `DEP_RELATIONS` / `STRUCTURAL_RELATIONS` 逐項一致。`knot query` 讀的是任何 `codegraph.json`(含 graphify 產的其他語言圖),分類規則必須與唯一下游對齊,不能只認 knot 自己會產生的那五種
 2. **未知 relation 列印排除**:載入時認不得的 relation 彙整列印(relation 名 + 邊數),不靜默吞掉(ADR-003 的下游行為)
 3. **`FindNodes`** 比對所有節點(含結構類邊連接的節點);其餘三指令操作依賴圖
 4. **決定性**:結果排序穩定(距離/度數同值時按 id 字典序)
@@ -183,7 +188,7 @@ commit 偵測呼叫 `git rev-parse HEAD`(在 `rootDir` 執行,對目標專案唯
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 2 | graph-load | 讀回 codegraph.json、驗證、未知 relation 列印排除 | graph-load | #1 | - |
+| 2 | graph-load | 讀回 codegraph.json、驗證、未知 relation 列印排除 | graph-load | #1 | F002 |
 | 3 | query-commands | 四查詢演算法與文字輸出 | query-engine、query-render | #2 | - |
 | 4 | cli-wiring | knot extract / query 兩子命令的參數解析與管線組裝 | cli-assembly | #1, #3 | - |
 
