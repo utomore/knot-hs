@@ -5,7 +5,7 @@ title: graph-core
 description: 圖 IR 子系統:決定性節點 id 鑄造、兩層節點組裝與邊推導
 status: active
 created: 2026-08-20
-updated: 2026-08-21
+updated: 2026-08-22
 parent: system
 related-adr: []
 code-paths: [src/Knot/Graph, src/Knot/Graph.hs]
@@ -82,9 +82,13 @@ data GraphWarning = GraphWarning        -- (批次澄清裁決,比照 MetaWarnin
 | 節點 | id 格式 | 例 |
 |---|---|---|
 | module | 裸 module 名;同名碰撞時整組改用 `<module>@<source_file>` | `Demo.Core`、`Main@app/Main.hs` |
-| 值宣告 | `<module>.<occ>` | `Demo.Core.render` |
-| 型別宣告 | `<module>.<occ>#t` | `Demo.Core.Foo#t`(與建構子 `Demo.Core.Foo` 不碰撞) |
-| instance | `<module>#i:<instance 標頭>` | `Demo.Core#i:Renderable Sprite` |
+| 值宣告 | `<mod-id>.<occ>` | `Demo.Core.render`、`Main@app/Main.hs.main` |
+| 型別宣告 | `<mod-id>.<occ>#t` | `Demo.Core.Foo#t`(與建構子 `Demo.Core.Foo` 不碰撞) |
+| instance | `<mod-id>#i:<instance 標頭>` | `Demo.Core#i:Renderable Sprite` |
+
+**`<mod-id>` = 該 module 節點實際鑄出的 id**(批次澄清 C3 裁決):未碰撞時是裸 module 名,碰撞組成員是 `<module>@<source_file>`。decl 層節點沿用所屬 module 的消歧結果,故 `mintDeclId` / `mintInstanceId` 都帶 `Maybe FilePath`,語意同 `mintModuleId`(`Nothing` = 未碰撞、鑄裸名)。理由與階段一假設 A2 同源:缺了 file 參數,多 executable 專案的 `Main.main` 會整組撞成同一個 id 而在去重時被靜默吞掉。
+
+值宣告的 `<occ>` 涵蓋 `ValueNs` / `DataConNs` / `FieldNs` 三個 term-level namespace,`#t` 專屬 `TypeNs`。**已知精度限制(繼承 extraction 假設 A9)**:`DuplicateRecordFields` 下同一 module 的兩個同名欄位選擇器,丟棄父型別後 `QualName` 相同,會鑄出同一個 id 並在去重時合併。這是 extraction 契約的粗度,graph-core 不補救、不猜測。
 
 id 只由 `QualName`(module、occ、namespace)、instance 標頭與(碰撞時的)`source_file` 決定——同一份原始碼在任何機器、任何次編譯都鑄出相同 id。
 
@@ -100,12 +104,16 @@ id 只由 `QualName`(module、occ、namespace)、instance 標頭與(碰撞時的
    | `FactModule` | module 節點 |
    | `FactImport`(雙端內部) | `RImports`(module → module) |
    | `FactDecl` | decl 節點 + `RContains`(module → decl) |
-   | `FactRef`(target 為 `ValueNs`) | `RCalls`(fromDecl → target decl) |
-   | `FactRef`(target 為 `TypeNs`) | `RUses`(fromDecl → target decl) |
+   | `FactRef`(target 為 term-level:`ValueNs` / `DataConNs` / `FieldNs`) | `RCalls`(fromDecl → target decl) |
+   | `FactRef`(target 為 type-level:`TypeNs`) | `RUses`(fromDecl → target decl) |
    | `FactRef`(`frFromDecl = Nothing`) | 以**來源 module 節點**為源,relation 依 namespace 同上 |
    | `FactInstance` | instance 節點 + `RContains`(module → instance)+ `RImplements`(instance → class,class 為內部節點時) |
 
-3. **產生碼過濾**:事實指向的檔案不在 `pmSources`、或行號 ≤ 0 → 濾除並計入 `gsFilteredGenerated`
+   **namespace → relation 是 term/type 二分**(批次澄清 C2 裁決):值層面的名字(函式、資料建構子、記錄欄位選擇器)一律 `RCalls`,`RUses` 專留給型別層面。`NameSpace` 的四個值全部有歸屬,不留靜默落空的縫;extraction 的 `z:`(型別變數)在其契約已裁決不產出,不會流到這裡。
+
+   **`FactInstance` 目前無後端產出**(extraction C4:hiedb 0.8 的 schema 無 instance 表;見 system.md「`implements` 邊不在 S3」)。graph-core 仍**完整實作** instance 節點鑄造與 `RImplements` 推導並以手工事實流驗收——兩段都是純函數,ADR-002 預留的第三後端上線時零改動即生效;端到端輸出目前恆為 0 個 instance 節點與 0 條 `RImplements` 邊(批次澄清 C1 裁決)。
+
+3. **產生碼過濾**:三者任一成立即濾除該事實並計入 `gsFilteredGenerated`——(a) 事實指向的檔案不在 `pmSources`;(b) 行號 ≤ 0;(c) `FactRef.frGenerated = True`(批次澄清 C4 裁決)。(c) 直接採信 extraction 規則 4a 原樣轉載的 `refs.is_generated` 事實,**不做「異常 span」啟發式**(system.md 已據此改寫 S3 描述);實測 knot-hs 自身 846/7265 = 11.6% 的 ref 屬此類。deriving 產生的引用不對應任何人寫的程式碼行,留著會在 decl 間製造非人為的邊並污染 hub 排名
 4a. **消歧組的 import 目標**:`FactImport` 的目標 module 屬 D1 消歧組時,無從判定指向組內哪個節點 → 丟棄該邊並發 `GraphWarning`,**不**計入 `gsDroppedExternal`(它不是外部目標;A4 裁決)
 4. **自環丟棄**:source 與 target 相同的邊(遞迴呼叫、module 自引)不產出,不計警告
 5. **去重**:相同 `(source, target, relation)` 的邊合併為一條,保留最早的 `geLine` 證據行,合併數計入 `gsDedupedEdges`
@@ -146,8 +154,8 @@ data GatedFacts = GatedFacts
 
 -- node-mint:鑄造
 mintModuleId   :: ModuleName -> Maybe FilePath -> NodeId   -- Nothing = 該 module 未碰撞,鑄裸名(A2 裁決)
-mintDeclId     :: QualName -> NodeId
-mintInstanceId :: ModuleName -> Text -> NodeId   -- instance 標頭
+mintDeclId     :: QualName -> Maybe FilePath -> NodeId          -- Maybe FilePath 語意同 mintModuleId(C3 裁決)
+mintInstanceId :: ModuleName -> Maybe FilePath -> Text -> NodeId -- (消歧, instance 標頭)
 mintNodes      :: GatedFacts -> [GraphNode]
 
 -- edge-derive:推導

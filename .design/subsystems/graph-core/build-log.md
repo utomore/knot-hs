@@ -2,10 +2,10 @@
 id: graph-core-build
 type: build-log
 title: graph-core-build
-description: 委派展開 graph-core 階段一(module-graph)
+description: 委派展開 graph-core 階段一(module-graph)與階段二(decl 層)
 status: in-progress
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-22
 parent: graph-core
 ---
 
@@ -16,10 +16,12 @@ parent: graph-core
 | 階段 | 波次 | features | 狀態 |
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | module-graph | impl-done |
-| 階段二:S3 decl 層 | W2 | decl-nodes | 本次不跑 |
-| 階段二:S3 decl 層 | W3 | decl-edges | 本次不跑 |
+| 階段二:S3 decl 層 | W2 | decl-nodes | 執行中(2026-08-22) |
+| 階段二:S3 decl 層 | W3 | decl-edges | 執行中(2026-08-22) |
 
-開發者決定本次只跑階段一(主架構 S1 端到端優先);跨子系統依賴 project-meta、extraction 階段一皆 done 並已 merge 進 main(PR #1,commit 76cf838)。
+階段一(2026-08-20):開發者決定只跑階段一(主架構 S1 端到端優先);跨子系統依賴 project-meta、extraction 階段一皆 done 並已 merge 進 main(PR #1,commit 76cf838)。
+
+階段二(2026-08-22,接續模式):跑完整個階段二(E1 裁決)。兩波序列——#3 依 #2 的節點集合,無平行空間。上游 extraction 階段二已 done 並 merge(PR #4,commit 2b0c5b6),`FactDecl` / `FactRef` 實測產出(knot-hs 自身:FactDecl 623 / FactRef 7265 / `frGenerated = True` 846)。**`FactInstance` 無後端產出**(extraction C4),instance 路徑以手工事實流驗收。
 
 ## 委派決策記錄
 
@@ -32,13 +34,33 @@ parent: graph-core
 | D5 | 排序鍵 | cgNodes 依 NodeId 字典序;cgEdges 依 (source, relation, target) 字典序;已回寫契約 | F001 |
 | D6 | 沿用的全域決定 | hedgehog+tasty;命名空間 `Knot.Graph.*`;驗收標的絕對唯讀;版本號 0.0.1.0 凍結;收尾以 PR 整合 | 全部 |
 
+### 階段二批次澄清(2026-08-22)
+
+**契約類**(已回寫 `design.md`,`updated` 同步):
+
+| # | 問題 | 開發者決定 | 回寫位置 |
+|---|------|-----------|---------|
+| C1 | 兩張卡都要 instance(`mintInstanceId`、`#i:`、`RImplements`),但 extraction 依 C4 不產 `FactInstance`(hiedb 0.8 無 instance 表),system.md 亦已寫明「`implements` 邊不在 S3」 | **保留完整程式碼路徑,以手工 fixture 事實流驗收**;端到端恆 0。兩段都是純函數,ADR-002 的第三後端上線時零改動即生效 | 組裝規則 2 表後註記 |
+| C2 | 邊推導表只列 `ValueNs`→`RCalls`、`TypeNs`→`RUses`;`DataConNs`(hiedb `c:`,實測 95 筆 decl)與 `FieldNs`(`f:`,166+ 筆)未涵蓋 —— extraction W4 閘門明確留給本階段的前置,不裁決會**靜默落空** | **term/type 二分**:`ValueNs` / `DataConNs` / `FieldNs` → `RCalls`;`TypeNs` → `RUses`。四個 namespace 全部有歸屬 | 邊推導表 + 表後註記 |
+| C3 | `mintDeclId :: QualName -> NodeId` 無 file 參數,消歧組(例:particle-magic 的 5 個 `Main`)的 decl 會全部撞成 `Main.foo` —— 與階段一 A2 同一個坑 | **比照 A2 改契約簽名**:`mintDeclId` / `mintInstanceId` 都帶 `Maybe FilePath`;鑄造規則表的 `<module>` 改為 `<mod-id>`(= module 節點實際鑄出的 id) | 鑄造規則表 + 模組間公開介面 |
+| C4 | 組裝規則 3 未提 `frGenerated`,但 extraction 規則 4a 說「丟不丟是 graph-core 的決定」、system.md 說 S3 過濾改用 `refs.is_generated` 事實 | **`frGenerated = True` 一律濾除並計入 `gsFilteredGenerated`**(實測 846/7265 = 11.6%)。不做「異常 span」啟發式 | 組裝規則 3 |
+
+**執行取向類**(不屬 Level 2,只留此處):
+
+| # | 問題 | 開發者決定 | 影響範圍 |
+|---|------|-----------|---------|
+| E1 | 本次跑到哪 | **跑完整個階段二**(W2 → W3)。只有 decl 節點而無 calls/uses 邊是半成品,S3 里程碑要兩者到位才宣告完成 | F002、F003 |
+| E2 | G-E002(`-Wall` 零警告,open,`test/Main.hs` 8 筆 `-Wincomplete-record-selectors`)本階段是否順手處理 | **不碰**(跨子系統改別人的測試碼,不屬本契約卡範圍),但**本階段新增程式碼不得再添新警告**;閘門以 `cabal clean` 後重建確認 —— 這是 G-E002 挖出來的唯一可靠手段(`-fforce-recomp` 會被 cabal up-to-date 短路而給出假答案) | F002、F003、閘門 |
+| E3 | decl 層 1-to-1 測試的輸入來源 | **一律手工 `[Fact]` 事實流**,不依賴 hiedb、不受 D7 跳過機制影響,測試在任何機器全綠。graph-core 是純函數子系統,契約卡的驗收標準本來就寫「以 fixture 事實流驗證」 | F002、F003 |
+| E4 | `gsDroppedExternal` 是單一計數器(module 級實測 283),decl 層上來後會被推到數千 | **維持單一計數器**。`GraphStats` 是 Level 2 契約 DTO,加欄位要連帶動 export-query 的摘要渲染;`gsTopExternalTargets` 已能看出丟到哪些 module,層別區分屬診斷需求而非契約需求 | F002、F003 |
+
 ## 配號表
 
 | feature | id | 檔名 | 設計模型 | 實作模型 | 狀態 |
 |---|---|---|---|---|---|
 | module-graph | F001 | F001-module-graph.md | opus(預防 Fable 誤判) | 繼承 | impl-done |
-| decl-nodes | F002 | F002-decl-nodes.md | 繼承 | 繼承 | 本次不跑 |
-| decl-edges | F003 | F003-decl-edges.md | 繼承 | 繼承 | 本次不跑 |
+| decl-nodes | F002 | F002-decl-nodes.md | 繼承 | 繼承 | 待跑(W2) |
+| decl-edges | F003 | F003-decl-edges.md | 繼承 | 繼承 | 待跑(W3) |
 
 ## 待確認假設彙總
 
@@ -54,6 +76,8 @@ parent: graph-core
 | F001 A8 | 契約卡「不印任何輸出」vs 兩標的實跑驗收 | library 不印;app 層加 renderGraphSummary + --graph | 接受 |
 | F001 A9 | test/fixtures/proj 三個 included 檔全無標頭也無 import,端到端驗不到邊 | 保留 proj(D1 真實樣本),另建 test/fixtures/graph 驗邊集/丟棄/去重/自環 | 接受 |
 | F001 A10 | edge-derive 警告的 gwSource 該填什麼 | 邊警告用來源檔路徑(行號進 gwMessage);碰撞警告用 module 名 | 接受 |
+
+階段二的假設待 W2 / W3 回報後填入。
 
 ## 階段結果
 
