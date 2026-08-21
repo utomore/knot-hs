@@ -190,7 +190,7 @@ commit 偵測呼叫 `git rev-parse HEAD`(在 `rootDir` 執行,對目標專案唯
 |---|---------|-----------|------|------|-----|
 | 2 | graph-load | 讀回 codegraph.json、驗證、未知 relation 列印排除 | graph-load | #1 | F002 |
 | 3 | query-commands | 四查詢演算法與文字輸出 | query-engine、query-render | #2 | F003 |
-| 4 | cli-wiring | knot extract / query 兩子命令的參數解析與管線組裝 | cli-assembly | #1, #3 | - |
+| 4 | cli-wiring | knot extract / query 兩子命令的參數解析與管線組裝 | cli-assembly | #1, #3 | F004 |
 
 (共 4 個 features、2 個階段;全部完成即子系統可交付)
 

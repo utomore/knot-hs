@@ -18,7 +18,7 @@ parent: export-query
 | 階段一:S1 骨架 | W1 | json-export | impl-done |
 | 階段二:S4 查詢 CLI | W2 | graph-load | design-done |
 | 階段二:S4 查詢 CLI | W3 | query-commands | design-done |
-| 階段二:S4 查詢 CLI | W4 | cli-wiring | pending |
+| 階段二:S4 查詢 CLI | W4 | cli-wiring | design-done |
 
 開發者決定本次一路跑完整個子系統(階段一 + 階段二)。跨子系統依賴 project-meta、extraction、graph-core 的階段一皆 done 並已 merge 進 main(PR #1、#2,commit 1ea5f27),無等待項。專案尚無 `codegraph.json`,略過 codegraph 對帳。
 
@@ -56,7 +56,7 @@ parent: export-query
 | json-export | F001 | F001-json-export.md | 繼承 | 繼承 | impl-done |
 | graph-load | F002 | F002-graph-load.md | 繼承 | 繼承 | design-done |
 | query-commands | F003 | F003-query-commands.md | 繼承 | 繼承 | design-done |
-| cli-wiring | F004 | F004-cli-wiring.md | 繼承 | 繼承 | pending |
+| cli-wiring | F004 | F004-cli-wiring.md | 繼承 | 繼承 | design-done |
 
 四個 feature 全部不降級:F001 的決定性序列化與 F004 的跨四子系統組裝都不是樣板工作;F002 / F003 雖然單一入口,但它們是 F004 的前置,設計錯會沿依賴鏈複利。
 
@@ -84,6 +84,17 @@ parent: export-query
 | F003 A5 | `renderResult` 格式與語言未定 | 英文小寫 `key: value` + 兩空格明細行(對齊 `Summary.hs` / `xrNotes`);不連通 = `path: not connected` | 待閘門 |
 | F003 A6 | `FindNodes ""` 的行為 | 回全部節點(`isInfixOf` 空字串恆真) | 待閘門 |
 | F003 A7 | 契約卡只寫「查詢規則 3、4」,但規則 5、6 明屬本 feature | 一併實作 3/4/5/6,以 `design.md` 為準 | **開工前裁決:契約卡已補正為「3、4、5、6」**。規則 5、6 是編排者在 W2 期間新增(C4/C5),卡片未同步是編排者的疏漏,非 subagent 誤判 |
+| F004 A1 | `--summary` 下要不要照樣印 stderr 警告通道 | 照樣印(`renderGraphSummary` 看不到 pm/er 警告) | 待閘門 |
+| F004 A2 | `--strict` 的「跳檔」判定沒有對應欄位 | 三條警告清單任一非空即算;`brUsed == False` 的**降級不算**(否則沒裝 hiedb 永遠 exit 1,牴觸 ADR-002) | 待閘門 |
+| F004 A3 | `knot query` 讀哪份 json,契約未定 | 新增 `--graph FILE`,預設 `./codegraph.json` | 待閘門(牽動 system.md,見階段結果) |
+| F004 A4 | 起點 id 不存在的 exit code | exit 0 + stderr `node not found`(落實 F003 A1 建議) | 待閘門 |
+| F004 A5 | 串流分配 | stdout 只放結果/摘要/`wrote` 行,其餘全 stderr | 待閘門 |
+| F004 A6 | `CommitPolicy` 無對應旗標 | 固定 `AutoDetect` | 待閘門 |
+| F004 A7 | `--backend hiedb` 在階段一回空事實流 | CLI 不攔截,由降級行說明 | 待閘門 |
+| F004 A8 | `hiedbExe`/`dbPath` 無旗標,但 system.md「使用者與體量」寫「`--db` 可改道」 | 依契約卡六旗標,兩欄位填 `Nothing`,**不新增旗標** | 待閘門(**Level 1 落差,編排者不自行修改**) |
+| F004 A9 | `--top` 負數 | 不在解析層擋,交給 F003 的 `take` | 待閘門 |
+| F004 A10 | `--summary` 不在 system.md 的 CLI 契約內 | 依契約卡實作,建議補 system.md | 待閘門(**Level 1 落差**) |
+| F004 A11 | 舊 `--facts` / `--graph` 去留 | 移除,由 `--summary` 承接(C6 原文) | 待閘門 |
 
 ## 階段結果
 
