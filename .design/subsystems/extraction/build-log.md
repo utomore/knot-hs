@@ -3,7 +3,7 @@ id: extraction-build
 type: build-log
 title: extraction-build
 description: 委派展開 extraction 兩階段(S1 骨架、S3 函式級)
-status: in-progress
+status: done
 created: 2026-08-20
 updated: 2026-08-21
 parent: extraction
@@ -17,8 +17,8 @@ parent: extraction
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | fact-contract | impl-done |
 | 階段一:S1 骨架 | W2 | import-scan | impl-done |
-| 階段二:S3 函式級 | W3 | hiedb-driver | pending |
-| 階段二:S3 函式級 | W4 | hiedb-facts | pending |
+| 階段二:S3 函式級 | W3 | hiedb-driver | impl-done |
+| 階段二:S3 函式級 | W4 | hiedb-facts | impl-done |
 
 開發者決定本次只跑階段一(主架構 S1 里程碑優先,S3 之後接續模式回來);無跨子系統未完成依賴(project-meta done)。
 
@@ -29,7 +29,7 @@ parent: extraction
 | D1 | ExtractWarning 欄位形狀 | 比照 MetaWarning:{ ewSource, ewMessage },已回寫契約 | F001、後續全部 |
 | D2 | ModuleName 型別來源 | 直接共用 Knot.Meta.Types 的定義,不重複定義,已回寫契約 | F001、F002 |
 | D3 | 無 module 標頭的 .hs 檔 | 依 Haskell 語意視為 Main(fmFile 區分),已回寫契約 | F002 |
-| D4 | 測試框架/命名空間/唯讀(沿 project-meta 展開的全域決定) | hedgehog+tasty;Knot.Extract.*;驗收標的絕對唯讀;版本號 0.0.1.0 凍結 | 全部 |
+| D4 | 測試框架/命名空間/唯讀(沿 project-meta 展開的全域決定) | hedgehog+tasty;Knot.Extract.*;驗收標的絕對唯讀;版本號 0.0.1.0 凍結;`-Wall` 零警告(**2026-08-22 更正:此項從未真正成立,見 G-E002**) | 全部 |
 | D5 | 階段二跑到哪 | 一路跑完階段二(W3 hiedb-driver → W4 hiedb-facts),接續模式沿用既有配號 | F003、F004 |
 | D6 | fixture 的 `.hie` 從哪來 | **commit 小型真實 `.hie` 進 fixtures**:自建 2-3 個 module 的小專案、用 GHC 9.14.1 產出並入版控(實測單檔 2.6-26KB)。不在測試裡 shell out 呼叫 ghc——與 export-query D5 刪掉「測試裡跑 node」是同一個理由。版本鎖不是新問題,ADR-001 本來就要求同版 GHC | F003、F004 |
 | D7 | hiedb 不在 PATH 時的測試行為 | 需要 hiedb 的測試**自動跳過並印明原因**,測試摘要列出跳過數。符合 ADR-002:沒裝選用依賴不該讓專案看起來是壞的 | F003、F004 |
@@ -42,8 +42,8 @@ parent: extraction
 |---|---|---|---|---|---|
 | fact-contract | F001 | F001-fact-contract.md | opus(Fable 誤判中斷改派) | 繼承 | impl-done |
 | import-scan | F002 | F002-import-scan.md | opus(預防 Fable 誤判) | 繼承 | impl-done |
-| hiedb-driver | F003 | F003-hiedb-driver.md | 繼承 | 繼承 | pending |
-| hiedb-facts | F004 | F004-hiedb-facts.md | 繼承 | 繼承 | pending |
+| hiedb-driver | F003 | F003-hiedb-driver.md | 繼承 | 繼承 | impl-done |
+| hiedb-facts | F004 | F004-hiedb-facts.md | 繼承 | 繼承 | impl-done |
 
 ## 待確認假設彙總
 
@@ -141,3 +141,28 @@ W4 的 subagent 到 **hiedb 0.8 與 sqlite-simple 的原始碼**複查行為成�
 ### 留給 graph-core 階段二的前置(W4 發現,編排者不跨子系統修改)
 
 `graph-core/design.md` 的邊推導表仍只列 `FactRef`(target 為 `ValueNs`)→ `RCalls`、(`TypeNs`)→ `RUses`,**`DataConNs` / `FieldNs` 未涵蓋**(C1 擴充後才出現的兩個值)。graph-core 階段二開工前需裁決補齊,否則兩個 namespace 的引用會靜默落空。
+
+### 階段二:S3 函式級
+
+- **F003 hiedb-driver**(設計繼承 / 實作繼承):Todo 11/11、測試 **106/106**;`src/Knot/Extract/HiedbDriver.hs`
+- **F004 hiedb-facts**(設計繼承 / 實作繼承):Todo 11/11、測試 **118/118**;`src/Knot/Extract/HiedbFacts.hs`,並完成三項前置(DTO 補齊 C1、CLI 補接 `--hiedb`/`--db`、註冊 hiedb Backend)
+- **無 hiedb 的環境**:111 通過 + **9 跳過**(F003 五 + F004 四),印明原因。D7 的機制實測有效
+- **契約補完(實作階段發現)**:`fromDecl` 候選集**不得以 `is_root` 過濾**。實測 knot-hs 自身索引:`v:` 前綴 **108 筆全部 `is_root = False`**(含 `buildGraph` / `extract` / `writeCodegraph`),只有 `c:` 95 筆與 `t:` 50 筆為 True。帶著該過濾,`calls` 邊會**全空而查詢本身不報錯**。已回寫抽取規則 4
+  - **這個坑同時騙過了編排者的 spike 與 F004 的設計查證表**:兩邊都用了 `is_root = 1` 且「看起來能跑」,因為回傳的每一筆都是型別。F004 實作時才發現函式本體被 100% 靜默排除
+- **自我驗收實測**(knot-hs 自身,唯讀):`hieFiles = 31` → `erLevel = DeclLevel`、兩後端 `brUsed = True`、**FactDecl 623 / FactRef 7265 / `frGenerated = True` 846(11.6%)/ 警告 0**;`knot extract . --summary facts` → `facts: 8173 total`
+- **ADR-002 降級承諾實測成立**(編排者於閘門執行):兩個驗收標的都沒有 `.hie`,`knot extract` 正確降為 `ModuleLevel`、印明原因(`backend hiedb unused: hie files unavailable`)、**exit 0**、仍產出完整 module 級圖(MagicFarmer 62 節點/266 邊、particle-magic 46/127 含 1 條碰撞警告),且**兩者皆未被建 `.knot/`**。這是 `--db` 補接後的第一次真實驗證
+- **arch-audit subsys 發現**(依嚴重度):
+  1. (中)**`-Wall` 新增 1 筆警告**:`HiedbDriver.hs:160` 的 `head (hieFiles hie)` 觸發 `-Wx-partial`(前一分支有 `null` 保護,執行期安全)。**編排者更正**:F003 checkpoint 時轉述的「新增程式碼零警告」不成立;clean 重建後的真實總數是 **9 筆**(既有 8 + 本次 1)
+  2. (低)`renderFactSummary` 的分類計數落後:8173 筆事實只分類出 31 modules + 254 imports,約 7888 筆 decl 層事實沒有計數行(該函式寫於階段一,decl 事實出現後就不完整)。屬 export-query 的 `Summary.hs`
+  3. (低)`hiedbBackend`(`Backend` 值)住在 `HiedbFacts` 而非 `HiedbDriver`,與 `design.md` 模組職責表略有出入——F003 假設 A1 已裁決如此(避免 `bRun` 未實作的後端提早壞掉),但職責表未同步
+  4. (資訊)`<repo>/.hie/` 留有 31 個檔(已 gitignore)。留著讓 selfcheck 實跑;但刪模組而未重產會讓該測試變紅,`rm -rf .hie` 即回到跳過分支
+  5. (資訊)圖仍是 module 級 31 節點 / 86 邊——**decl 事實已產出但未進圖**,因為 graph-core 階段二(decl-nodes / decl-edges)尚未實作。這是 S3 的下一步
+- **契約卡對帳**:兩張卡的負責模組、Level 2 介面、資料流段落與實作相符;`ensureIndex` / `readIndexFacts` / `Backend` 四欄位簽名一字不差(F004 複驗 F003 真實原始碼,零落差)
+
+### 階段二閘門裁決(2026-08-22)
+
+1. **發現 1(`-Wx-partial`)當場修掉**:`HiedbDriver.hs:160` 的 `head` 換成全函式寫法。它是本輪造成的,不該留給別人。
+2. **另開 [[G-E002]] 追既有的 8 筆** `-Wincomplete-record-selectors`(全在 extraction/F002 的測試碼),並訂正 D8/D4 的「`-Wall` 零警告」描述。
+
+   **這條慣例在四次閘門被宣告達成、實際從未成立**,根因值得記住:增量建置不重印警告,而想強制重編的直覺做法 `--ghc-options=-fforce-recomp` **會被 cabal 的 up-to-date 檢查短路**(輸出 `Up to date`、警告數 0,看起來像乾淨),`touch` 原始檔也無效(cabal 用內容雜湊)。**唯一問得出真話的是 `cabal clean` 後重建。** G-E002 的長期價值就在補上防退化手段。
+3. 發現 2(`renderFactSummary` 分類計數落後)、發現 3(`hiedbBackend` 落點與模組職責表出入)屬低嚴重度,未開文檔,記錄於此供後續。

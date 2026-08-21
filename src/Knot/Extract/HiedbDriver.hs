@@ -153,12 +153,12 @@ probeParts opts pm = do
         Right () -> case pmHie pm of
           Nothing -> pure . Left $ hiePrefix
             <> T.pack ("no .hie directory found under " <> rootDir opts)
-          Just hie
-            | null (hieFiles hie) -> pure . Left $ hiePrefix
-                <> T.pack (hieDir hie <> " has no usable .hie files")
-            | otherwise -> do
-                verdict <- checkHieVersion (rootDir opts) (head (hieFiles hie))
-                pure (fmap (const (exe, hie)) verdict)
+          Just hie -> case hieFiles hie of
+            [] -> pure . Left $ hiePrefix
+              <> T.pack (hieDir hie <> " has no usable .hie files")
+            (firstHie : _) -> do
+              verdict <- checkHieVersion (rootDir opts) firstHie
+              pure (fmap (const (exe, hie)) verdict)
 
 -- | 執行檔解析:@hiedbExe@ 明示時用它(必要時補副檔名),否則查 PATH。
 resolveExe :: ExtractOptions -> IO (Either Text FilePath)
