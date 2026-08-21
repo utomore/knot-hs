@@ -3,7 +3,7 @@ id: graph-core-build
 type: build-log
 title: graph-core-build
 description: 委派展開 graph-core 階段一(module-graph)與階段二(decl 層)
-status: in-progress
+status: done
 created: 2026-08-20
 updated: 2026-08-22
 parent: graph-core
@@ -138,3 +138,13 @@ parent: graph-core
   4. (低)`renderFactSummary`(`app/Knot/App/Summary.hs`)對 `FactDecl`/`FactRef`/`FactInstance` 走 `Show` fallback,`--summary facts` 會印 `Show` 原文。屬 export-query;extraction 階段二閘門已記過同一項,兩次委派都回報但都不跨子系統改
   5. (資訊)三個非契約面共用工具(`moduleFiles` F001、`disambiguate`/`moduleOfFile` F002、`declNodeIndex` F002)都未登記進 design.md「模組間公開介面」,沿用 F001 的先例。要不要統一登記待裁決
 - **契約卡對帳**:兩張卡的負責模組、Level 2 介面、資料流段落與實作相符(decl-nodes 的「負責模組」已於委派前補上 `edge-derive`);`mintDeclId` / `mintInstanceId` / `declNodeIndex` 三個簽名在 F003 複驗 F002 真實原始碼時零落差
+
+### 階段二閘門裁決(2026-08-22)
+
+1. **全部待確認假設接受**,無一條需要重做 feature。其中 F002 A11(節點去重的決定性)已在實作階段修正並有 property test 護住;開工前裁決的 A8 / A3 / A1 三條已回寫 `design.md`
+2. **發現 1 與 3 合併開 [[G-E003]] 追蹤**:產生碼過濾只擋 ref 不擋 decl,實測 623 個 decl 節點中 106 個(17%)是 deriving dictionary;同源的 19 則 unresolved 警告一併記入。根因是 hiedb 只在 `refs` 表有 `is_generated`,`decls`/`defs` 沒有——**不是 extraction 漏掉,是上游資料就只有一半**。文檔列了四條待調查方向,實作前要先驗證而非直接動手
+3. **發現 2**(`gsTopExternalTargets` 語意漂移)、**發現 4**(`renderFactSummary` 的 `Show` fallback)、**發現 5**(三個非契約面共用工具未登記)未開文檔,記錄於此供後續。發現 4 是 extraction 階段二閘門就記過的同一項,兩次委派都回報、都正確地不跨子系統改——**這種重複回報是委派模式運作正常的訊號,不是雜訊**
+4. **建議修正 `system.md` 的一段描述**(需走 `/system-design` 更新模式,編排者不改 Level 1):第 171 行「`Fact` 的建構子保留、**零邏輯**,`implements` 邊另開 feature」已被 C1 裁決取代——graph-core 的 `RImplements` 推導在 F003 **完整實作**並以手工事實流驗收,缺的只是**事實來源**(hiedb 0.8 無 instance 表)
+5. **git 收尾**:保留六個 commit 的現狀(每個都可回退、與 build-log 進度逐條對得起來),整合走 `/branch-pr`
+
+**graph-core 子系統至此可交付**:3/3 feature done,S3 里程碑的三項(兩層節點、`calls`/`uses` 邊、hub 洗版)全部實測達成。
