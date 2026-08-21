@@ -211,7 +211,7 @@ data EdgeStats = EdgeStats
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
 | 2 | decl-nodes | decl/instance 節點鑄造、contains 邊、TH/產生碼過濾 | fact-gate、node-mint、edge-derive | #1 | F002 |
-| 3 | decl-edges | calls/uses/implements 推導、自環丟棄、去重與證據行 | edge-derive | #2 | - |
+| 3 | decl-edges | calls/uses/implements 推導、自環丟棄、去重與證據行 | edge-derive | #2 | F003 |
 
 (共 3 個 features、2 個階段;全部完成即子系統可交付)
 
