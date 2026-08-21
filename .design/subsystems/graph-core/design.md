@@ -207,7 +207,7 @@ data EdgeStats = EdgeStats
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 2 | decl-nodes | decl/instance 節點鑄造、contains 邊、TH/產生碼過濾 | fact-gate、node-mint | #1 | - |
+| 2 | decl-nodes | decl/instance 節點鑄造、contains 邊、TH/產生碼過濾 | fact-gate、node-mint、edge-derive | #1 | F002 |
 | 3 | decl-edges | calls/uses/implements 推導、自環丟棄、去重與證據行 | edge-derive | #2 | - |
 
 (共 3 個 features、2 個階段;全部完成即子系統可交付)
@@ -226,7 +226,7 @@ data EdgeStats = EdgeStats
 ### decl-nodes
 
 - **階段**:階段二
-- **負責模組**:fact-gate、node-mint
+- **負責模組**:fact-gate、node-mint、edge-derive(`RContains` 一列;所有邊一律由 edge-derive 產出,以「內部模組劃分」表為準)
 - **實作的 Level 2 介面**:`mintDeclId`、`mintInstanceId`;`NodeKind` 的 `DeclNode`/`InstanceNode`;鑄造規則表全表(含 `#t`、`#i:` 後綴);組裝規則 2 的 `FactDecl`/`FactInstance` 節點與 `RContains` 列、規則 3(產生碼過濾)、規則 6(`moduleOnly` 忽略 decl 層)
 - **資料流管線段落**:從 `FactDecl`/`FactInstance` 事實進,經 fact-gate 過濾與 node-mint 鑄造,出 decl/instance 節點與 `RContains` 邊
 - **驗收標準**:同名型別與值鑄出不同 id(`Demo.Core.Foo#t` vs `Demo.Core.Foo`);instance 節點 id 含渲染標頭且穩定;指向 `pmSources` 外檔案或行號 ≤ 0 的事實被濾除且 `gsFilteredGenerated` 計數;每個 decl 節點有一條來自所屬 module 的 `RContains`;`moduleOnly = True` 時 decl 節點與 `RContains` 完全不出現
