@@ -3,7 +3,7 @@ id: F002
 type: feature
 title: graph-load
 description: 讀回 codegraph.json、驗證結構並分流出查詢用依賴圖
-status: open
+status: done
 created: 2026-08-21
 updated: 2026-08-21
 depends-on: [F001, graph-core/F001]
@@ -24,7 +24,7 @@ export-query 查詢面的第一站,也是主架構 S4「`knot query`」管線的
 1. knot-hs 自己的 `F001` json-export(只會出現五種 relation:`imports` / `calls` / `uses` /
    `implements` / `contains`)
 2. **任何其他吐得出這個格式的產生器**(graphify 等)——dev-flow 契約的依賴類 relation 有十種、
-   結構類三種,遠多於 knot 自己產生的五種
+   結構類六種,遠多於 knot 自己產生的五種
 3. 使用者手改壞掉的檔案
 
 因此本 feature 的職責是三件事:(a)**讀不到 / 壞 JSON / 結構不合** → 明確的 `LoadError`,不修不猜;
@@ -80,7 +80,7 @@ library 端的 `Knot.Query.*` 三個模組**不 import 任何 knot-hs 自家模�
   `loadQueryGraph` 與 `queryGraphNotes`)
 - **`graph-core/F002` / `F003`(decl 層)**:它們只讓匯出檔多出 `calls` / `uses` / `implements` /
   `contains` 邊,**不改 JSON 的欄位集合**;本 feature 的 relation 分類表已涵蓋 dev-flow 契約的全部
-  十三種名稱,decl 層上線時載入層零改動
+  十六種名稱,decl 層上線時載入層零改動
 - **`ADR-003`** 列在 `related-adr` 而非 `depends-on`:它是欄位集合與 relation 兩類的權威來源,不是任務文檔
 
 **可平行性**:**不可**與 `F001` 平行(`F001` 已 done,無實際等待);與其他子系統的任務**可**平行。
@@ -96,7 +96,7 @@ export-query 內部仍是序列:`F003` 讀本 feature 的 `QueryGraph`,`F004` �
 | `queryGraphNotes :: QueryGraph -> [(Text, Int)]`(未知 relation 名 + 邊數) | `Knot.Query.Load.queryGraphNotes`,經 `Knot.Query` 再匯出;簽名一字不差 |
 | DTO `QueryGraph`(「從 codegraph.json 載入的查詢用圖(內容屬 Level 3)」) | `Knot.Query.Types.QueryGraph`,七個欄位皆為 Level 3 決定(見「實作方式」);`Knot.Query` 只匯出**抽象型別**,欄位由同子系統的 `F003` 經 `Knot.Query.Types` 取用 |
 | DTO `LoadError = LoadFileMissing Text \| LoadParseError Text \| LoadSchemaError Text` | `Knot.Query.Types.LoadError`,三建構子與契約原文一致 |
-| 查詢規則 1(依賴類邊才進圖:十種依賴類、三種結構類) | `classifyRelation`:十種 → `RelDependency`(進 `qgForward` / `qgReverse` / 度數)、三種 → `RelStructural`(排除且不列入 notes)、其餘 → `RelUnknown`(排除且累加進 notes) |
+| 查詢規則 1(依賴類邊才進圖:十種依賴類、六種結構類) | `classifyRelation`:十種 → `RelDependency`(進 `qgForward` / `qgReverse` / 度數)、六種 → `RelStructural`(排除且不列入 notes)、其餘 → `RelUnknown`(排除且累加進 notes) |
 | 查詢規則 2(未知 relation 彙整列印,不靜默吞掉) | 累加成 `qgNotes :: [(Text, Int)]`,由 `queryGraphNotes` 取出;**library 不印**(D8),列印通道是 `F004`(契約 C2) |
 | 查詢規則 4(決定性:結果排序穩定,同值按 id 字典序) | 載入時就把序固定住:`qgNodes` 依 `qnId` 升序、鄰接表去重後依 id 升序、`qgNotes` 依 relation 名升序。`F003` 因此不必自己維持穩定序 |
 | 查詢規則 5(`Reachable` 不含起點) | 屬 `F003`;本 feature 的支撐:`qgForward` / `qgReverse` **保留自環**(`A → A` 的依賴邊照樣進表),起點在環上時 `F003` 才能算出真實距離 |
@@ -194,8 +194,8 @@ data QueryGraph = QueryGraph
    - `RelDependency`(十種):`imports` `imports_from` `calls` `uses` `references` `extends`
      `implements` `inherits` `instantiates` `depends_on` → 累進 `qgForward` / `qgReverse` /
      `qgOutDeg` / `qgInDeg`
-   - `RelStructural`(三種):`contains` `method` `defines` → **靜默排除**(已知的非依賴關係,
-     不是「認不得」,不進 `qgNotes`)
+   - `RelStructural`(六種):`contains` `method` `defines` `declares` `rationale_for` `part_of`
+     → **靜默排除**(已知的非依賴關係,不是「認不得」,不進 `qgNotes`)
    - `RelUnknown`:其餘任何字串(含空字串) → 排除,並 `insertWith (+) rel 1` 進未知計數
 10. 收尾定序(規則 4):`qgNodes` 依 `qnId` 升序;每張鄰接表的鄰居先過 `Set` 去重再 `toAscList`;
     `qgNotes` 由 `Map Text Int` 的 `toAscList` 取出(relation 名升序)
@@ -289,7 +289,7 @@ boot 套件的簽名以 `ghc -e ':t …'` 在 GHC 9.14.1 直接查出,版本以 
 | `data Relation = RImports \| RCalls \| RUses \| RImplements \| RContains` | src/Knot/Graph/Types.hs:74-75 | graph-core/F001 | 僅測試路徑;**同時是反向對映的定義域**:`Knot.Export.Encode.relationText`(src/Knot/Export/Encode.hs:131-136)把這五個建構子映成 `imports`/`calls`/`uses`/`implements`/`contains`,本 feature 的 `classifyRelation` 必須認得這五個字串(前四個 → 依賴類、`contains` → 結構類) |
 | `newtype NodeId = NodeId Text` `deriving (Eq, Ord, Show)` | src/Knot/Graph/Types.hs:50-51 | graph-core/F001 | 僅測試路徑:手寫 `GraphNode` / `GraphEdge` 的 id。**注意其 haddock 明載「唯一構造入口是 node-mint…其他模組只得從既有 GraphNode 取 gnId,不得直接用建構子」——這正是查詢面不能沿用它的理由(假設 A1)** |
 | `data GraphStats = GraphStats { gsDroppedExternal :: Int, gsTopExternalTargets :: [(ModuleName, Int)], gsFilteredGenerated :: Int, gsDedupedEdges :: Int }` | src/Knot/Graph/Types.hs:77-82 | graph-core/F001 | 僅測試路徑:`CodeGraph` 的必填欄位(round-trip 用全零值) |
-| `DEP_RELATIONS` / `STRUCTURAL_RELATIONS` 常數 | dev-flow 0.8.1 `arch-audit/scripts/scan-graph.mjs:59-64` | - | **不呼叫**,列在此處是因為它是「分類語意與下游一致」的對帳基準;已查證我方十種依賴類與它完全相同,結構類則我方三種 vs 它六種(見假設 A6) |
+| `DEP_RELATIONS` / `STRUCTURAL_RELATIONS` 常數 | dev-flow 0.8.1 `arch-audit/scripts/scan-graph.mjs:59-64` | - | **不呼叫**,列在此處是因為它是「分類語意與下游一致」的對帳基準;已查證我方十種依賴類與六種結構類與它**逐項完全相同**(2026-08-21 複驗,見假設 A6) |
 
 ## 新增的介面
 
@@ -338,7 +338,7 @@ data QueryGraph = QueryGraph { … }
 | `QueryNode (..)` | `Knot.Query.Types` | `F003` 的 `FoundNodes [(NodeId, Text, FilePath)]` 要讀 `qnId` / `qnLabel` / `qnFile` |
 | `QueryGraph (..)`(七個欄位選擇器) | `Knot.Query.Types` | `F003` 的四種演算法要讀 `qgNodes` / `qgIndex` / `qgForward` / `qgReverse` / `qgOutDeg` / `qgInDeg`。`Knot.Query`(對 `F004` 的面)只再匯出**抽象型別**,欄位不外露 |
 | `parseQueryGraph :: FilePath -> ByteString -> Either LoadError QueryGraph` | `Knot.Query.Load` | 1-to-1 測試要直接測解析與驗證的分支,不落地檔案(T3 / T4) |
-| `classifyRelation :: Text -> RelationClass` + `data RelationClass = RelDependency \| RelStructural \| RelUnknown` | `Knot.Query.Load` | 1-to-1 測試要逐一釘住十三種名稱的分類(T2) |
+| `classifyRelation :: Text -> RelationClass` + `data RelationClass = RelDependency \| RelStructural \| RelUnknown` | `Knot.Query.Load` | 1-to-1 測試要逐一釘住十六種名稱的分類(T2) |
 | `dependencyRelations :: [Text]` / `structuralRelations :: [Text]` | `Knot.Query.Load` | 查詢規則 1 的兩張表本體;T2 以它們對帳 `ADR-003` 的名單 |
 
 **與 build-log 階段一「發現 2」的關係**:上表六項與 `F001` 的
@@ -350,20 +350,20 @@ data QueryGraph = QueryGraph { … }
 
 ## TodoList
 
-- [ ] T1: `Knot.Query.Types`——`NodeId`(`Eq`/`Ord`/`Show`)、`QueryNode`、`QueryGraph`(七欄位)、
+- [x] T1: `Knot.Query.Types`——`NodeId`(`Eq`/`Ord`/`Show`)、`QueryNode`、`QueryGraph`(七欄位)、
       `LoadError`(三建構子,契約原文);`knot-hs.cabal` library 加三個 `exposed-modules`
       (**build-depends 零新增**);`version` 不動、executable 段不動;
       `cabal build all --enable-tests` 在 `-Wall` 下零警告  `dep: -`
-- [ ] T2: `Knot.Query.Load` 的 relation 分類——`RelationClass`、`dependencyRelations`(十種)、
-      `structuralRelations`(三種)、`classifyRelation`(其餘一律 `RelUnknown`)  `dep: T1`
-- [ ] T3: `Knot.Query.Load.parseQueryGraph` 的**成功路徑**——步驟 1–10 的解析、分流與收尾定序:
+- [x] T2: `Knot.Query.Load` 的 relation 分類——`RelationClass`、`dependencyRelations`(十種)、
+      `structuralRelations`(六種)、`classifyRelation`(其餘一律 `RelUnknown`)  `dep: T1`
+- [x] T3: `Knot.Query.Load.parseQueryGraph` 的**成功路徑**——步驟 1–10 的解析、分流與收尾定序:
       鄰接表去重升序、度數不去重、自環保留、`qgNodes` 依 id 升序、`qgNotes` 依名升序;
       以及 `queryGraphNotes`  `dep: T2`
-- [ ] T4: `Knot.Query.Load.parseQueryGraph` 的**錯誤路徑**——`LoadParseError`(壞 JSON)與
+- [x] T4: `Knot.Query.Load.parseQueryGraph` 的**錯誤路徑**——`LoadParseError`(壞 JSON)與
       `LoadSchemaError` 的七種情形(頂層非物件、缺 `nodes`、`nodes` 非陣列、節點缺欄位 / 型別不對、
       節點 id 重複、邊缺欄位 / 型別不對、邊端點不存在),訊息含路徑 + `nodes[i]`/`links[i]` + 問題;
       `links` 缺鍵時當空陣列不報錯  `dep: T3`
-- [ ] T5: `Knot.Query.loadQueryGraph` 進入點 + round-trip——`try`/`isDoesNotExistError` 兩種
+- [x] T5: `Knot.Query.loadQueryGraph` 進入點 + round-trip——`try`/`isDoesNotExistError` 兩種
       `LoadFileMissing`、目錄路徑也回 `LoadFileMissing`;手寫 `CodeGraph`(含一條 `RContains` 邊)
       經 `writeCodegraph` 落地後 `loadQueryGraph` 讀回成功且內容對得上(驗收標準 1、5);
       同一檔案載入兩次結果相等  `dep: T4`
@@ -377,7 +377,7 @@ data QueryGraph = QueryGraph { … }
 | Todo | 測試 | 說明 |
 |------|------|------|
 | T1 | test_query_types_construct | 逐一建構 `QT.NodeId` / `QueryNode`(三欄位)/ `QueryGraph`(七欄位)/ `LoadError` 三建構子並比對欄位讀取;驗證 `Eq` 可用、三個 `LoadError` 建構子彼此互異;`QT.NodeId` 的 `Ord` 為 `Text` 字典序(`sort [NodeId "b", NodeId "A", NodeId "a"]` 的結果釘住碼位序);**同時 import `Knot.Graph.Types (NodeId (..))` 與 `qualified Knot.Query.Types as QT` 並各自建值**,釘住「兩個 `NodeId` 同名在 qualified import 下可編譯」(假設 A1) |
-| T2 | test_relation_classification | `classifyRelation` 對 `ADR-003` 的十種依賴類名稱全部回 `RelDependency`、三種結構類全部回 `RelStructural`;`"foo"` / `""` / `"Imports"`(大小寫不同)/ `"declares"` 回 `RelUnknown`(**分類大小寫敏感**,contract 的名稱是固定字面量);`dependencyRelations` 恰為那十個、`structuralRelations` 恰為那三個(逐字對帳 `ADR-003`,防止日後手滑增刪);`map classifyRelation (map relationText [RImports, RCalls, RUses, RImplements, RContains])` 的結果為 `[RelDependency, RelDependency, RelDependency, RelDependency, RelStructural]`——釘住「knot 自家匯出的五種 relation 全部認得」的反向對映 |
+| T2 | test_relation_classification | `classifyRelation` 對 `ADR-003` 的十種依賴類名稱全部回 `RelDependency`、六種結構類全部回 `RelStructural`;`"foo"` / `""` / `"Imports"`(大小寫不同)/ `"contains_all"` 回 `RelUnknown`(**分類大小寫敏感**,contract 的名稱是固定字面量);`dependencyRelations` 恰為那十個、`structuralRelations` 恰為那六個(逐字對帳 `ADR-003` 與 `scan-graph.mjs:59-64`,防止日後手滑增刪);`map classifyRelation (map relationText [RImports, RCalls, RUses, RImplements, RContains])` 的結果為 `[RelDependency, RelDependency, RelDependency, RelDependency, RelStructural]`——釘住「knot 自家匯出的五種 relation 全部認得」的反向對映 |
 | T3 | test_parse_query_graph_ok | 對一份手寫 JSON(`ByteString` 字面量,含:4 個節點且**在檔案中刻意逆序排列**;`imports` 邊、`calls` 邊、重複的 `imports` 邊(同一對節點)、`contains` 邊、`method` 邊、兩條 `"foo"` 邊、一條 `"bar"` 邊、一條自環 `depends_on` 邊)呼叫 `parseQueryGraph`:載入成功;`qgNodes` 依 id 升序(**證明不是檔案原序**)且含全部 4 個節點,連只被 `contains` 邊連到的節點也在(規則 3);`qgForward` / `qgReverse` 的鄰居**去重且升序**;`contains` 與 `method` 邊完全不出現在兩張鄰接表與度數中(驗收標準 5,`Reachable` 的唯一資料來源);兩條 `"foo"` 與一條 `"bar"` 邊同樣不在鄰接表中;`qgOutDeg` / `qgInDeg` 對重複邊**計 2**(與鄰接表的 1 個鄰居對照,釘住「鄰接去重、度數不去重」,假設 A4);自環節點在自己的 `qgForward` 鄰居中且 in/out 度各 +1(查詢規則 5 的前提);`queryGraphNotes` 回 `[("bar",1),("foo",2)]`(**依名升序、結構類不入列**,驗收標準 4);對同一份 bytes 解兩次結果 `==`(規則 4) |
 | T4 | test_parse_query_graph_errors | 逐一餵壞檔並斷言建構子與訊息內容:`"{"` → `LoadParseError` 且訊息含檔名;`"[]"` → `LoadSchemaError` 含 `top level`;`{"links":[]}` → `LoadSchemaError` 含 `missing required field "nodes"`(驗收標準 2);`{"nodes":{}}` → 含 `"nodes" is not an array`;節點缺 `label` → 含 `nodes[1]` 與 `"label"`;節點 `label` 為數字 → 含 `nodes[0]` 與 `is not a string`;兩個節點同 id → 含 `duplicate node id`(假設 A3);邊缺 `relation` → 含 `links[0]` 與 `"relation"`;邊的 `source` 指向不存在的 id → 含 `links[0]`、該 id 與 `is not a known node id`(驗收標準 3),`target` 同理;邊的 `source` 是數字(舊格式索引)→ `LoadSchemaError` 含 `is not a string`(`ADR-003`:不接索引);`{"nodes":[]}`(**無 `links` 鍵**)→ **成功**且圖為空(假設 A2);`{"nodes":[],"links":"x"}` → 含 `"links" is not an array`;同一份壞檔解兩次訊息完全相同(fail-fast 的決定性) |
 | T5 | test_load_query_graph_io_roundtrip | (a)`loadQueryGraph "<tmp>/knot-hs-load-missing.json"` → `LoadFileMissing` 且訊息含路徑與 `file not found`;(b)`loadQueryGraph` 對**一個目錄**的路徑 → `LoadFileMissing`(不拋例外);(c)驗收標準 1 的 round-trip:手寫 `CodeGraph`(3 個 `GraphNode`;邊為 `RImports`、`RCalls`、**一條 `RContains`**,`GraphStats` 全零)以 `writeCodegraph ExportOptions { rootDir = <tmp>, outputPath = <tmp>/codegraph.json, commitPolicy = NoCommit }` 寫出**真實檔案**,再 `loadQueryGraph` 讀回 → `Right`;`length (qgNodes g) == 3` 且 id/label/source_file 與輸入的 `gnId`/`gnLabel`/`gnFile` 對得上;`qgForward` 只含 `imports` 與 `calls` 兩條、**`contains` 那條不在**(驗收標準 5);`queryGraphNotes g == []`(自家輸出無未知 relation);(d)同一個檔案連續 `loadQueryGraph` 兩次,兩個 `QueryGraph` `==`(規則 4);跑完刪除暫存目錄(沿用 `F001` 的 `withExportDir` 慣例) |
@@ -416,15 +416,38 @@ data QueryGraph = QueryGraph { … }
   `[(Text, Int)]` 是 relation 專用的形狀,塞警告會扭曲契約)→ 影響:若裁定要提醒使用者,最小改法是
   由 `F004` 在 CLI 層自己讀一次頂層 `directed` 並印 stderr(不動 library 契約);要 library 回報則需
   Level 2 新增通道(如 `LoadError` 之外的 notes 欄位),屬契約變更
-- A6:`design.md` 查詢規則 1 與 `ADR-003` 都寫「結構類三種(`contains` `method` `defines`)」,但下游
-  `scan-graph.mjs:64` 的 `STRUCTURAL_RELATIONS` 實際有**六種**(多了 `declares`、`rationale_for`、
-  `part_of`)→ 採取:**依 `design.md` / `ADR-003` 的三種實作**,多出的三個落入 `RelUnknown`
-  → **影響僅止於 `queryGraphNotes` 的內容,依賴圖本身完全相同**(兩種歸類都是「排除」),所以風險極低;
-  但若使用者拿 graphify 產的圖來查,會看到「declares(N)未知」這種其實已知的提示。建議編排者評估是否
-  把 `design.md` 查詢規則 1 與 `ADR-003` 的結構類名單補齊到六種(這是**契約面**的修改,本 feature
-  不擅自為之)
+- A6 **(已裁決,實作前更正)**:設計期原稿依當時的 `design.md` / `ADR-003` 寫「結構類三種
+  (`contains` `method` `defines`)」,但下游 `scan-graph.mjs:64` 的 `STRUCTURAL_RELATIONS` 實際有**六種**
+  (多了 `declares`、`rationale_for`、`part_of`)→ **編排者已裁決補齊到六種**,`design.md` 查詢規則 1 與
+  `ADR-003` 均已更新;本文檔於實作開工前同步更正(「實作方式 › 步驟 9」、「對應的 Level 2 契約」、
+  「功能概述」、TodoList T2、1-to-1 對照表 T2、`scan-graph.mjs` 對帳列),`structuralRelations` 落地六種
+  → 影響:`declares` / `rationale_for` / `part_of` 由 `RelUnknown` 改判 `RelStructural`,**依賴圖完全不變**
+  (兩種歸類都是「排除」),差別僅在這三種不再出現在 `queryGraphNotes`。T2 的 `RelUnknown` 反例改用
+  `"contains_all"`(`declares` 已成已知名稱)。2026-08-21 由本 feature 實作者複驗 `scan-graph.mjs:59-64`
+  原文,十種依賴類 + 六種結構類與我方名單逐字相同
 
 ## 實作備註
 
-(撰寫時留空;開發過程中與設計的偏差記錄於此。非契約面公開匯出的清單已預先登記在
-「新增的介面 › 非契約面」,供 build-log 階段一發現 2 所指的 `G-E001` 一併收斂。)
+**公開介面零偏離**:`loadQueryGraph` / `queryGraphNotes` 的簽名與 `LoadError` 三建構子與 Level 2 契約
+原文一字不差;`QueryGraph` 七欄位如「型別設計」。非契約面公開匯出的清單已預先登記在
+「新增的介面 › 非契約面」,供 build-log 階段一發現 2 所指的 `G-E001` 一併收斂。
+
+實作期間的內部決定(皆屬實作自主權,不動契約):
+
+- **A6 的文檔更正在開工前完成**:「功能概述」、「對應的 Level 2 契約」、「實作方式 › 步驟 9」、
+  `scan-graph.mjs` 對帳列、TodoList T2 與 1-to-1 對照表 T2 的「結構類三種」全部改為六種
+  (`contains` `method` `defines` `declares` `rationale_for` `part_of`),與 `design.md` 查詢規則 1、
+  `ADR-003` 一致。落地的 `structuralRelations` 即這六個
+- **鄰接表 / 度數的存在性語意**:`qgForward` / `qgReverse` / `qgOutDeg` / `qgInDeg` 只收錄
+  **實際有依賴邊**的節點,沒有邊的節點在 Map 中**缺鍵**(不是空清單 / 0)。`F003` 一律以
+  `Map.findWithDefault [] n` 與 `Map.findWithDefault 0 n` 取值——與「使用到的既有串接介面」表登記的
+  `findWithDefault` 語意一致。`qgNodes` / `qgIndex` 才是「全部節點」的權威來源(查詢規則 3)
+- **鄰接表以 `Map NodeId (Set NodeId)` 累加後 `Set.toAscList`**(而非設計文字提到的
+  `fromListWith` 再過 `Set`):同樣得到「去重 + 依 id 升序」,但只走一次摺疊。屬內部演算法選擇
+- **兩處設計未指定訊息的錯誤**自訂為 `"<path>: nodes[i]: element is not a JSON object"` /
+  `"<path>: links[i]: element is not a JSON object"`(陣列元素不是物件),形狀與其他 `LoadSchemaError`
+  一致
+- **`-Wall` 現況**:本 feature 新增的 `src/Knot/Query*.hs` 三個模組與 `test/Main.hs` 的
+  `exportQueryF002Tests` 段落**零警告**。`test/Main.hs` 另有 8 筆 `-Wincomplete-record-selectors`
+  警告(第 1200/1202/1203/1204/1327/1329 行,extraction 的 `Fact` 記錄選擇器),**與 HEAD 逐字相同、
+  屬既有狀況**,本 feature 未觸碰亦未新增

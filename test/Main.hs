@@ -1,6 +1,6 @@
 -- | project-meta(F001 scan-baseline、F002 cabal-components、F003 hie-discovery)、
 -- extraction(F001 fact-contract、F002 import-scan)、graph-core(F001
--- module-graph)與 export-query(F001 json-export)的 1-to-1 測試。
+-- module-graph)與 export-query(F001 json-export、F002 graph-load)的 1-to-1 測試。
 module Main (main) where
 
 import Control.Exception (throwIO)
@@ -111,6 +111,19 @@ import Knot.Meta.Types
   , ProjectMeta (..)
   , SourceFile (..)
   )
+import Knot.Query (loadQueryGraph)
+import Knot.Query.Load
+  ( RelationClass (..)
+  , classifyRelation
+  , dependencyRelations
+  , parseQueryGraph
+  , queryGraphNotes
+  , structuralRelations
+  )
+-- F002 假設 A1:'Knot.Query.Types.NodeId' 與 'Knot.Graph.Types.NodeId' 同名,
+-- 而 DisambiguateRecordFields 不涵蓋裸選擇器 → 查詢面一律走 qualified
+-- (沿用 F001 假設 A7 留下的 'XT' 慣例)。
+import qualified Knot.Query.Types as QT
 
 projFixture, noCabalFixture, compsFixture, condFixture, multiFixture, brokenFixture :: FilePath
 projFixture    = "test/fixtures/proj"
@@ -168,6 +181,7 @@ tests = testGroup "knot-hs"
   , extractionF001Tests, extractionF002Tests
   , graphCoreF001Tests
   , exportQueryF001Tests
+  , exportQueryF002Tests
   ]
 
 f001Tests :: TestTree
@@ -2120,3 +2134,277 @@ testExportEndToEndDeterministic =
   strField k o = case AKM.lookup (AK.fromString k) o of
     Just (A.String t) -> pure t
     other -> assertFailure (k <> " is not a string: " <> show other)
+
+--------------------------------------------------------------------------------
+-- export-query / F002 graph-load
+--------------------------------------------------------------------------------
+
+exportQueryF002Tests :: TestTree
+exportQueryF002Tests = testGroup "export-query/F002 graph-load"
+  [ testQueryTypesConstruct          -- T1
+  , testRelationClassification       -- T2
+  , testParseQueryGraphOk            -- T3
+  , testParseQueryGraphErrors        -- T4
+  , testLoadQueryGraphIoRoundtrip    -- T5
+  ]
+
+-- | 查詢面節點 id 的測試捷徑(qualified,與 graph-core 的 nid 區隔)。
+qid :: String -> QT.NodeId
+qid = QT.NodeId . T.pack
+
+-- | 測試用的解析入口:路徑只進訊息,不落地檔案。
+parseAt :: FilePath -> String -> Either QT.LoadError QT.QueryGraph
+parseAt path = parseQueryGraph path . TE.encodeUtf8 . T.pack
+
+parseBad :: String -> Either QT.LoadError QT.QueryGraph
+parseBad = parseAt "graph.json"
+
+-- | 斷言回 LoadSchemaError,且訊息含全部指定片段。
+expectSchema :: String -> [String] -> IO ()
+expectSchema src needles = case parseBad src of
+  Left (QT.LoadSchemaError m) -> forM_ needles $ \n ->
+    assertBool ("message " <> show m <> " should contain " <> show n)
+      (n `isInfixOf` T.unpack m)
+  other -> assertFailure ("expected LoadSchemaError, got: " <> show other)
+
+-- export-query/F002 T1: 四個型別的建構與欄位讀取、Eq、NodeId 的字典序 Ord,
+-- 以及兩個同名 NodeId 在 qualified import 下並存(假設 A1)
+testQueryTypesConstruct :: TestTree
+testQueryTypesConstruct = testCase "test_query_types_construct" $ do
+  let node = QT.QueryNode
+        { QT.qnId    = qid "A"
+        , QT.qnLabel = T.pack "Demo.A"
+        , QT.qnFile  = "src/Demo/A.hs"
+        }
+  QT.qnId node    @?= qid "A"
+  QT.qnLabel node @?= T.pack "Demo.A"
+  QT.qnFile node  @?= "src/Demo/A.hs"
+  let g = QT.QueryGraph
+        { QT.qgNodes   = [node]
+        , QT.qgIndex   = Map.singleton (qid "A") node
+        , QT.qgForward = Map.singleton (qid "A") [qid "A"]
+        , QT.qgReverse = Map.singleton (qid "A") [qid "A"]
+        , QT.qgOutDeg  = Map.singleton (qid "A") 1
+        , QT.qgInDeg   = Map.singleton (qid "A") 1
+        , QT.qgNotes   = [(T.pack "foo", 2)]
+        }
+  QT.qgNodes g   @?= [node]
+  QT.qgIndex g   @?= Map.singleton (qid "A") node
+  QT.qgForward g @?= Map.singleton (qid "A") [qid "A"]
+  QT.qgReverse g @?= Map.singleton (qid "A") [qid "A"]
+  QT.qgOutDeg g  @?= Map.singleton (qid "A") 1
+  QT.qgInDeg g   @?= Map.singleton (qid "A") 1
+  QT.qgNotes g   @?= [(T.pack "foo", 2)]
+  (g == g) @?= True
+  (g { QT.qgNotes = [] } == g) @?= False
+  -- LoadError 三建構子彼此互異(同一段文字也不相等)
+  let t = T.pack "x"
+  assertBool "missing /= parse"  (QT.LoadFileMissing t /= QT.LoadParseError t)
+  assertBool "parse /= schema"   (QT.LoadParseError t  /= QT.LoadSchemaError t)
+  assertBool "missing /= schema" (QT.LoadFileMissing t /= QT.LoadSchemaError t)
+  (QT.LoadSchemaError t == QT.LoadSchemaError t) @?= True
+  -- NodeId 的 Ord 即 Text 碼位序(大寫在小寫之前)
+  sort [qid "b", qid "A", qid "a"] @?= [qid "A", qid "a", qid "b"]
+  -- 假設 A1:同時使用 graph-core 與查詢面的 NodeId,qualified 下可編譯
+  nid "A" @?= NodeId (T.pack "A")
+  QT.qnId node @?= qid "A"
+
+-- export-query/F002 T2: 查詢規則 1 的兩張表與 classifyRelation 的三分類
+testRelationClassification :: TestTree
+testRelationClassification = testCase "test_relation_classification" $ do
+  -- 逐字對帳 ADR-003 / scan-graph.mjs:59-64(防止日後手滑增刪)
+  dependencyRelations @?= map T.pack
+    [ "imports", "imports_from", "calls", "uses", "references"
+    , "extends", "implements", "inherits", "instantiates", "depends_on"
+    ]
+  structuralRelations @?= map T.pack
+    [ "contains", "method", "defines", "declares", "rationale_for", "part_of" ]
+  length dependencyRelations @?= 10
+  length structuralRelations @?= 6
+  map classifyRelation dependencyRelations @?= replicate 10 RelDependency
+  map classifyRelation structuralRelations @?= replicate 6 RelStructural
+  -- 其餘一律 RelUnknown;分類大小寫敏感
+  map (classifyRelation . T.pack) ["foo", "", "Imports", "contains_all"]
+    @?= replicate 4 RelUnknown
+  -- 反向對映:knot 自家匯出的五種 relation 全部認得
+  map (classifyRelation . relationText) [RImports, RCalls, RUses, RImplements, RContains]
+    @?= [RelDependency, RelDependency, RelDependency, RelDependency, RelStructural]
+
+-- | T3 的手寫圖:節點在檔案中刻意逆序(D、C、B、A);邊涵蓋重複邊、
+-- 結構類、未知類與自環。
+okGraphJson :: String
+okGraphJson = unlines
+  [ "{"
+  , "  \"directed\": true,"
+  , "  \"built_at_commit\": \"deadbeef\","
+  , "  \"nodes\": ["
+  , "    {\"id\":\"D\",\"label\":\"Demo.D\",\"source_file\":\"src/D.hs\"},"
+  , "    {\"id\":\"C\",\"label\":\"Demo.C\",\"source_file\":\"src/C.hs\",\"source_location\":\"L3\"},"
+  , "    {\"id\":\"B\",\"label\":\"Demo.B\",\"source_file\":\"src/B.hs\"},"
+  , "    {\"id\":\"A\",\"label\":\"Demo.A\",\"source_file\":\"src/A.hs\"}"
+  , "  ],"
+  , "  \"links\": ["
+  , "    {\"source\":\"A\",\"target\":\"B\",\"relation\":\"imports\",\"confidence\":\"EXTRACTED\"},"
+  , "    {\"source\":\"A\",\"target\":\"B\",\"relation\":\"imports\"},"
+  , "    {\"source\":\"B\",\"target\":\"C\",\"relation\":\"calls\"},"
+  , "    {\"source\":\"A\",\"target\":\"D\",\"relation\":\"contains\"},"
+  , "    {\"source\":\"B\",\"target\":\"D\",\"relation\":\"method\"},"
+  , "    {\"source\":\"A\",\"target\":\"C\",\"relation\":\"foo\"},"
+  , "    {\"source\":\"B\",\"target\":\"C\",\"relation\":\"foo\"},"
+  , "    {\"source\":\"A\",\"target\":\"C\",\"relation\":\"bar\"},"
+  , "    {\"source\":\"C\",\"target\":\"C\",\"relation\":\"depends_on\"}"
+  , "  ]"
+  , "}"
+  ]
+
+-- export-query/F002 T3: parseQueryGraph 成功路徑——分流、去重升序、度數算邊數、
+-- 自環保留、全域定序與決定性
+testParseQueryGraphOk :: TestTree
+testParseQueryGraphOk = testCase "test_parse_query_graph_ok" $ do
+  g <- case parseBad okGraphJson of
+    Right x  -> pure x
+    Left err -> assertFailure ("expected a successful load, got: " <> show err)
+  -- 規則 3、4:全部節點都在(D 只被 contains / method 邊連到),依 id 升序
+  map QT.qnId (QT.qgNodes g) @?= [qid "A", qid "B", qid "C", qid "D"]
+  map QT.qnLabel (QT.qgNodes g)
+    @?= map T.pack ["Demo.A", "Demo.B", "Demo.C", "Demo.D"]
+  map QT.qnFile (QT.qgNodes g)
+    @?= ["src/A.hs", "src/B.hs", "src/C.hs", "src/D.hs"]
+  Map.keys (QT.qgIndex g) @?= [qid "A", qid "B", qid "C", qid "D"]
+  -- 規則 6:鄰居去重且依 id 升序;自環保留(規則 5 的前提)
+  QT.qgForward g @?= Map.fromList
+    [ (qid "A", [qid "B"]), (qid "B", [qid "C"]), (qid "C", [qid "C"]) ]
+  QT.qgReverse g @?= Map.fromList
+    [ (qid "B", [qid "A"]), (qid "C", [qid "B", qid "C"]) ]
+  -- 假設 A4:度數算邊數不去重(A 的兩條 imports 記 2,對照 qgForward 只有 1 個鄰居)
+  QT.qgOutDeg g @?= Map.fromList [(qid "A", 2), (qid "B", 1), (qid "C", 1)]
+  QT.qgInDeg  g @?= Map.fromList [(qid "B", 2), (qid "C", 2)]
+  -- 驗收標準 5:contains / method 邊不進 Reachable 的唯一資料來源
+  forM_ [QT.qgForward g, QT.qgReverse g] $ \m ->
+    assertBool "D is absent from the dependency adjacency"
+      (Map.notMember (qid "D") m)
+  forM_ [QT.qgOutDeg g, QT.qgInDeg g] $ \m ->
+    assertBool "D has no dependency degree" (Map.notMember (qid "D") m)
+  assertBool "contains target D is not a neighbour of A"
+    (qid "D" `notElem` Map.findWithDefault [] (qid "A") (QT.qgForward g))
+  -- 驗收標準 4:未知 relation 彙整、依名升序;結構類不入列
+  queryGraphNotes g @?= [(T.pack "bar", 1), (T.pack "foo", 2)]
+  QT.qgNotes g @?= queryGraphNotes g
+  -- 規則 4:同一份 bytes 解兩次結果相等
+  parseBad okGraphJson @?= Right g
+
+-- export-query/F002 T4: parseQueryGraph 錯誤路徑(訊息含路徑 + locus + 問題)
+testParseQueryGraphErrors :: TestTree
+testParseQueryGraphErrors = testCase "test_parse_query_graph_errors" $ do
+  -- 壞 JSON → LoadParseError,訊息含檔名
+  case parseBad "{" of
+    Left (QT.LoadParseError m) ->
+      assertBool ("parse error mentions the path: " <> show m)
+        ("graph.json" `isInfixOf` T.unpack m)
+    other -> assertFailure ("expected LoadParseError, got: " <> show other)
+  expectSchema "[]" ["graph.json", "top level is not a JSON object"]
+  -- 驗收標準 2
+  expectSchema "{\"links\":[]}" ["graph.json", "missing required field \"nodes\""]
+  expectSchema "{\"nodes\":{}}" ["\"nodes\" is not an array"]
+  expectSchema
+    ("{\"nodes\":[{\"id\":\"A\",\"label\":\"A\",\"source_file\":\"a\"},"
+      <> "{\"id\":\"B\",\"source_file\":\"b\"}]}")
+    ["nodes[1]", "missing required field \"label\""]
+  expectSchema "{\"nodes\":[{\"id\":\"A\",\"label\":1,\"source_file\":\"a\"}]}"
+    ["nodes[0]", "field \"label\" is not a string"]
+  -- 假設 A3:重複 id 是壞檔
+  expectSchema
+    ("{\"nodes\":[{\"id\":\"A\",\"label\":\"A\",\"source_file\":\"a\"},"
+      <> "{\"id\":\"A\",\"label\":\"A2\",\"source_file\":\"a2\"}]}")
+    ["nodes[1]", "duplicate node id \"A\""]
+  expectSchema
+    (oneNode <> ",\"links\":[{\"source\":\"A\",\"target\":\"A\"}]}")
+    ["links[0]", "missing required field \"relation\""]
+  -- 驗收標準 3:邊引用不存在的節點 id
+  expectSchema
+    (oneNode <> ",\"links\":[{\"source\":\"X\",\"target\":\"A\",\"relation\":\"imports\"}]}")
+    ["links[0]", "source \"X\" is not a known node id"]
+  expectSchema
+    (oneNode <> ",\"links\":[{\"source\":\"A\",\"target\":\"Y\",\"relation\":\"imports\"}]}")
+    ["links[0]", "target \"Y\" is not a known node id"]
+  -- ADR-003:source/target 是節點 id,不接受舊格式的陣列索引
+  expectSchema
+    (oneNode <> ",\"links\":[{\"source\":0,\"target\":\"A\",\"relation\":\"imports\"}]}")
+    ["links[0]", "field \"source\" is not a string"]
+  expectSchema "{\"nodes\":[],\"links\":\"x\"}" ["\"links\" is not an array"]
+  -- 假設 A2:links 缺鍵當空陣列 → 成功且圖為空
+  case parseBad "{\"nodes\":[]}" of
+    Right g -> do
+      QT.qgNodes g   @?= []
+      QT.qgIndex g   @?= Map.empty
+      QT.qgForward g @?= Map.empty
+      QT.qgReverse g @?= Map.empty
+      QT.qgOutDeg g  @?= Map.empty
+      QT.qgInDeg g   @?= Map.empty
+      queryGraphNotes g @?= []
+    other -> assertFailure ("expected an empty graph, got: " <> show other)
+  -- fail-fast 的決定性:同一份壞檔解兩次訊息完全相同
+  parseBad "{\"nodes\":{}}" @?= parseBad "{\"nodes\":{}}"
+  -- 路徑原樣進訊息(不同路徑 → 不同訊息)
+  assertBool "the path is part of the message"
+    (parseAt "other.json" "[]" /= parseBad "[]")
+ where
+  oneNode = "{\"nodes\":[{\"id\":\"A\",\"label\":\"A\",\"source_file\":\"a\"}]"
+
+-- export-query/F002 T5: loadQueryGraph 進入點與 F001 round-trip(驗收標準 1、5)
+testLoadQueryGraphIoRoundtrip :: TestTree
+testLoadQueryGraphIoRoundtrip = testCase "test_load_query_graph_io_roundtrip" $
+  withExportDir "load" $ \dir -> do
+    -- (a) 檔案不存在
+    let gone = dir </> "nope.json"
+    r1 <- loadQueryGraph gone
+    case r1 of
+      Left (QT.LoadFileMissing m) -> do
+        assertBool ("message mentions the path: " <> show m)
+          (takeFileName gone `isInfixOf` T.unpack m)
+        assertBool ("message says file not found: " <> show m)
+          ("file not found" `isInfixOf` T.unpack m)
+      other -> assertFailure ("expected LoadFileMissing, got: " <> show other)
+    -- (b) 路徑是目錄:一樣回 LoadFileMissing,不拋例外
+    r2 <- loadQueryGraph dir
+    case r2 of
+      Left (QT.LoadFileMissing _) -> pure ()
+      other -> assertFailure
+        ("expected LoadFileMissing for a directory, got: " <> show other)
+    -- (c) 驗收標準 1:手寫 CodeGraph → writeCodegraph → loadQueryGraph
+    let g = graphWith
+          [ xNode "Demo.A" "Demo.A" "src/Demo/A.hs" Nothing
+          , xNode "Demo.B" "Demo.B" "src/Demo/B.hs" (Just 4)
+          , xNode "Demo.C" "Demo.C" "src/Demo/C.hs" Nothing
+          ]
+          [ xEdge "Demo.A" "Demo.B" RImports (Just 6)
+          , xEdge "Demo.B" "Demo.C" RCalls (Just 9)
+          , xEdge "Demo.A" "Demo.C" RContains Nothing
+          ]
+        out = dir </> "codegraph.json"
+    _ <- writeCodegraph ExportOptions
+      { rootDir = dir, outputPath = out, commitPolicy = NoCommit } g
+    loaded <- loadQueryGraph out
+    q <- case loaded of
+      Right x  -> pure x
+      Left err -> assertFailure ("round-trip load failed: " <> show err)
+    map QT.qnId (QT.qgNodes q)
+      @?= [qid "Demo.A", qid "Demo.B", qid "Demo.C"]
+    map QT.qnLabel (QT.qgNodes q)
+      @?= map T.pack ["Demo.A", "Demo.B", "Demo.C"]
+    map QT.qnFile (QT.qgNodes q)
+      @?= ["src/Demo/A.hs", "src/Demo/B.hs", "src/Demo/C.hs"]
+    -- 驗收標準 5:contains 那條不在依賴圖裡
+    QT.qgForward q @?= Map.fromList
+      [ (qid "Demo.A", [qid "Demo.B"]), (qid "Demo.B", [qid "Demo.C"]) ]
+    QT.qgReverse q @?= Map.fromList
+      [ (qid "Demo.B", [qid "Demo.A"]), (qid "Demo.C", [qid "Demo.B"]) ]
+    QT.qgOutDeg q @?= Map.fromList [(qid "Demo.A", 1), (qid "Demo.B", 1)]
+    QT.qgInDeg  q @?= Map.fromList [(qid "Demo.B", 1), (qid "Demo.C", 1)]
+    assertBool "contains target is not a forward neighbour of Demo.A"
+      (qid "Demo.C" `notElem` Map.findWithDefault [] (qid "Demo.A") (QT.qgForward q))
+    -- 自家輸出不含未知 relation
+    queryGraphNotes q @?= []
+    -- (d) 規則 4:同一個檔案載入兩次結果相等
+    again <- loadQueryGraph out
+    again @?= Right q
