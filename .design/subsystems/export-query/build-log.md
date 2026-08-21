@@ -3,7 +3,7 @@ id: export-query-build
 type: build-log
 title: export-query-build
 description: 委派展開 export-query 全子系統(匯出、查詢、CLI 組裝)
-status: in-progress
+status: done
 created: 2026-08-21
 updated: 2026-08-21
 parent: export-query
@@ -161,3 +161,30 @@ parent: export-query
 2. **補契約 `queryGraphHasNode`(發現 1)**:已寫進 `design.md` 查詢面,並委派一輪小實作把 `missingNodeLines` 改走契約函式。
 
 3. **`system.md` CLI 契約四處落差(發現 2 + A8/A10)**:開發者裁定現在走 `/system-design` 更新模式補齊。
+
+## 收尾
+
+全部四個 feature 完成,子系統進度 4/4(100%),測試 93/93,分支 `feat/export-query-stage1`。
+
+**契約在委派過程中被修訂 8 次**,全部源自 subagent 的實質發現、且全部在寫程式碼之前裁決:
+
+| # | 發現 | 落點 |
+|---|---|---|
+| C1 | `AutoDetect` 無從得知在哪跑 git | `ExportOptions` 增 `rootDir` |
+| C2 | 未知 relation 沒有列印通道 | 新增 `queryGraphNotes` |
+| C3 | `LoadError` 形狀未定 | 三建構子 |
+| C4/C5 | `Reachable` 起點、`ShortestPath` 多解未定義 | 查詢規則 5、6 |
+| A5 | 邊不輸出證據行,下游循環依賴報告會全空 | 投影規則 3 增 `source_location` |
+| F002 A1 | 契約引用了未定義的 `NodeId` | 查詢面補 `newtype NodeId` |
+| F002 A6 | 結構類名單只有 3 種,下游是 6 種 | `design.md` + ADR-003 補齊 |
+| 閘門發現 1 | 契約無「節點存在性」能力,CLI 只好繞過抽象 | 新增 `queryGraphHasNode` |
+
+其中 C1、C2、A5、F002 A1、閘門發現 1 是**同一個模式**:契約少了一條通道,實作者要嘛繞道、要嘛腦補。這是委派模式最容易出事的地方,也是「契約卡門檻」與「待確認假設」機制真正發揮作用的地方。
+
+**Level 1 也更新了**(開發者裁定走 `/system-design` 更新模式):CLI 頂層契約補上 `--summary`、`--graph`、query 的四個子命令細節,以及漏列的 `--hiedb` / `--db`。`--db` 是唯讀約束的載重旗標——S3 函式級抽取預設會在目標專案建 `.knot/`,沒有改道旗標,驗收標的的「零寫入」就做不到。另修正兩處過期陳述(子系統 design.md「均未建立」、結構類 relation 只列兩種)。
+
+**留給後續的三件事**:
+
+1. **library 唯一的旁路**:`src/Knot/Export/Encode.hs:L38 → Knot.Meta.Types`,違反 system.md「無旁路」。成因是 graph-core 的 `GraphStats.gsTopExternalTargets :: [(ModuleName, Int)]` 在公開 DTO 透出上游型別。修法是 graph-core 改用 `Text` 或 re-export。**尚未開文檔**,待開發者決定走 `/enhance-design` 或併入 G-E001
+2. **G-E001 已登記三批非契約面匯出**(project-meta / extraction / export-query),export-query 這批性質更複雜(純測試用、跨內部模組必要匯出、executable 專用三種),使 internal library 成為唯一能一次解決三者的方案
+3. **`-Wall` 零警告從未成立**:`test/Main.hs` 有 8 筆 `-Wincomplete-record-selectors`(extraction 的 `Fact` 部分選擇器),只在全量重編時浮現,前兩個子系統的閘門都是從增量建置得出「零警告」的錯誤結論

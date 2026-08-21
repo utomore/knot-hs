@@ -5,7 +5,7 @@ title: knot-hs
 description: 讀 Haskell 專案的 .hie 與 import 產出 dev-flow 相容程式碼知識圖
 status: active
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-21
 subsystems: [project-meta, extraction, graph-core, export-query]
 ---
 
@@ -56,7 +56,7 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
    - `nodes[]`:必要 `id` / `label` / `source_file`(repo 相對路徑、正斜線);選填 `source_location`
    - `links[]`:必要 `source` / `target`(節點 id)/ `relation`;選填 `confidence`
    - 頂層選填 `directed`、`built_at_commit`
-   - relation 依賴類(`imports`、`calls`、`uses`、`implements` 等)才算進下游依賴圖;結構類(`contains`、`defines`)不算
+   - relation 依賴類(`imports`、`calls`、`uses`、`implements` 等十種)才算進下游依賴圖;結構類(`contains`、`method`、`defines`、`declares`、`rationale_for`、`part_of` 六種)不算。兩份名單以 ADR-003 為準,並與 `scan-graph.mjs` 的 `DEP_RELATIONS` / `STRUCTURAL_RELATIONS` 逐項對齊
 2. 查詢結果(S4):stdout 文字輸出
 3. 警告與錯誤:stderr;best-effort 模式下跳檔仍 exit 0,`--strict` 時任何跳檔 exit 1
 
@@ -69,16 +69,26 @@ knot extract [PATH]          產出 codegraph.json
   --module-only              只輸出 module 級節點與邊
   --include-tests            納入 test-suite component(預設排除)
   --hiedir DIR               覆寫 .hie 目錄位置
+  --hiedb PATH               覆寫 hiedb 執行檔位置(預設查 PATH)
+  --db FILE                  覆寫索引位置(預設 <PATH>/.knot/hiedb.sqlite)
   --strict                   任何跳檔改為 exit 1
+  --summary meta|facts|graph 改印該站的摘要到 stdout,不寫 codegraph.json
 
 knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導航問題
+  --graph FILE               讀哪份圖,預設 ./codegraph.json(四個子命令共用)
+  find <keyword>             關鍵字比對 id 與 label(不分大小寫)
+  reachable <id> [--reverse] 可達集合;--reverse 改問「誰依賴它」
+  path <from> <to>           兩點最短路徑
+  rank [--top N]             連通度排名,N 預設 10
 ```
+
+`--db` 是唯讀約束的載重旗標:函式級抽取預設會在目標專案建 `.knot/` 索引快取,改道到專案外才能讓驗收標的真正零寫入(見「使用者與體量」)。`--summary` 承接開發期的三條唯讀對帳路徑(取代早期的 `--facts` / `--graph` 旗標)。
 
 內部旗標細節(參數格式、預設值微調)屬 Level 2/3 自主權,此處只鎖定子命令劃分與語意。
 
 ## 子系統劃分(Subsystems & Bounded Contexts)
 
-單一執行檔內的四個 Bounded Context,依單向資料流排列。design.md 均未建立,待 `/subsys-design` 逐一展開。
+單一執行檔內的四個 Bounded Context,依單向資料流排列。四者的 Level 2 `design.md` 均已建立。
 
 ### project-meta — 專案發現
 
@@ -108,8 +118,8 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 已建 Level 2:`.design/subsystems/export-query/design.md`
 
-- **職責**:把圖 IR 投影成 `codegraph.json`(欄位規格與 relation 分類遵守 ADR-003,`built_at_commit` 自動偵測);S4 起提供查詢 CLI(關鍵字查節點、反向可達、兩點最短路徑、連通度排名,只走依賴類邊)
-- **邊界(不做)**:不建圖、不改圖;查詢只讀不寫
+- **職責**:把圖 IR 投影成 `codegraph.json`(欄位規格與 relation 分類遵守 ADR-003,`built_at_commit` 自動偵測);S4 起提供查詢 CLI(關鍵字查節點、反向可達、兩點最短路徑、連通度排名,只走依賴類邊);**並承載 CLI 組裝層**——`knot` 的參數解析、四站管線串接、上游警告匯流與 exit code 決定。組裝層本身是跨子系統的黏合層,落在此處是因為兩個子命令的主體都在管線末站
+- **邊界(不做)**:不建圖、不改圖;查詢只讀不寫;組裝層不含任何投影/載入/查詢邏輯(全部委由四個子系統的契約函式)
 - **對外契約摘要**:輸入圖 IR(或既有 codegraph.json),輸出 JSON 檔與 stdout 查詢結果
 
 ## 通訊拓撲與原則(Communication Topology)
@@ -154,6 +164,8 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 | **S1 骨架 + T0 上線** | project-meta(路徑掃描部分)、extraction(import-scan)、graph-core(module 層)、export-query(匯出) | 在 MagicFarmer 跑出 `codegraph.json`,`scan-graph.mjs` 吃得下,依賴矩陣/循環依賴可用 |
 | **S2 .cabal 整合** | project-meta(component 解析、幽靈 `.hie` 過濾) | 免設定即正確排除 `test/`,test 排除改由 component 判定 |
 | **S3 函式級抽取** | extraction(hiedb-sqlite 後端)、graph-core(decl 層、TH 過濾) | 備忘驗收標準全過:兩層節點、`calls`/`implements` 邊、hub 洗版實測、循環依賴人工複驗 |
-| **S4 查詢 CLI** | export-query(查詢) | `knot query` 四項能力可用,`/feature-design`、`/bugfix` 定位加速接上 |
+| **S4 查詢 CLI** | export-query(查詢、CLI 組裝) | `knot query` 四項能力可用,`/feature-design`、`/bugfix` 定位加速接上 |
 
 每階段結束以 MagicFarmer 驗收(唯讀)。
+
+**進度**(2026-08-21):S1 與 S4 的 export-query 部分已完成——`knot extract` 在 MagicFarmer(60 節點/247 邊)與 particle-magic(46/127)唯讀跑出 `codegraph.json` 且 `scan-graph.mjs` 解析成功,`knot query` 四項能力可用。S1 尚缺的是其餘子系統的階段二項目;S3 未開始。
