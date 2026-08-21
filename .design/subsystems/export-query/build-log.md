@@ -72,29 +72,29 @@ parent: export-query
 | F001 A6 | git sha 驗證強度未定 | 去空白後要求字元全落在 `0-9a-f` 且長度 40 或 64 | 接受 |
 | F001 A7 | `ExportOptions.rootDir` 與既有 `ExtractOptions.rootDir` 同名 | 實測 GHC2024 內含 `DisambiguateRecordFields`:記錄建構語法可消歧、裸選擇器不行;一律用記錄建構語法,不新增擴充 | 接受(實作已更正該結論:改用 qualified import,見階段結果) |
 | F002 A1 | 契約的 `QueryCommand` / `QueryResult` 用到 `NodeId`,但「對外契約 › 查詢面」從未定義它 | 查詢面自定義 `newtype NodeId = NodeId Text` | **開工前裁決:採納**。graph-load 手上只有 JSON 字串,而 graph-core 的 `NodeId` 明訂唯一構造入口是 node-mint;ADR-003 也明寫匯出格式 ≠ 內部模型。已寫進 design.md 查詢面契約 |
-| F002 A2 | `links` 頂層鍵缺席的行為未定 | 當空陣列、載入成功(不接受 `edges` 別名) | 待閘門 |
-| F002 A3 | 節點 id 重複的行為未定 | 回 `LoadSchemaError` | 待閘門 |
+| F002 A2 | `links` 頂層鍵缺席的行為未定 | 當空陣列、載入成功(不接受 `edges` 別名) | 階段二閘門:接受 |
+| F002 A3 | 節點 id 重複的行為未定 | 回 `LoadSchemaError` | 階段二閘門:接受 |
 | F002 A4 | `RankConnectivity` 的度數算邊數還是相異鄰居數 | 鄰接表去重、度數算邊數,兩者分開存 | **開工前接受**:編排者複驗 `scan-graph.mjs:310-316` 為逐邊累加(跳過結構邊、兩端各 +1),與此判斷一致 |
-| F002 A5 | `directed: false` 要不要告警 | 忽略該欄位,一律當有向(library 無警告通道) | 待閘門 |
+| F002 A5 | `directed: false` 要不要告警 | 忽略該欄位,一律當有向(library 無警告通道) | 階段二閘門:接受 |
 | F002 A6 | `design.md` / ADR-003 的結構類是 3 種,`scan-graph.mjs:64` 實際是 6 種 | 依 design.md 實作 3 種,多的落入 `RelUnknown` | **開工前裁決:補齊到 6 種**。編排者複驗屬實;`knot query` 讀的是任何 codegraph.json(含 graphify 產的其他語言圖),分類必須與唯一下游對齊。design.md 查詢規則 1 與 ADR-003 皆已補 |
-| F003 A1 | 起點/終點 id 不存在,契約無錯誤建構子 | 回空結果(`ReachableSet []` / `PathResult Nothing`);建議 F004 自行以索引判存在性給明確訊息 | 待閘門 |
-| F003 A2 | `ShortestPath a a` 語意未定 | 回 `Just [a]`(0 hop),不找環(與規則 5 刻意不同) | 待閘門 |
-| F003 A3 | `rank` 是否納入總度數 0 的節點 | 排除,對齊 `scan-graph.mjs` 的 degree map | 待閘門 |
-| F003 A4 | `RankConnectivity n` 的 `n <= 0` | `take` 自然語意 → 空清單 | 待閘門 |
-| F003 A5 | `renderResult` 格式與語言未定 | 英文小寫 `key: value` + 兩空格明細行(對齊 `Summary.hs` / `xrNotes`);不連通 = `path: not connected` | 待閘門 |
-| F003 A6 | `FindNodes ""` 的行為 | 回全部節點(`isInfixOf` 空字串恆真) | 待閘門 |
+| F003 A1 | 起點/終點 id 不存在,契約無錯誤建構子 | 回空結果(`ReachableSet []` / `PathResult Nothing`);建議 F004 自行以索引判存在性給明確訊息 | 階段二閘門:接受 |
+| F003 A2 | `ShortestPath a a` 語意未定 | 回 `Just [a]`(0 hop),不找環(與規則 5 刻意不同) | 階段二閘門:接受 |
+| F003 A3 | `rank` 是否納入總度數 0 的節點 | 排除,對齊 `scan-graph.mjs` 的 degree map | 階段二閘門:接受 |
+| F003 A4 | `RankConnectivity n` 的 `n <= 0` | `take` 自然語意 → 空清單 | 階段二閘門:接受 |
+| F003 A5 | `renderResult` 格式與語言未定 | 英文小寫 `key: value` + 兩空格明細行(對齊 `Summary.hs` / `xrNotes`);不連通 = `path: not connected` | 階段二閘門:接受 |
+| F003 A6 | `FindNodes ""` 的行為 | 回全部節點(`isInfixOf` 空字串恆真) | 階段二閘門:接受 |
 | F003 A7 | 契約卡只寫「查詢規則 3、4」,但規則 5、6 明屬本 feature | 一併實作 3/4/5/6,以 `design.md` 為準 | **開工前裁決:契約卡已補正為「3、4、5、6」**。規則 5、6 是編排者在 W2 期間新增(C4/C5),卡片未同步是編排者的疏漏,非 subagent 誤判 |
-| F004 A1 | `--summary` 下要不要照樣印 stderr 警告通道 | 照樣印(`renderGraphSummary` 看不到 pm/er 警告) | 待閘門 |
-| F004 A2 | `--strict` 的「跳檔」判定沒有對應欄位 | 三條警告清單任一非空即算;`brUsed == False` 的**降級不算**(否則沒裝 hiedb 永遠 exit 1,牴觸 ADR-002) | 待閘門 |
-| F004 A3 | `knot query` 讀哪份 json,契約未定 | 新增 `--graph FILE`,預設 `./codegraph.json` | 待閘門(牽動 system.md,見階段結果) |
-| F004 A4 | 起點 id 不存在的 exit code | exit 0 + stderr `node not found`(落實 F003 A1 建議) | 待閘門 |
-| F004 A5 | 串流分配 | stdout 只放結果/摘要/`wrote` 行,其餘全 stderr | 待閘門 |
-| F004 A6 | `CommitPolicy` 無對應旗標 | 固定 `AutoDetect` | 待閘門 |
-| F004 A7 | `--backend hiedb` 在階段一回空事實流 | CLI 不攔截,由降級行說明 | 待閘門 |
-| F004 A8 | `hiedbExe`/`dbPath` 無旗標,但 system.md「使用者與體量」寫「`--db` 可改道」 | 依契約卡六旗標,兩欄位填 `Nothing`,**不新增旗標** | 待閘門(**Level 1 落差,編排者不自行修改**) |
-| F004 A9 | `--top` 負數 | 不在解析層擋,交給 F003 的 `take` | 待閘門 |
-| F004 A10 | `--summary` 不在 system.md 的 CLI 契約內 | 依契約卡實作,建議補 system.md | 待閘門(**Level 1 落差**) |
-| F004 A11 | 舊 `--facts` / `--graph` 去留 | 移除,由 `--summary` 承接(C6 原文) | 待閘門 |
+| F004 A1 | `--summary` 下要不要照樣印 stderr 警告通道 | 照樣印(`renderGraphSummary` 看不到 pm/er 警告) | 階段二閘門:接受 |
+| F004 A2 | `--strict` 的「跳檔」判定沒有對應欄位 | 三條警告清單任一非空即算;`brUsed == False` 的**降級不算**(否則沒裝 hiedb 永遠 exit 1,牴觸 ADR-002) | 階段二閘門:接受 |
+| F004 A3 | `knot query` 讀哪份 json,契約未定 | 新增 `--graph FILE`,預設 `./codegraph.json` | **階段二閘門:接受**,並已補進 system.md CLI 契約 |
+| F004 A4 | 起點 id 不存在的 exit code | exit 0 + stderr `node not found`(落實 F003 A1 建議) | 階段二閘門:接受 |
+| F004 A5 | 串流分配 | stdout 只放結果/摘要/`wrote` 行,其餘全 stderr | 階段二閘門:接受 |
+| F004 A6 | `CommitPolicy` 無對應旗標 | 固定 `AutoDetect` | 階段二閘門:接受 |
+| F004 A7 | `--backend hiedb` 在階段一回空事實流 | CLI 不攔截,由降級行說明 | 階段二閘門:接受 |
+| F004 A8 | `hiedbExe`/`dbPath` 無旗標,但 system.md「使用者與體量」寫「`--db` 可改道」 | 依契約卡六旗標,兩欄位填 `Nothing`,**不新增旗標** | **階段二閘門:接受**。開發者裁定走 /system-design 更新模式,CLI 契約已補上 --db 與 --hiedb(--db 是唯讀約束的載重旗標) |
+| F004 A9 | `--top` 負數 | 不在解析層擋,交給 F003 的 `take` | 階段二閘門:接受 |
+| F004 A10 | `--summary` 不在 system.md 的 CLI 契約內 | 依契約卡實作,建議補 system.md | **階段二閘門:接受**,--summary 已補進 system.md CLI 契約 |
+| F004 A11 | 舊 `--facts` / `--graph` 去留 | 移除,由 `--summary` 承接(C6 原文) | 階段二閘門:接受 |
 
 ## 階段結果
 
