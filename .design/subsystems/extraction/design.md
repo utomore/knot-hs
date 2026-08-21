@@ -5,9 +5,10 @@ title: extraction
 description: 事實抽取子系統:統一抽取契約與 import-scan、hiedb 雙後端
 status: active
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-21
 parent: system
 related-adr: [ADR-002]
+code-paths: [src/Knot/Extract, src/Knot/Extract.hs]
 ---
 
 # extraction 子系統架構

@@ -5,9 +5,10 @@ title: graph-core
 description: 圖 IR 子系統:決定性節點 id 鑄造、兩層節點組裝與邊推導
 status: active
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-21
 parent: system
 related-adr: []
+code-paths: [src/Knot/Graph, src/Knot/Graph.hs]
 ---
 
 # graph-core 子系統架構
