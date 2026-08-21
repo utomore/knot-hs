@@ -16,6 +16,7 @@ library
                       Knot.Extract.Types
                       Knot.Extract.Backend
                       Knot.Extract.ImportScan
+                      Knot.Extract.HiedbDriver
                       Knot.Graph
                       Knot.Graph.Types
                       Knot.Graph.FactGate
