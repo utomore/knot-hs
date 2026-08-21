@@ -101,7 +101,7 @@ data LoadError
 3. **`FindNodes`** 比對所有節點(含結構類邊連接的節點);其餘三指令操作依賴圖
 4. **決定性**:結果排序穩定(距離/度數同值時按 id 字典序)
 5. **`Reachable` 不含起點自身**:只回距離 ≥ 1 的節點;起點若處在環上,會以其真實距離出現
-6. **`ShortestPath` 多解取字典序最小路徑**:BFS 展開時鄰居依 id 排序、前驅取最早抵達者,確保同輸入必同輸出
+6. **`ShortestPath` 多解取字典序最小路徑**(路徑視為節點 id 序列比大小):**展開某個節點時**把它的鄰居依 id 排序後入列,前驅取最早抵達者,確保同輸入必同輸出。注意這與「把整層佇列依 id 重排」不同——後者會退化成反向貪心而選到錯的路徑(反例:`S→Alpha→Xray→T` 與 `S→Beta→Whisky→T`,`Alpha < Beta` 但 `Whisky < Xray`,正解是走 `Alpha` 那條)
 
 ### CLI 子命令對映(承接 system.md 頂層契約)
 
@@ -189,7 +189,7 @@ commit 偵測呼叫 `git rev-parse HEAD`(在 `rootDir` 執行,對目標專案唯
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
 | 2 | graph-load | 讀回 codegraph.json、驗證、未知 relation 列印排除 | graph-load | #1 | F002 |
-| 3 | query-commands | 四查詢演算法與文字輸出 | query-engine、query-render | #2 | - |
+| 3 | query-commands | 四查詢演算法與文字輸出 | query-engine、query-render | #2 | F003 |
 | 4 | cli-wiring | knot extract / query 兩子命令的參數解析與管線組裝 | cli-assembly | #1, #3 | - |
 
 (共 4 個 features、2 個階段;全部完成即子系統可交付)
@@ -218,7 +218,7 @@ commit 偵測呼叫 `git rev-parse HEAD`(在 `rootDir` 執行,對目標專案唯
 
 - **階段**:階段二
 - **負責模組**:query-engine、query-render
-- **實作的 Level 2 介面**:`runQuery`、`renderResult`;DTO `QueryCommand`、`Direction`、`QueryResult`;查詢規則 3、4;CLI 子命令對映表的四條語意
+- **實作的 Level 2 介面**:`runQuery`、`renderResult`;DTO `QueryCommand`、`Direction`、`QueryResult`;查詢規則 3、4、5、6(規則 5、6 於本次委派展開期間新增,同屬本 feature);CLI 子命令對映表的四條語意
 - **資料流管線段落**:從 `QueryGraph` + `QueryCommand` 進,經演算法,出 `QueryResult` 渲染為 stdout 文字
 - **驗收標準**:以 fixture 圖驗證——`find` 不分大小寫比對 id 與 label;`reachable` 的 Forward/Reverse 方向正確且回報 hop 距離;`path` 在連通時回最短路徑、不連通時明確輸出「不連通」且 exit 0;`rank` 依 入度+出度 排序、同分按 id 字典序、`--top N` 生效;所有查詢只走依賴類邊(`contains` 不影響結果);同輸入兩次結果相同
 - **明確不做**:不解析 CLI 參數(組裝層的事);不讀寫檔案(圖由 graph-load 給定);不做全對最短路徑或中心性等進階演算法(超出四能力範圍)

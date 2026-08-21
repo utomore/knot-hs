@@ -17,7 +17,7 @@ parent: export-query
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | json-export | impl-done |
 | 階段二:S4 查詢 CLI | W2 | graph-load | design-done |
-| 階段二:S4 查詢 CLI | W3 | query-commands | pending |
+| 階段二:S4 查詢 CLI | W3 | query-commands | design-done |
 | 階段二:S4 查詢 CLI | W4 | cli-wiring | pending |
 
 開發者決定本次一路跑完整個子系統(階段一 + 階段二)。跨子系統依賴 project-meta、extraction、graph-core 的階段一皆 done 並已 merge 進 main(PR #1、#2,commit 1ea5f27),無等待項。專案尚無 `codegraph.json`,略過 codegraph 對帳。
@@ -55,7 +55,7 @@ parent: export-query
 |---|---|---|---|---|---|
 | json-export | F001 | F001-json-export.md | 繼承 | 繼承 | impl-done |
 | graph-load | F002 | F002-graph-load.md | 繼承 | 繼承 | design-done |
-| query-commands | F003 | F003-query-commands.md | 繼承 | 繼承 | pending |
+| query-commands | F003 | F003-query-commands.md | 繼承 | 繼承 | design-done |
 | cli-wiring | F004 | F004-cli-wiring.md | 繼承 | 繼承 | pending |
 
 四個 feature 全部不降級:F001 的決定性序列化與 F004 的跨四子系統組裝都不是樣板工作;F002 / F003 雖然單一入口,但它們是 F004 的前置,設計錯會沿依賴鏈複利。
@@ -77,6 +77,13 @@ parent: export-query
 | F002 A4 | `RankConnectivity` 的度數算邊數還是相異鄰居數 | 鄰接表去重、度數算邊數,兩者分開存 | **開工前接受**:編排者複驗 `scan-graph.mjs:310-316` 為逐邊累加(跳過結構邊、兩端各 +1),與此判斷一致 |
 | F002 A5 | `directed: false` 要不要告警 | 忽略該欄位,一律當有向(library 無警告通道) | 待閘門 |
 | F002 A6 | `design.md` / ADR-003 的結構類是 3 種,`scan-graph.mjs:64` 實際是 6 種 | 依 design.md 實作 3 種,多的落入 `RelUnknown` | **開工前裁決:補齊到 6 種**。編排者複驗屬實;`knot query` 讀的是任何 codegraph.json(含 graphify 產的其他語言圖),分類必須與唯一下游對齊。design.md 查詢規則 1 與 ADR-003 皆已補 |
+| F003 A1 | 起點/終點 id 不存在,契約無錯誤建構子 | 回空結果(`ReachableSet []` / `PathResult Nothing`);建議 F004 自行以索引判存在性給明確訊息 | 待閘門 |
+| F003 A2 | `ShortestPath a a` 語意未定 | 回 `Just [a]`(0 hop),不找環(與規則 5 刻意不同) | 待閘門 |
+| F003 A3 | `rank` 是否納入總度數 0 的節點 | 排除,對齊 `scan-graph.mjs` 的 degree map | 待閘門 |
+| F003 A4 | `RankConnectivity n` 的 `n <= 0` | `take` 自然語意 → 空清單 | 待閘門 |
+| F003 A5 | `renderResult` 格式與語言未定 | 英文小寫 `key: value` + 兩空格明細行(對齊 `Summary.hs` / `xrNotes`);不連通 = `path: not connected` | 待閘門 |
+| F003 A6 | `FindNodes ""` 的行為 | 回全部節點(`isInfixOf` 空字串恆真) | 待閘門 |
+| F003 A7 | 契約卡只寫「查詢規則 3、4」,但規則 5、6 明屬本 feature | 一併實作 3/4/5/6,以 `design.md` 為準 | **開工前裁決:契約卡已補正為「3、4、5、6」**。規則 5、6 是編排者在 W2 期間新增(C4/C5),卡片未同步是編排者的疏漏,非 subagent 誤判 |
 
 ## 階段結果
 
