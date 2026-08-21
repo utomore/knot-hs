@@ -9,7 +9,7 @@ updated: 2026-08-21
 depends-on: []
 related-adr: []
 related-feature: []
-subsystems: [project-meta, extraction, export-query]
+subsystems: [project-meta, extraction, graph-core, export-query]
 ---
 
 # G-E001: 僅為測試而公開的內部函數移入 internal library
@@ -46,3 +46,13 @@ export-query 的 F001 json-export 產生第三批同型匯出,依本文檔既有
   - `encodeCodegraph` / `statsNotes` 是 `Knot.Export` 跨 Haskell 模組呼叫的必要匯出,**Haskell 無法只對同 package 的兄弟模組開放**;要收斂只能靠 internal library 把 `Knot.Export.*` 整組移進去,只對外露 `Knot.Export`
   - `defaultOutputPath` 由 executable(F004 cli-wiring)消費,不是測試用;若採 internal library 方案,它得留在對外露的那一層,或升格進 Level 2 契約
 - 因此本文檔的收斂方案在展開時要能同時處理三種情境:純測試用、跨內部模組必要匯出、executable 專用。**internal library 方案對三者都成立**(test-suite 與 executable 都能 depend 內部 lib),`hs-source-dirs` 共用方案只解得了第一種——這是選型的關鍵差異
+
+## 範圍擴充(2026-08-21 export-query 階段二閘門:拓樸旁路)
+
+本次納入一條**性質不同**的邊界問題:不是「匯出面太寬」,而是「拓樸被破」。
+
+- **`src/Knot/Export/Encode.hs:L38` → `Knot.Meta.Types`**:export-query 的 library 直接依賴 project-meta,跳過了 `system.md`「單向 in-memory 管線,無反向呼叫、**無旁路**」宣告的 `project-meta → extraction → graph-core → export-query` 順序
+- **成因**:graph-core 的 `GraphStats.gsTopExternalTargets :: [(ModuleName, Int)]` 在**公開 DTO** 透出上游型別,消費該契約的人被迫認識 `ModuleName`。export-query 只是照契約消費,不是自己繞道
+- **證據**:2026-08-21 以 knot 自己掃自己取得(`code-paths` 補齊後對映 100%)。整個 library 只有這一條旁路——`Knot.Export` / `Knot.Export.Encode` → `Knot.Graph.Types` 兩條合法(`CodeGraph` 是契約輸入);另 15 條跨界引用全在 `app/`(cli-assembly 呼叫四個子系統正是它的職責)
+- **修法方向**:graph-core 的 `GraphStats` 改用 `Text`,或由 graph-core re-export `ModuleName`。前者讓拓樸乾淨,後者只是把依賴改成形式上合法——展開時要選一個
+- **注意**:這條動的是 graph-core 已完成的 Level 2 契約,`/enhance-design` 展開時 scope 要含 graph-core
