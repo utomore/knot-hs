@@ -2,10 +2,10 @@
 id: extraction-build
 type: build-log
 title: extraction-build
-description: 委派展開 extraction 階段一(fact-contract、import-scan)
+description: 委派展開 extraction 兩階段(S1 骨架、S3 函式級)
 status: in-progress
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-21
 parent: extraction
 ---
 
@@ -17,8 +17,8 @@ parent: extraction
 |---|---|---|---|
 | 階段一:S1 骨架 | W1 | fact-contract | impl-done |
 | 階段一:S1 骨架 | W2 | import-scan | impl-done |
-| 階段二:S3 函式級 | W3 | hiedb-driver | 本次不跑 |
-| 階段二:S3 函式級 | W4 | hiedb-facts | 本次不跑 |
+| 階段二:S3 函式級 | W3 | hiedb-driver | pending |
+| 階段二:S3 函式級 | W4 | hiedb-facts | pending |
 
 開發者決定本次只跑階段一(主架構 S1 里程碑優先,S3 之後接續模式回來);無跨子系統未完成依賴(project-meta done)。
 
@@ -30,6 +30,11 @@ parent: extraction
 | D2 | ModuleName 型別來源 | 直接共用 Knot.Meta.Types 的定義,不重複定義,已回寫契約 | F001、F002 |
 | D3 | 無 module 標頭的 .hs 檔 | 依 Haskell 語意視為 Main(fmFile 區分),已回寫契約 | F002 |
 | D4 | 測試框架/命名空間/唯讀(沿 project-meta 展開的全域決定) | hedgehog+tasty;Knot.Extract.*;驗收標的絕對唯讀;版本號 0.0.1.0 凍結 | 全部 |
+| D5 | 階段二跑到哪 | 一路跑完階段二(W3 hiedb-driver → W4 hiedb-facts),接續模式沿用既有配號 | F003、F004 |
+| D6 | fixture 的 `.hie` 從哪來 | **commit 小型真實 `.hie` 進 fixtures**:自建 2-3 個 module 的小專案、用 GHC 9.14.1 產出並入版控(實測單檔 2.6-26KB)。不在測試裡 shell out 呼叫 ghc——與 export-query D5 刪掉「測試裡跑 node」是同一個理由。版本鎖不是新問題,ADR-001 本來就要求同版 GHC | F003、F004 |
+| D7 | hiedb 不在 PATH 時的測試行為 | 需要 hiedb 的測試**自動跳過並印明原因**,測試摘要列出跳過數。符合 ADR-002:沒裝選用依賴不該讓專案看起來是壞的 | F003、F004 |
+| D8 | 驗收標的的 `.hie` | **不重建兩個標的**(會寫進它們的 dist-newstyle)。改以自建 fixture + knot-hs 自身(24 個 module 的真實 Haskell 專案)驗收 | F003、F004 |
+| D9 | 工具鏈 spike(2026-08-21 實測,GHC 9.14.1) | `hiedb` 已裝於 `/c/cabal/bin/hiedb`;對 knot-hs 自身 24 個真實 `.hie` 執行 `hiedb index` → **24 indexed / 0 skipped / 1.34s**,產出 2.6MB SQLite;`sqlite-simple` + `direct-sqlite 2.3.29` 直讀成功。schema 確認為 mods / decls / defs / refs / exports / imports / typenames / typerefs 八張表(**無 instance 表**);`decls` 無 `mod` 欄,module 需 join `mods.hieFile` | F003、F004 |
 
 ## 配號表
 
@@ -37,8 +42,8 @@ parent: extraction
 |---|---|---|---|---|---|
 | fact-contract | F001 | F001-fact-contract.md | opus(Fable 誤判中斷改派) | 繼承 | impl-done |
 | import-scan | F002 | F002-import-scan.md | opus(預防 Fable 誤判) | 繼承 | impl-done |
-| hiedb-driver | F003 | F003-hiedb-driver.md | 繼承 | 繼承 | 本次不跑 |
-| hiedb-facts | F004 | F004-hiedb-facts.md | 繼承 | 繼承 | 本次不跑 |
+| hiedb-driver | F003 | F003-hiedb-driver.md | 繼承 | 繼承 | pending |
+| hiedb-facts | F004 | F004-hiedb-facts.md | 繼承 | 繼承 | pending |
 
 ## 待確認假設彙總
 
@@ -70,3 +75,16 @@ parent: extraction
 - 委派插曲:F001 設計遭 Fable [reasoning_extraction] 誤判中斷一次,改派 opus 完成;F002 設計預防性改派 opus
 - arch-audit subsys:資料流管線(窄化→選擇→探測→best-effort→合成)與契約一致;規則 1/3/7/8 逐條落實;SRP 清楚、無邊界外洩、模組介面零漂移
 - 閘門裁決:15 條假設全部接受;F001 A8 補進 design.md 的 brDetail 語意;測試改名 test_extract_entry_registry;E001 升為全域 G-E001(涵蓋兩子系統的測試用匯出);階段一收尾以 PR 整合
+
+### 契約類決定(2026-08-21 階段二批次澄清,已回寫 design.md)
+
+四項全部源自開跑前的工具鏈實測,不是推測:
+
+| # | 實測發現 | 決定 | 回寫位置 |
+|---|---|---|---|
+| C1 | hiedb 的 `occ` 有**四類** namespace 前綴(實測 knot-hs 自身:`v:` 108、`c:` 95、`t:` 50、`f<父型別>:` 166+),契約的 `NameSpace` 只有二值 | **擴充成四值** `ValueNs` / `DataConNs` / `TypeNs` / `FieldNs`,與 hiedb 一對一。理由:graph-core 用 (Module, Occ, namespace) 鑄決定性節點 id,壓縮成二值會讓不同 GHC 實體可能撞出同一個 id | 事實流 DTO › `NameSpace` |
+| C2 | `refs.is_generated` 是 hiedb 的現成事實(實測 672/4740 = 14% 為 deriving 產生),但 `Fact` 無欄位承載;而契約要 graph-core 靠「異常 span」猜 | `FactRef` 增 `frGenerated :: Bool` **原樣轉載**,extraction 不過濾不詮釋;取捨仍是 graph-core 的職責,但它從此有事實可依 | `FactRef`、抽取規則 4a(新增) |
+| C3 | span 包含 join 是**一對多**(實測同一 ref 同時落在 `c:QueryNode` 與 `t:QueryNode` 內),但 `frFromDecl` 是單值 | 取 **span 最小(最內層)** 者;同大小再依 `(qnSpace, qnOcc)` 字典序破雷 | 抽取規則 4 |
+| C4 | hiedb 0.8 的 schema **沒有 instance 表**;本專案 `grep "^instance"` 亦為空(全是 deriving)。`FactInstance` 需要的「class + instance 標頭」無直接來源 | **本階段不產出 `FactInstance`**,建構子保留但零邏輯;`implements` 邊另開 feature。hiedb-facts 契約卡的驗收標準與「明確不做」已改寫 | hiedb-facts 契約卡 |
+
+**留給 graph-core 階段二的前置說明**:C1 與 C2 都動了 graph-core 將要消費的 DTO,但目前 `Knot.Graph.Types` 只 import `DeclKind` 當不透明 payload、尚未 pattern-match `FactRef`,所以**對現有程式碼零影響**。graph-core 的 decl-nodes / decl-edges 開工時要按四值 namespace 鑄 id、並用 `frGenerated` 取代原本規劃的 span 啟發式。
