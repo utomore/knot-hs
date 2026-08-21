@@ -69,6 +69,10 @@ data NameSpace
   | DataConNs      -- hiedb "c:" 資料建構子
   | TypeNs         -- hiedb "t:" 型別與 class(GHC 的 tcClsName,兩者同命名空間)
   | FieldNs        -- hiedb "f<父型別>:" 記錄欄位選擇器
+  -- hiedb 另有 "z:"(型別變數,見其 HieDb/Types.hs 的 toNsChar):刻意不涵蓋。
+  -- 型別變數是簽名內的區域名字、不是架構實體,鑄成圖節點無意義;2026-08-21
+  -- 實測 knot-hs 自身索引的 decls 與 refs 皆為零筆。後端遇到時跳過該列,
+  -- 並依前綴彙整成一則警告(不逐列刷警告)
 
 data Fact
   = FactModule                          -- 檔案裡實際宣告的 module
@@ -90,6 +94,12 @@ data Fact
       , fiInstHead :: Text              -- 渲染後的 instance 標頭,如 "Renderable Sprite"
       , fiInstFile :: FilePath, fiInstLine :: Int }
 
+-- 七個建構子是「抽取契約的目標精度」,不是每個後端都交得出來。
+-- **hiedb 後端只能交出 namespace 粗度**:hiedb 索引時丟棄了 GHC 的 DeclType
+-- (其 HieDb/Utils.hs 的 goDec 只存 is_root),所以 class / type synonym /
+-- family 在索引裡與 data 無從區分,只能由 occ 前綴粗推。消費端(graph-core
+-- 的 DeclNode)必須知道自己拿到的可能是粗粒度,不得假設能分辨 class。
+-- 精度要補滿,得等 ADR-002 預留的第三後端(自寫 .hie 解析)。
 data DeclKind
   = ValueDecl | DataDecl | ClassDecl | InstanceDecl
   | TypeSynDecl | PatSynDecl | FamilyDecl
@@ -113,7 +123,7 @@ data ExtractWarning = ExtractWarning   -- (批次澄清裁定,比照 MetaWarning
 ### 抽取規則(契約的一部分)
 
 1. **納入範圍**:只處理 `pmSources` 中 `sfIncluded = True` 的檔案;`.hie` 清單以 `pmHie.hieFiles` 為準(幽靈檔已被 project-meta 濾除)
-2. **後端職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強、與降級模式行為一致);hiedb 後端只產 `FactDecl` / `FactRef` / `FactInstance`;`FactModule` 由 import-scan 產出;無 module 標頭的檔案依 Haskell 語意視為 `Main`(多個 Main 以 fmFile 區分,批次澄清裁定)
+2. **後端職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強、與降級模式行為一致);hiedb 後端只產 `FactDecl` / `FactRef`(`FactInstance` 依 C4 延後);`FactModule` 由 import-scan 產出;無 module 標頭的檔案依 Haskell 語意視為 `Main`(多個 Main 以 fmFile 區分,批次澄清裁定)
 3. **auto 合成**:import-scan 必跑;hiedb 探測通過(執行檔存在、`pmHie` 存在、相容性檢查過)則加跑,`erLevel = DeclLevel`;任一條件不成立記入 `BackendReport` 並降為 `ModuleLevel`。`ImportsOnly` / `HiedbOnly` 只跑指定後端(後者供除錯)
 4. **fromDecl 由後端解析**:`FactRef.frFromDecl` 在事實產出時即填好(hiedb 後端以 span 包含關係 join 得出);graph-core 不做 span 比對。**span 包含是一對多**(2026-08-21 實測:同一個 ref 可同時落在 `c:QueryNode` 與 `t:QueryNode` 兩個 root decl 內),取 **span 最小(最內層)** 的候選;span 大小相同時再依 `(qnSpace, qnOcc)` 字典序破雷,確保規則 8 的決定性
 
@@ -130,7 +140,7 @@ data ExtractWarning = ExtractWarning   -- (批次澄清裁定,比照 MetaWarning
 | **backend-select** | 後端探測與 auto 策略、依 `BackendChoice` 調度、事實流合成、`ExtractResult` 組裝 |
 | **import-scan** | T0 後端:讀 `.hs` 檔的 module 宣告與 import 行 → `FactModule` / `FactImport` |
 | **hiedb-driver** | hiedb 執行檔探測、相容性檢查、執行 `hiedb index`、`.knot/` 索引檔管理 → 就緒的索引 |
-| **hiedb-facts** | 讀索引 SQLite(mods/decls/defs/refs/exports 表)→ `FactDecl` / `FactRef` / `FactInstance`,含 fromDecl 解析 |
+| **hiedb-facts** | 讀索引 SQLite(mods/decls/defs/refs 表)→ `FactDecl` / `FactRef`,含 fromDecl 解析(`FactInstance` 依 C4 延後,hiedb schema 無 instance 表) |
 
 ## 資料流管線(Data Flow Pipeline)
 
@@ -139,7 +149,7 @@ ProjectMeta(+ ExtractOptions)
   → backend-select: 探測各後端 → 決定本次啟用清單(auto/指定)
   → import-scan:    included 原始檔 → FactModule/FactImport    (單檔失敗 → 警告跳過)
   → hiedb-driver:   pmHie → hiedb index → 索引就緒              (失敗 → 降級 + 報告)
-  → hiedb-facts:    索引 SQLite → FactDecl/FactRef/FactInstance (單查詢失敗 → 警告)
+  → hiedb-facts:    索引 SQLite → FactDecl/FactRef              (單查詢失敗 → 警告)
   → backend-select: 合成事實流 + 能力等級 + 報告 → ExtractResult → 交給 graph-core
 ```
 
@@ -186,7 +196,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
  │      │                    │ IndexHandle      │               │
  │      │                    ▼                  ▼               │
  │      │                hiedb-facts ◀── .knot/hiedb.sqlite     │
- │      │ FactModule         │ FactDecl/FactRef/FactInstance    │
+ │      │ FactModule         │ FactDecl / FactRef                │
  │      │ FactImport         │                                  │
  │      └────────┬───────────┘                                  │
  │               ▼                                              │
@@ -214,7 +224,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
 | 3 | hiedb-driver | hiedb 探測、相容檢查、index 呼叫、.knot 索引管理 | hiedb-driver | #1 | F003 |
-| 4 | hiedb-facts | 讀 SQLite 出 decl/ref/instance 事實、fromDecl 解析 | hiedb-facts | #3 | - |
+| 4 | hiedb-facts | 讀 SQLite 出 decl/ref 事實、fromDecl 解析 | hiedb-facts | #3 | F004 |
 
 (共 4 個 features、2 個階段;全部完成即子系統可交付)
 

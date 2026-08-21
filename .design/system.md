@@ -163,9 +163,11 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 |---|---|---|
 | **S1 骨架 + T0 上線** | project-meta(路徑掃描部分)、extraction(import-scan)、graph-core(module 層)、export-query(匯出) | 在 MagicFarmer 跑出 `codegraph.json`,`scan-graph.mjs` 吃得下,依賴矩陣/循環依賴可用 |
 | **S2 .cabal 整合** | project-meta(component 解析、幽靈 `.hie` 過濾) | 免設定即正確排除 `test/`,test 排除改由 component 判定 |
-| **S3 函式級抽取** | extraction(hiedb-sqlite 後端)、graph-core(decl 層、TH 過濾) | 備忘驗收標準全過:兩層節點、`calls`/`implements` 邊、hub 洗版實測、循環依賴人工複驗 |
+| **S3 函式級抽取** | extraction(hiedb-sqlite 後端)、graph-core(decl 層、產生碼過濾) | 兩層節點、`calls` / `uses` 邊、hub 洗版實測、循環依賴人工複驗 |
 | **S4 查詢 CLI** | export-query(查詢、CLI 組裝) | `knot query` 四項能力可用,`/feature-design`、`/bugfix` 定位加速接上 |
 
 每階段結束以 MagicFarmer 驗收(唯讀)。
+
+**`implements` 邊不在 S3**(2026-08-21 調整):hiedb 0.8 的索引 schema 沒有 instance 表(實測八張表:mods / decls / defs / refs / exports / imports / typenames / typerefs),`FactInstance` 需要的「class + instance 標頭」無直接資料來源。`Fact` 的建構子保留、零邏輯,`implements` 邊另開 feature——要嘛從 refs 反推,要嘛等 ADR-002 預留的第三後端(自寫 `.hie` 解析)。同理,S3 的 decl 層過濾改用 hiedb 的 `refs.is_generated` 事實,不再是「TH 過濾」的啟發式。
 
 **進度**(2026-08-21):S1 與 S4 的 export-query 部分已完成——`knot extract` 在 MagicFarmer(60 節點/247 邊)與 particle-magic(46/127)唯讀跑出 `codegraph.json` 且 `scan-graph.mjs` 解析成功,`knot query` 四項能力可用。S1 尚缺的是其餘子系統的階段二項目;S3 未開始。

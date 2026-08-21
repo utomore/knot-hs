@@ -121,3 +121,23 @@ parent: extraction
 **後果**:目前惰性(hiedb 後端尚未註冊),但 **F004 一註冊,對任何專案跑 `knot extract` 都會在對方建 `.knot/` 且無法改道**——直接違反 system.md「驗收標的不得異動」的唯讀例外機制。
 
 **裁決**:本次一併補接,列為 **F004 委派的前置小任務**(兩個旗標 + 兩個欄位賦值),在 hiedb 後端註冊之前完成。
+
+### 階段二 W4 回報後的裁決(2026-08-21)
+
+W4 的 subagent 到 **hiedb 0.8 與 sqlite-simple 的原始碼**複查行為成因,挖出三項實質事實:
+
+| 來源 | 發現 | 裁決 |
+|---|---|---|
+| F004 A2 | `occ` 前綴實為**五種**,多一個 `z:`(型別變數,見 hiedb `HieDb/Types.hs` 的 `toNsChar`)。編排者複驗:**knot-hs 自身索引的 decls 與 refs 皆為零筆**,是「可能」而非「實際」 | **跳過 `z:` 並彙整成一則警告**,`NameSpace` 維持四值。理由不只是省事:型別變數是簽名內的區域名字、不是架構實體,鑄成圖節點無意義。已回寫 `NameSpace` 註記 |
+| F004 A1 | **hiedb 丟棄了 GHC 的 `DeclType`**(其 `HieDb/Utils.hs` 的 `goDec` 只存 `is_root`)→ `DeclKind` 的七個建構子無法忠實推導,只能由 namespace 粗推 | **接受粗推並在契約註明限制**。七個建構子是「抽取契約的目標精度」,不是每個後端都交得出來;消費端不得假設能分辨 class。精度要補滿得等 ADR-002 預留的第三後端。已回寫 `DeclKind` 註記 |
+| F004 A3 | **`mods.hs_src` 是絕對路徑**(`makeAbsolute (srcBaseDir </> hie_hs_file)`),未給 `--src-base-dir` 時為 `NULL`;`mods.hieFile` 走 `canonicalizePath`。編排者複驗屬實:實測值為 `C:\Users\...\src\Knot\Query.hs`(Windows 反斜線) | 接受:改用「正規化 + 最長後綴比對 `sfPath`」而非前綴相減,並取 `sfPath` 原文以保證與 import-scan 的 `fmFile` 逐字一致 |
+
+其餘假設 A4(丟棄 `refs.unit`)、A5(外部 ref 全照出,`gsDroppedExternal` 需要)、A6(驗收標準 4 的「全部可對映」解讀為專案內側)、A7(`bRun` 以例外回報失敗)、A8(`ihNotes` 照樣併入,`--strict` 首跑 exit 1 不特殊處理)、A9(`FieldNs` 丟棄父型別)全部接受。
+
+### Level 1 調整(開發者裁定)
+
+`system.md` 的 S3 里程碑原寫「兩層節點、`calls`/`implements` 邊」,依 C4 已改為「兩層節點、`calls` / `uses` 邊」,並在「開發階段」補一段說明 `implements` 為何延後(hiedb schema 無 instance 表)。**里程碑是驗收標準,留著一個沒人要做的項目會讓 S3 永遠無法宣告完成。**
+
+### 留給 graph-core 階段二的前置(W4 發現,編排者不跨子系統修改)
+
+`graph-core/design.md` 的邊推導表仍只列 `FactRef`(target 為 `ValueNs`)→ `RCalls`、(`TypeNs`)→ `RUses`,**`DataConNs` / `FieldNs` 未涵蓋**(C1 擴充後才出現的兩個值)。graph-core 階段二開工前需裁決補齊,否則兩個 namespace 的引用會靜默落空。
