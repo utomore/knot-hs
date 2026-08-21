@@ -2,3 +2,4 @@
 .knot/
 *.hi
 *.o
+/.hie/

@@ -61,7 +61,18 @@ data QualName = QualName
   }
   deriving (Eq, Ord, Show)
 
-data NameSpace = ValueNs | TypeNs
+-- | 四值與 hiedb 的 @occ@ 前綴一對一。刻意不壓縮成「值\/型別」二分——
+-- graph-core 以 @(Module, Occ, namespace)@ 鑄決定性節點 id,壓縮會讓不同的
+-- GHC 實體可能撞出同一個 id。
+--
+-- hiedb 另有 @\"z:\"@(型別變數,見其 @HieDb/Types.hs@ 的 @toNsChar@):
+-- 刻意不涵蓋。型別變數是簽名內的區域名字、不是架構實體,鑄成圖節點無意義。
+-- 後端遇到時跳過該列,並依前綴彙整成一則警告(不逐列刷警告)。
+data NameSpace
+  = ValueNs        -- ^ hiedb @\"v:\"@ 一般值(函式、變數)
+  | DataConNs      -- ^ hiedb @\"c:\"@ 資料建構子
+  | TypeNs         -- ^ hiedb @\"t:\"@ 型別與 class(GHC 的 @tcClsName@,兩者同命名空間)
+  | FieldNs        -- ^ hiedb @\"f\<父型別\>:\"@ 記錄欄位選擇器
   deriving (Eq, Ord, Show)
 
 data Fact
@@ -77,6 +88,7 @@ data Fact
       { frFromModule :: ModuleName
       , frFromDecl   :: Maybe QualName  -- ^ 引用發生在哪個頂層宣告內,由後端解析
       , frTarget     :: QualName
+      , frGenerated  :: Bool            -- ^ deriving / TH 產生碼(hiedb @refs.is_generated@)
       , frFile :: FilePath, frLine :: Int }
   | FactInstance                        -- ^ implements 邊的兩端
       { fiClass    :: QualName          -- ^ class(TypeNs)
