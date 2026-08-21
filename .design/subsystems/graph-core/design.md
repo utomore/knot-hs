@@ -88,6 +88,8 @@ data GraphWarning = GraphWarning        -- (批次澄清裁決,比照 MetaWarnin
 
 **`<mod-id>` = 該 module 節點實際鑄出的 id**(批次澄清 C3 裁決):未碰撞時是裸 module 名,碰撞組成員是 `<module>@<source_file>`。decl 層節點沿用所屬 module 的消歧結果,故 `mintDeclId` / `mintInstanceId` 都帶 `Maybe FilePath`,語意同 `mintModuleId`(`Nothing` = 未碰撞、鑄裸名)。理由與階段一假設 A2 同源:缺了 file 參數,多 executable 專案的 `Main.main` 會整組撞成同一個 id 而在去重時被靜默吞掉。
 
+**instance 的 `<mod-id>` 由 `fiInstFile` 反查 `FactModule` 取得**(批次澄清 A3 裁決):`FactInstance` 四個欄位無 module 欄,而 `fiClass` 的 `qnModule` 是 **class 定義所在的 module**、不是 instance 宣告處,拿來鑄 id 會錯。`FactModule` 由 import-scan 產出、涵蓋所有 `sfIncluded` 檔,故反查在 auto 與 imports 模式下恆成立;唯一落空的 `--backend hiedb` 單跑,其 `gfInternal` 本來就為空、整圖為空(A10),不是本規則引入的缺口。反查不到時不建節點並發 `GraphWarning`。
+
 值宣告的 `<occ>` 涵蓋 `ValueNs` / `DataConNs` / `FieldNs` 三個 term-level namespace,`#t` 專屬 `TypeNs`。**已知精度限制(繼承 extraction 假設 A9)**:`DuplicateRecordFields` 下同一 module 的兩個同名欄位選擇器,丟棄父型別後 `QualName` 相同,會鑄出同一個 id 並在去重時合併。這是 extraction 契約的粗度,graph-core 不補救、不猜測。
 
 id 只由 `QualName`(module、occ、namespace)、instance 標頭與(碰撞時的)`source_file` 決定——同一份原始碼在任何機器、任何次編譯都鑄出相同 id。
@@ -113,9 +115,10 @@ id 只由 `QualName`(module、occ、namespace)、instance 標頭與(碰撞時的
 
    **`FactInstance` 目前無後端產出**(extraction C4:hiedb 0.8 的 schema 無 instance 表;見 system.md「`implements` 邊不在 S3」)。graph-core 仍**完整實作** instance 節點鑄造與 `RImplements` 推導並以手工事實流驗收——兩段都是純函數,ADR-002 預留的第三後端上線時零改動即生效;端到端輸出目前恆為 0 個 instance 節點與 0 條 `RImplements` 邊(批次澄清 C1 裁決)。
 
-3. **產生碼過濾**:三者任一成立即濾除該事實並計入 `gsFilteredGenerated`——(a) 事實指向的檔案不在 `pmSources`;(b) 行號 ≤ 0;(c) `FactRef.frGenerated = True`(批次澄清 C4 裁決)。(c) 直接採信 extraction 規則 4a 原樣轉載的 `refs.is_generated` 事實,**不做「異常 span」啟發式**(system.md 已據此改寫 S3 描述);實測 knot-hs 自身 846/7265 = 11.6% 的 ref 屬此類。deriving 產生的引用不對應任何人寫的程式碼行,留著會在 decl 間製造非人為的邊並污染 hub 排名
-4a. **消歧組的 import 目標**:`FactImport` 的目標 module 屬 D1 消歧組時,無從判定指向組內哪個節點 → 丟棄該邊並發 `GraphWarning`,**不**計入 `gsDroppedExternal`(它不是外部目標;A4 裁決)
+3. **產生碼過濾**(**只適用 decl 層事實** `FactDecl` / `FactRef` / `FactInstance`;`FactModule` / `FactImport` 一律不受本規則影響——濾掉 `FactModule` 會讓 `gfInternal` 縮水、module 節點連帶消失,A1 裁決):三者任一成立即濾除該事實並計入 `gsFilteredGenerated`——(a) 事實指向的檔案不在 `pmSources`;(b) 行號 ≤ 0;(c) `FactRef.frGenerated = True`(批次澄清 C4 裁決)。(c) 直接採信 extraction 規則 4a 原樣轉載的 `refs.is_generated` 事實,**不做「異常 span」啟發式**(system.md 已據此改寫 S3 描述);實測 knot-hs 自身 846/7265 = 11.6% 的 ref 屬此類。deriving 產生的引用不對應任何人寫的程式碼行,留著會在 decl 間製造非人為的邊並污染 hub 排名
 4. **自環丟棄**:source 與 target 相同的邊(遞迴呼叫、module 自引)不產出,不計警告
+4a. **消歧組的 import 目標**:`FactImport` 的目標 module 屬 D1 消歧組時,無從判定指向組內哪個節點 → 丟棄該邊並發 `GraphWarning`,**不**計入 `gsDroppedExternal`(它不是外部目標;F001 假設 A4 裁決)
+4b. **內部性以 module 為判準**:decl / instance 事實所屬的 module 不在 `gfInternal` 時,不建節點、不產邊,且**不**計入 `gsDroppedExternal`(同 4a 的理由:那不是「指向外部套件」,是事實流內部不一致),改彙整為 `GraphWarning`(F002 假設 A4 裁決)
 5. **去重**:相同 `(source, target, relation)` 的邊合併為一條,保留最早的 `geLine` 證據行,合併數計入 `gsDedupedEdges`
 6. **`moduleOnly`**:只輸出 module 節點與 `RImports` 邊(decl 層事實直接忽略,不計入統計)
 7. **決定性**:`cgNodes` 依 `NodeId` 字典序、`cgEdges` 依 `(source, relation, target)` 字典序(批次澄清裁決);同輸入必同輸出
