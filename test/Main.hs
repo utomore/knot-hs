@@ -121,12 +121,15 @@ import Knot.Extract.HiedbDriver
   , probeHiedb
   )
 import Knot.Extract.HiedbFacts
-  ( declKindOf
+  ( SourceDecls (..)
+  , declKindOf
   , hiedbBackend
+  , isGeneratedName
   , parseOcc
   , pickFromDecl
   , readIndexFacts
   , resolveModuleSource
+  , unavailableSourceDecls
   )
 import Knot.Extract.ImportScan
   ( headerModuleOf
@@ -292,6 +295,7 @@ tests mHiedb = testGroup "knot-hs"
   , exportQueryF002Tests
   , exportQueryF003Tests
   , exportQueryF004Tests
+  , globalE003Tests
   ]
 
 f001Tests :: TestTree
@@ -868,8 +872,8 @@ factsA =
   ]
 factsB =
   [ FactRef (mn "Z.Late") (Just (qn "Z.Late" "go" ValueNs)) (qn "A.Early" "helper" ValueNs)
-      False "src/Z/Late.hs" 21
-  , FactDecl (qn "A.Early" "helper" ValueNs) ValueDecl "src/A/Early.hs" 4
+      False False "src/Z/Late.hs" 21
+  , FactDecl (qn "A.Early" "helper" ValueNs) ValueDecl False "src/A/Early.hs" 4
   , FactInstance (qn "A.Early" "Renderable" TypeNs) (T.pack "Renderable Sprite")
       "src/A/Early.hs" 30
   ]
@@ -916,18 +920,20 @@ testExtractTypesConstruct = testCase "test_extract_types_construct" $ do
       fiTo f   @?= mn "Data.Text"
       fiFile f @?= "src/A/Early.hs"
       fiLine f @?= 3
-  case FactDecl q DataDecl "src/A/Early.hs" 4 of
+  case FactDecl q DataDecl False "src/A/Early.hs" 4 of
     f@FactDecl{} -> do
       fdName f @?= q
       fdKind f @?= DataDecl
+      fdGenerated f @?= False
       fdFile f @?= "src/A/Early.hs"
       fdLine f @?= 4
-  case FactRef modName (Just q) (qn "Z.Late" "go" ValueNs) True "src/A/Early.hs" 5 of
+  case FactRef modName (Just q) (qn "Z.Late" "go" ValueNs) True False "src/A/Early.hs" 5 of
     f@FactRef{} -> do
       frFromModule f @?= modName
       frFromDecl f   @?= Just q
       frTarget f     @?= qn "Z.Late" "go" ValueNs
       frGenerated f  @?= True
+      frTargetGenerated f @?= False
       frFile f       @?= "src/A/Early.hs"
       frLine f       @?= 5
   case FactInstance (qn "A.Early" "Renderable" TypeNs) (T.pack "Renderable Sprite")
@@ -1125,8 +1131,8 @@ genFact = Gen.choice
   , FactImport <$> genMod <*> genMod <*> genPath <*> genLine
   , FactDecl <$> genQual <*> Gen.element
       [ValueDecl, DataDecl, ClassDecl, InstanceDecl, TypeSynDecl, PatSynDecl, FamilyDecl]
-      <*> genPath <*> genLine
-  , FactRef <$> genMod <*> Gen.maybe genQual <*> genQual <*> Gen.bool
+      <*> Gen.bool <*> genPath <*> genLine
+  , FactRef <$> genMod <*> Gen.maybe genQual <*> genQual <*> Gen.bool <*> Gen.bool
       <*> genPath <*> genLine
   , FactInstance <$> genQual <*> genOcc <*> genPath <*> genLine
   ]
@@ -1312,11 +1318,15 @@ testScanSourceFacts = testCase "test_scan_source_facts" $ do
   case facts of
     (f : imps) -> do
       f @?= FactModule path (mn "Demo.Main")
-      map (\i -> (fiLine i, fiTo i)) imps @?= comboImports
-      forM_ imps $ \i -> do
-        fiFrom i @?= mn "Demo.Main"
-        fiFile i @?= path
-      let ls = map fiLine imps
+      -- 原本直接用 fiLine / fiTo 等部分選擇器(G-E002)。改走 'importOf' 後
+      -- 「第一筆之後全是 FactImport」由隱含假設變成顯式斷言:長度不變即證明。
+      let parsed = mapMaybe importOf imps
+      length parsed @?= length imps
+      map (\(_, to, _, l) -> (l, to)) parsed @?= comboImports
+      forM_ parsed $ \(from, _, fp, _) -> do
+        from @?= mn "Demo.Main"
+        fp   @?= path
+      let ls = [l | (_, _, _, l) <- parsed]
       assertBool "import lines strictly increasing" (and (zipWith (<) ls (drop 1 ls)))
     [] -> assertFailure "expected at least one fact"
   -- 無 module 標頭 → Main(D3)
@@ -1439,9 +1449,9 @@ testImportScanDeterministic = testGroup "test_import_scan_deterministic"
       lns   <- forAll (mapM genImportLine mods)
       let src = srcOf ("module Gen.Root where" : lns)
           (facts, warns) = scanSource "src/Gen/Root.hs" src
-          got = [(fiLine f, fiTo f) | f@FactImport{} <- facts]
+          got = [(l, to) | Just (_, to, _, l) <- map importOf facts]
       warns === []
-      [fmModule f | f@FactModule{} <- facts] === [mn "Gen.Root"]
+      [m | Just (_, m) <- map moduleOf facts] === [mn "Gen.Root"]
       got === zip [2 ..] (map ModuleName mods)
   ]
 
@@ -1884,6 +1894,7 @@ extractionF004Tests mHiedb = testGroup "extraction/F004 hiedb-facts" $
   , testPickFromDecl           -- T6
   , testHiedbBackendRegistered -- T8(不需 hiedb 的部分)
   , testHiedbFactsFixture      -- T9
+  , testGeneratedNameJudgement -- G-E003 T2(純函數面)
   ]
   ++ case mHiedb of
        Just _  -> hiedbGatedF004Tests
@@ -1894,20 +1905,36 @@ hiedbGatedF004Tests :: [TestTree]
 hiedbGatedF004Tests =
   [ testReadIndexFacts         -- T7
   , testHiedbBackendLive       -- T8(需 hiedb 的部分)
+  , testGeneratedFlagsFixture  -- G-E003 T2(索引面)
   , testHiedbFactsAcceptance   -- T10
   , testHiedbFactsSelfcheck    -- T11
   ]
 
+-- | 安全取出 'FactModule' 的欄位(理由同 'declOf';G-E002)。
+moduleOf :: Fact -> Maybe (FilePath, ModuleName)
+moduleOf (FactModule f m) = Just (f, m)
+moduleOf _                = Nothing
+
+-- | 安全取出 'FactImport' 的欄位(理由同 'declOf';G-E002)。
+importOf :: Fact -> Maybe (ModuleName, ModuleName, FilePath, Int)
+importOf (FactImport from to f l) = Just (from, to, f, l)
+importOf _                        = Nothing
+
 -- | 安全取出 'FactDecl' 的欄位:以位置 pattern 承接,避免對 sum type 用
 -- 部分選擇器(@-Wincomplete-record-selectors@)。
-declOf :: Fact -> Maybe (QualName, DeclKind, FilePath, Int)
-declOf (FactDecl n k f l) = Just (n, k, f, l)
-declOf _                  = Nothing
+--
+-- 這一家四個('moduleOf' \/ 'importOf' \/ 'declOf' \/ 'refOf')是本檔取
+-- 'Fact' 欄位的**唯一**手段:@fiLine@ \/ @fmModule@ 等選擇器對 sum type 是
+-- 部分函式,直接用會在全量重建時噴 @-Wincomplete-record-selectors@,而增量
+-- 建置不重印警告,退化會靜悄悄地長回來(G-E002)。
+declOf :: Fact -> Maybe (QualName, DeclKind, Bool, FilePath, Int)
+declOf (FactDecl n k g f l) = Just (n, k, g, f, l)
+declOf _                    = Nothing
 
 -- | 安全取出 'FactRef' 的欄位(理由同 'declOf')。
-refOf :: Fact -> Maybe (ModuleName, Maybe QualName, QualName, Bool, FilePath, Int)
-refOf (FactRef m d t g f l) = Just (m, d, t, g, f, l)
-refOf _                     = Nothing
+refOf :: Fact -> Maybe (ModuleName, Maybe QualName, QualName, Bool, Bool, FilePath, Int)
+refOf (FactRef m d t g tg f l) = Just (m, d, t, g, tg, f, l)
+refOf _                        = Nothing
 
 isImportFact :: Fact -> Bool
 isImportFact FactImport{} = True
@@ -1931,14 +1958,79 @@ testNamespaceAndGenerated = testCase "test_namespace_and_generated" $ do
   -- FactRef 可帶 frGenerated 且欄位取值正確(位置 pattern,見 'refOf')
   let tgt = qn "Demo.Core" "greet" ValueNs
       src = Just (qn "Demo.App" "run" ValueNs)
-      fr g = FactRef (mn "Demo.App") src tgt g "src/Demo/App.hs" 8
-  refOf (fr True)  @?= Just (mn "Demo.App", src, tgt, True,  "src/Demo/App.hs", 8)
-  refOf (fr False) @?= Just (mn "Demo.App", src, tgt, False, "src/Demo/App.hs", 8)
+      fr g = FactRef (mn "Demo.App") src tgt g False "src/Demo/App.hs" 8
+  refOf (fr True)  @?= Just (mn "Demo.App", src, tgt, True,  False, "src/Demo/App.hs", 8)
+  refOf (fr False) @?= Just (mn "Demo.App", src, tgt, False, False, "src/Demo/App.hs", 8)
   -- 只差 frGenerated 的兩筆分得開(釘住規則 8 的排序依據含這個欄位)
   assertBool "frGenerated separates by Eq"  (fr False /= fr True)
   compare (fr False) (fr True) @?= LT
+  -- G-E003:frTargetGenerated 同樣入 Eq / Ord(全序不因新欄位失效)
+  let frt tg = FactRef (mn "Demo.App") src tgt False tg "src/Demo/App.hs" 8
+  assertBool "frTargetGenerated separates by Eq" (frt False /= frt True)
+  compare (frt False) (frt True) @?= LT
+  -- fdGenerated 亦然
+  let fd g = FactDecl tgt ValueDecl g "src/Demo/Core.hs" 12
+  assertBool "fdGenerated separates by Eq" (fd False /= fd True)
+  compare (fd False) (fd True) @?= LT
   -- declKindOf 的值域落在 DeclKind 內(四值全覆蓋,無 partial)
   map declKindOf allNs @?= [ValueDecl, DataDecl, DataDecl, ValueDecl]
+
+-- G-E003 T2(純函數面):產生碼判準與它的降級行為
+testGeneratedNameJudgement :: TestTree
+testGeneratedNameJudgement = testCase "test_generated_name_judgement" $ do
+  let hf  = T.pack "A.hie"
+      idx = SourceDecls (Just (Map.singleton hf
+              (Set.fromList [T.pack "v:greet", T.pack "t:Color"])))
+  -- 有原始碼宣告 → 非產生碼
+  isGeneratedName idx (Just hf) (T.pack "v:greet") @?= False
+  isGeneratedName idx (Just hf) (T.pack "t:Color") @?= False
+  -- 在 defs 卻不在 decls → 沒有人寫過那一行 → 產生碼
+  isGeneratedName idx (Just hf) (T.pack "v:$fEqColor") @?= True
+  -- 名字的 module 不在索引內(外部套件)或對映不唯一 → 恆 False
+  -- (外部目標由 graph-core 規則 1 丟棄,不歸本旗標管)
+  isGeneratedName idx Nothing (T.pack "v:$fShowInt") @?= False
+  -- 該檔一筆 decls 都沒有 ⇒ 它的名字全都沒有原始碼宣告
+  isGeneratedName idx (Just (T.pack "B.hie")) (T.pack "v:greet") @?= True
+  -- decls 索引不可用時的降級:一律非產生碼,**絕不誤殺**
+  isGeneratedName unavailableSourceDecls (Just hf) (T.pack "v:$fEqColor") @?= False
+  isGeneratedName unavailableSourceDecls (Just hf) (T.pack "v:greet")     @?= False
+  isGeneratedName unavailableSourceDecls Nothing   (T.pack "v:$fEqColor") @?= False
+
+-- G-E003 T2(索引面):對 fixture 的真實索引驗證兩個旗標
+--
+-- fixture @Demo.Core@ 的 @data Color = … deriving (Eq, Show)@ 產生
+-- @$fEqColor@ / @$fShowColor@ 兩個字典;其餘名字都是手寫的。
+testGeneratedFlagsFixture :: TestTree
+testGeneratedFlagsFixture = testCase "test_generated_flags_fixture" $
+  withHiedbScratch "ge003flags" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    h  <- expectRight =<< ensureIndex (hiedbOpts root) pm
+    (facts, _) <- readIndexFacts h pm
+    let decls = mapMaybe declOf facts
+        refs  = mapMaybe refOf facts
+        genOccs  = sort [ qnOcc q | (q, _, True,  _, _) <- decls ]
+        handOccs =      [ qnOcc q | (q, _, False, _, _) <- decls ]
+    -- deriving 字典恰好是那兩個,一個不多一個不少
+    genOccs @?= sort [T.pack "$fEqColor", T.pack "$fShowColor"]
+    -- 手寫的名字一個都沒被誤判
+    forM_ ["greet", "Color", "Red", "cfgName"] $ \o ->
+      assertBool ("hand-written decl wrongly flagged generated: " <> o)
+        (T.pack o `elem` handOccs)
+    -- ref 側:指向產生碼宣告的引用被標出,指向手寫名字的沒有
+    let genTargets = nubOrd (sort [ qnOcc t | (_, _, t, _, True, _, _) <- refs ])
+    assertBool ("expected refs to the deriving dictionaries, got: " <> show genTargets)
+      (not (null genTargets))
+    forM_ genTargets $ \o ->
+      assertBool ("unexpected generated ref target: " <> show o)
+        (o `elem` [T.pack "$fEqColor", T.pack "$fShowColor"])
+    assertBool "refs to greet must not be flagged as generated targets"
+      (not (any (\(_, _, t, _, tg, _, _) ->
+                   qnOcc t == T.pack "greet" && tg) refs))
+    -- 目標 module 不在索引內(base / text 等外部套件)→ 旗標恆 False
+    let internal = [mn "Demo.Core", mn "Demo.App"]
+    assertBool "external ref targets must never be flagged generated"
+      (not (any (\(_, _, t, _, tg, _, _) ->
+                   qnModule t `notElem` internal && tg) refs))
 
 -- extraction/F004 T2: 前置 2——CLI --hiedb / --db 補接(缺陷修補)
 testHiedbDbFlags :: TestTree
@@ -2155,8 +2247,8 @@ testReadIndexFacts = testCase "test_read_index_facts" $
     take (length notes) warns @?= notes
     let decls = mapMaybe declOf facts
         refs  = mapMaybe refOf facts
-        occOf (q, _, _, _) = qnOcc q
-        nsOf (q, _, _, _) = qnSpace q
+        occOf (q, _, _, _, _) = qnOcc q
+        nsOf (q, _, _, _, _) = qnSpace q
     assertBool "expected decl facts" (not (null decls))
     assertBool "expected ref facts" (not (null refs))
     -- 驗收標準 2:四種 namespace 齊備
@@ -2167,9 +2259,9 @@ testReadIndexFacts = testCase "test_read_index_facts" $
         (any (\d -> occOf d == T.pack o && nsOf d == ns) decls)
     -- 驗收標準 4:每筆事實的檔案都對得回 pmSources
     let paths = Set.fromList (map sfPath (pmSources pm))
-    forM_ decls $ \(_, _, fp, _) ->
+    forM_ decls $ \(_, _, _, fp, _) ->
       assertBool ("fdFile not in pmSources: " <> fp) (Set.member fp paths)
-    forM_ refs $ \(_, _, _, _, fp, _) ->
+    forM_ refs $ \(_, _, _, _, _, fp, _) ->
       assertBool ("frFile not in pmSources: " <> fp) (Set.member fp paths)
     -- 產生的事實一律不含 FactModule / FactImport / FactInstance(規則 2 / C4)
     length (filter (\f -> declOf f == Nothing && refOf f == Nothing) facts) @?= 0
@@ -2182,7 +2274,7 @@ testReadIndexFacts = testCase "test_read_index_facts" $
     assertBool ("extra warning must name the module: " <> show extra)
       (any (hasText "Demo.Core" . ewMessage) extra)
     assertBool "Demo.Core decls must be gone"
-      (not (any (\(_, _, fp, _) -> "Core.hs" `isInfixOf` fp)
+      (not (any (\(_, _, _, fp, _) -> "Core.hs" `isInfixOf` fp)
               (mapMaybe declOf facts')))
 
 -- extraction/F004 T8(需 hiedb):兩後端並存、事實合流,以及 ensureIndex
@@ -2231,7 +2323,7 @@ testHiedbFactsAcceptance = testCase "test_hiedb_facts_acceptance" $
     -- (a) 驗收標準 1:跨 module 呼叫的 frFromDecl 指向正確的頂層宣告
     let target = qn "Demo.Core" "greet" ValueNs
         inRun  = Just (qn "Demo.App" "run" ValueNs)
-        hits = [ (d, fp) | (m, d, t, _, fp, _) <- refs
+        hits = [ (d, fp) | (m, d, t, _, _, fp, _) <- refs
                , m == mn "Demo.App", t == target ]
     assertBool "expected a cross-module ref to Demo.Core.greet" (not (null hits))
     -- 全部都掛在 Demo.App 的來源檔上(fdFile / frFile 取 sfPath 原文)
@@ -2255,7 +2347,7 @@ testHiedbFactsAcceptance = testCase "test_hiedb_facts_acceptance" $
           , Just (occ, ns) <- [parseOcc rawOcc] ]
         factSet = Set.fromList
           [ (modText (qnModule t), qnOcc t, qnSpace t, ln, g)
-          | (_, _, t, g, _, ln) <- refs ]
+          | (_, _, t, g, _, _, ln) <- refs ]
     factSet @?= dbSet
     assertBool "fixture must carry at least one is_generated = 1 ref"
       (any (\(_, _, _, _, g) -> g) (Set.toList dbSet))
@@ -2293,7 +2385,7 @@ testHiedbFactsSelfcheck = testCase "test_hiedb_facts_selfcheck" $ do
       putStrLn ("[selfcheck/F004] hieFiles=" <> show (length (hieFiles hie))
         <> " decls=" <> show (length decls)
         <> " refs=" <> show (length refs)
-        <> " generated=" <> show (length [ () | (_, _, _, g, _, _) <- refs, g ])
+        <> " generated=" <> show (length [ () | (_, _, _, g, _, _, _) <- refs, g ])
         <> " warnings=" <> show (length (erWarnings res)))
       forM_ (erWarnings res) $ \w ->
         putStrLn ("[selfcheck/F004] warn " <> T.unpack (ewSource w)
@@ -2425,7 +2517,7 @@ gateFixtureFacts =
   , FactModule "test/Main.hs" (mn "Main")
   , FactModule "src/Demo/Core.hs" (mn "Demo.Core")
   , FactImport (mn "Demo.Core") (mn "Data.Text") "src/Demo/Core.hs" 3
-  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl False "src/Demo/Core.hs" 20
   ]
 
 -- | 只在 pmSources 出現、不在事實流的 module(釘住 D2)。
@@ -2499,7 +2591,7 @@ testMintModuleNodes = testCase "test_mint_module_nodes" $ do
   let dup = gateFacts (metaFor ["src/A.hs"])
         [ FactModule "src/A.hs" (mn "A")
         , FactModule "src/A.hs" (mn "A")
-        , FactDecl (qn "A" "x" ValueNs) ValueDecl "src/A.hs" 4
+        , FactDecl (qn "A" "x" ValueNs) ValueDecl False "src/A.hs" 4
         ]
   map gnId (moduleNodesOf (mintNodes dup)) @?= [nid "A"]
   -- moduleFiles:同名組有兩個相異檔
@@ -2623,7 +2715,7 @@ assembleFacts =
   , FactImport (mn "Demo.Core") (mn "Data.Text") "src/Demo/Core.hs" 3
   , FactImport (mn "Main") (mn "Demo.Core") "app/Main.hs" 6
   , FactImport (mn "Main") (mn "Main") "app/Main.hs" 7
-  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl False "src/Demo/Core.hs" 20
   ]
 
 -- | T6 的手工 'ProjectMeta':涵蓋 'assembleFacts' 觸及的四個檔案
@@ -2833,6 +2925,7 @@ testRenderGraphSummary = testCase "test_render_graph_summary" $ do
 graphCoreF002Tests :: TestTree
 graphCoreF002Tests = testGroup "graph-core/F002 decl-nodes"
   [ testGateGeneratedFilter    -- T1
+  , testGateGeneratedDeclRule  -- G-E003 T3
   , testMintDeclIds            -- T2
   , testMintDeclNodes          -- T3
   , testContainsEdges          -- T4
@@ -2852,19 +2945,19 @@ gateRule3Facts =
   [ FactModule "src/Demo/Core.hs" (mn "Demo.Core")
   , FactModule "src/Ghost.hs" (mn "Ghost")
   , FactImport (mn "Ghost") (mn "Demo.Core") "src/Ghost.hs" 2
-  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
-  , FactDecl (qn "Demo.Core" "gone" ValueNs) ValueDecl "src/Absent.hs" 5
-  , FactDecl (qn "Demo.Core" "zero" ValueNs) ValueDecl "src/Demo/Core.hs" 0
-  , FactDecl (qn "Demo.Core" "neg" ValueNs) ValueDecl "src/Demo/Core.hs" (-1)
-  , FactDecl (qn "Demo.Core" "both" ValueNs) ValueDecl "src/Absent.hs" 0
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl False "src/Demo/Core.hs" 20
+  , FactDecl (qn "Demo.Core" "gone" ValueNs) ValueDecl False "src/Absent.hs" 5
+  , FactDecl (qn "Demo.Core" "zero" ValueNs) ValueDecl False "src/Demo/Core.hs" 0
+  , FactDecl (qn "Demo.Core" "neg" ValueNs) ValueDecl False "src/Demo/Core.hs" (-1)
+  , FactDecl (qn "Demo.Core" "both" ValueNs) ValueDecl False "src/Absent.hs" 0
   , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
-      False "src/Demo/Core.hs" 30
+      False False "src/Demo/Core.hs" 30
   , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
-      True "src/Demo/Core.hs" 31
+      True False "src/Demo/Core.hs" 31
   , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
-      False "src/Absent.hs" 32
+      False False "src/Absent.hs" 32
   , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
-      False "src/Demo/Core.hs" 0
+      False False "src/Demo/Core.hs" 0
   , FactInstance (qn "Demo.Core" "Renderable" TypeNs) (T.pack "Renderable Sprite")
       "src/Demo/Core.hs" 40
   , FactInstance (qn "Demo.Core" "Renderable" TypeNs) (T.pack "Renderable Ghost")
@@ -2883,9 +2976,9 @@ testGateGeneratedFilter = testCase "test_gate_generated_filter" $ do
     [ FactModule "src/Demo/Core.hs" (mn "Demo.Core")
     , FactModule "src/Ghost.hs" (mn "Ghost")
     , FactImport (mn "Ghost") (mn "Demo.Core") "src/Ghost.hs" 2
-    , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
+    , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl False "src/Demo/Core.hs" 20
     , FactRef (mn "Demo.Core") Nothing (qn "Demo.Core" "render" ValueNs)
-        False "src/Demo/Core.hs" 30
+        False False "src/Demo/Core.hs" 30
     , FactInstance (qn "Demo.Core" "Renderable" TypeNs) (T.pack "Renderable Sprite")
         "src/Demo/Core.hs" 40
     ]
@@ -2897,20 +2990,69 @@ testGateGeneratedFilter = testCase "test_gate_generated_filter" $ do
   -- (c) 條件:檔案與行號都合法,只因 frGenerated = True 被濾除
   let gGen = gateFacts (metaFor ["src/A.hs"])
         [ FactModule "src/A.hs" (mn "A")
-        , FactRef (mn "A") Nothing (qn "A" "x" ValueNs) True "src/A.hs" 9
+        , FactRef (mn "A") Nothing (qn "A" "x" ValueNs) True False "src/A.hs" 9
         ]
   map isModuleLayerFact (gfFacts gGen) @?= [True]
   gfFiltered gGen @?= 1
   -- 一筆同時違反 (a) 與 (b) 只算一次
   let gBoth = gateFacts (metaFor ["src/A.hs"])
         [ FactModule "src/A.hs" (mn "A")
-        , FactDecl (qn "A" "both" ValueNs) ValueDecl "src/Absent.hs" 0
+        , FactDecl (qn "A" "both" ValueNs) ValueDecl False "src/Absent.hs" 0
         ]
   gfFiltered gBoth @?= 1
   -- 空 pmSources:decl 層全滅、module 層全存
   let gEmpty = gateFacts emptyMeta gateRule3Facts
   gfFacts gEmpty @?= filter isModuleLayerFact gateRule3Facts
   gfFiltered gEmpty @?= 12
+
+-- G-E003 T3: 組裝規則 3 新增的 (d)(e) 兩條件
+--
+-- (d) @FactDecl.fdGenerated@、(e) @FactRef.frTargetGenerated@——兩者都在
+-- 「檔案在 pmSources、行號 > 0、frGenerated = False」的前提下獨立生效,
+-- 否則測到的可能是 (a)/(b)/(c) 而不是新條件。
+testGateGeneratedDeclRule :: TestTree
+testGateGeneratedDeclRule = testCase "test_gate_generated_decl_rule" $ do
+  let meta = metaFor ["src/A.hs"]
+      modFact = FactModule "src/A.hs" (mn "A")
+      -- 手寫宣告與 deriving 產生的字典,其餘欄位完全相同
+      handDecl = FactDecl (qn "A" "render" ValueNs) ValueDecl False "src/A.hs" 20
+      genDecl  = FactDecl (qn "A" "$fEqColor" ValueNs) ValueDecl True "src/A.hs" 20
+      -- 指向手寫宣告 / 指向產生碼宣告的兩筆引用,其餘欄位完全相同
+      handRef  = FactRef (mn "A") Nothing (qn "A" "render" ValueNs)
+                   False False "src/A.hs" 30
+      genRef   = FactRef (mn "A") Nothing (qn "A" "$fEqColor" ValueNs)
+                   False True "src/A.hs" 30
+  -- (d):只差 fdGenerated,產生碼那筆被濾除
+  let gD = gateFacts meta [modFact, handDecl, genDecl]
+  gfFacts gD    @?= [modFact, handDecl]
+  gfFiltered gD @?= 1
+  -- (e):只差 frTargetGenerated,指向產生碼的那筆被濾除
+  let gE = gateFacts meta [modFact, handRef, genRef]
+  gfFacts gE    @?= [modFact, handRef]
+  gfFiltered gE @?= 1
+  -- 同時命中 (c) 與 (e) 的一筆只計一次
+  let gCE = gateFacts meta
+        [ modFact
+        , FactRef (mn "A") Nothing (qn "A" "$fEqColor" ValueNs)
+            True True "src/A.hs" 30
+        ]
+  gfFacts gCE    @?= [modFact]
+  gfFiltered gCE @?= 1
+  -- 同時命中 (a)(b)(d) 的一筆也只計一次
+  let gABD = gateFacts meta
+        [ modFact
+        , FactDecl (qn "A" "$fEqColor" ValueNs) ValueDecl True "src/Absent.hs" 0
+        ]
+  gfFiltered gABD @?= 1
+  -- module 層不受 (d)(e) 影響:gfInternal 與節點來源樣本不縮水(假設 A1)
+  let gMod = gateFacts meta
+        [ modFact
+        , FactImport (mn "A") (mn "B") "src/A.hs" 2
+        , genDecl, genRef
+        ]
+  map isModuleLayerFact (gfFacts gMod) @?= [True, True]
+  Set.toList (gfInternal gMod)         @?= [mn "A"]
+  gfFiltered gMod                      @?= 2
 
 -- F002 T2: 鑄造規則表其餘兩列 + 兩個非契約面工具
 testMintDeclIds :: TestTree
@@ -2955,12 +3097,12 @@ declFixtureFacts =
   [ FactModule "src/Demo/Core.hs" (mn "Demo.Core")
   , FactModule "app/Main.hs" (mn "Main")
   , FactModule "test/Main.hs" (mn "Main")
-  , FactDecl (qn "Demo.Core" "Foo" TypeNs) DataDecl "src/Demo/Core.hs" 10
-  , FactDecl (qn "Demo.Core" "Foo" DataConNs) DataDecl "src/Demo/Core.hs" 10
-  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
-  , FactDecl (qn "Main" "main" ValueNs) ValueDecl "app/Main.hs" 3
-  , FactDecl (qn "Main" "main" ValueNs) ValueDecl "test/Main.hs" 4
-  , FactDecl (qn "Ext.Pkg" "helper" ValueNs) ValueDecl "src/Ext.hs" 7
+  , FactDecl (qn "Demo.Core" "Foo" TypeNs) DataDecl False "src/Demo/Core.hs" 10
+  , FactDecl (qn "Demo.Core" "Foo" DataConNs) DataDecl False "src/Demo/Core.hs" 10
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl False "src/Demo/Core.hs" 20
+  , FactDecl (qn "Main" "main" ValueNs) ValueDecl False "app/Main.hs" 3
+  , FactDecl (qn "Main" "main" ValueNs) ValueDecl False "test/Main.hs" 4
+  , FactDecl (qn "Ext.Pkg" "helper" ValueNs) ValueDecl False "src/Ext.hs" 7
   , FactInstance (qn "Demo.Class" "Renderable" TypeNs) (T.pack "Renderable Sprite")
       "src/Demo/Core.hs" 40
   ]
@@ -3019,8 +3161,8 @@ testMintDeclNodes = testCase "test_mint_decl_nodes" $ do
   -- 合併保留 (gnFile, gnLine) 最小者 → 對事實流重排序不敏感(規則 7)
   let dupFacts =
         [ FactModule "src/A.hs" (mn "A")
-        , FactDecl (qn "A" "name" FieldNs) ValueDecl "src/A.hs" 9
-        , FactDecl (qn "A" "name" FieldNs) ValueDecl "src/A.hs" 4
+        , FactDecl (qn "A" "name" FieldNs) ValueDecl False "src/A.hs" 9
+        , FactDecl (qn "A" "name" FieldNs) ValueDecl False "src/A.hs" 4
         ]
       dupNodes fs = filter isDeclNode (mintNodes (gateFacts (metaFor ["src/A.hs"]) fs))
   map gnId (dupNodes dupFacts) @?= [nid "A.name"]
@@ -3079,9 +3221,9 @@ testContainsEdges = testCase "test_contains_edges" $ do
   -- 每個相異來源一則警告(帶筆數),不逐筆刷屏
   let (e3, st3, ws3) = edgesWith (metaFor ["src/E.hs"])
         [ FactModule "src/A.hs" (mn "A")
-        , FactDecl (qn "Ext" "a" ValueNs) ValueDecl "src/E.hs" 1
-        , FactDecl (qn "Ext" "b" ValueNs) ValueDecl "src/E.hs" 2
-        , FactDecl (qn "Ext" "c" ValueNs) ValueDecl "src/E.hs" 3
+        , FactDecl (qn "Ext" "a" ValueNs) ValueDecl False "src/E.hs" 1
+        , FactDecl (qn "Ext" "b" ValueNs) ValueDecl False "src/E.hs" 2
+        , FactDecl (qn "Ext" "c" ValueNs) ValueDecl False "src/E.hs" 3
         ]
   e3 @?= []
   esDroppedExternal st3 @?= 0
@@ -3094,8 +3236,8 @@ testContainsEdges = testCase "test_contains_edges" $ do
   -- 規則 5:重複 FactDecl 合併為一條、geLine 取最小、計入 esDeduped
   let (e2, st2, ws2) = edgesWith (metaFor ["src/A.hs"])
         [ FactModule "src/A.hs" (mn "A")
-        , FactDecl (qn "A" "x" ValueNs) ValueDecl "src/A.hs" 40
-        , FactDecl (qn "A" "x" ValueNs) ValueDecl "src/A.hs" 12
+        , FactDecl (qn "A" "x" ValueNs) ValueDecl False "src/A.hs" 40
+        , FactDecl (qn "A" "x" ValueNs) ValueDecl False "src/A.hs" 12
         ]
   map edgeTriple e2 @?= [(nid "A", RContains, nid "A.x")]
   map geLine e2 @?= [Just 12]
@@ -3115,7 +3257,7 @@ moduleOnlyFacts :: [Fact]
 moduleOnlyFacts = declFixtureFacts <>
   [ FactImport (mn "Main") (mn "Demo.Core") "app/Main.hs" 2
   , FactImport (mn "Main") (mn "Data.Text") "app/Main.hs" 3
-  , FactDecl (qn "Demo.Core" "generated" ValueNs) ValueDecl "src/Demo/Core.hs" 0
+  , FactDecl (qn "Demo.Core" "generated" ValueNs) ValueDecl False "src/Demo/Core.hs" 0
   ]
 
 -- F002 T5: 組裝規則 6 與驗收標準 3 / 5
@@ -3193,7 +3335,7 @@ testDeclGraphDeterministic = testGroup "test_decl_graph_deterministic"
           pmPaths  = map snd modSpecs <> ["src/Extra.hs"]
           pm       = metaFor pmPaths
       declSpecs <- forAll (Gen.list (Range.linear 0 10) (genDeclSpec modSpecs))
-      let declFacts = [FactDecl q ValueDecl f ln | (q, f, ln) <- declSpecs]
+      let declFacts = [FactDecl q ValueDecl False f ln | (q, f, ln) <- declSpecs]
           facts     = modFacts <> declFacts
           passes (_, f, ln) = f `elem` pmPaths && ln > 0
           filesMap  = Map.fromListWith Set.union
@@ -3261,7 +3403,7 @@ graphCoreF003Tests = testGroup "graph-core/F003 decl-edges"
 -- | 手工 @FactRef@ 捷徑。@frGenerated@ 恆 'False':批次澄清 C4 已在
 -- fact-gate 濾除產生碼事實,本 feature 不重複過濾。
 mkRef :: String -> Maybe QualName -> QualName -> FilePath -> Int -> Fact
-mkRef from mdecl tgt file ln = FactRef (mn from) mdecl tgt False file ln
+mkRef from mdecl tgt file ln = FactRef (mn from) mdecl tgt False False file ln
 
 -- | 只取 decl 層依賴邊(濾掉 F001 的 'RImports' 與 F002 的 'RContains')。
 depEdges :: [GraphEdge] -> [GraphEdge]
@@ -3282,12 +3424,12 @@ testDeclNodeIndex = testCase "test_decl_node_index" $ do
         [ FactModule "src/Demo/Core.hs" (mn "Demo.Core")
         , FactModule "app/Main.hs" (mn "Main")
         , FactModule "test/Main.hs" (mn "Main")
-        , FactDecl (qn "Demo.Core" "Foo" TypeNs) DataDecl "src/Demo/Core.hs" 10
-        , FactDecl (qn "Demo.Core" "Foo" DataConNs) DataDecl "src/Demo/Core.hs" 10
-        , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
-        , FactDecl (qn "Main" "main" ValueNs) ValueDecl "app/Main.hs" 3
-        , FactDecl (qn "Main" "main" ValueNs) ValueDecl "test/Main.hs" 4
-        , FactDecl (qn "Ext.Pkg" "helper" ValueNs) ValueDecl "src/Ext.hs" 7
+        , FactDecl (qn "Demo.Core" "Foo" TypeNs) DataDecl False "src/Demo/Core.hs" 10
+        , FactDecl (qn "Demo.Core" "Foo" DataConNs) DataDecl False "src/Demo/Core.hs" 10
+        , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl False "src/Demo/Core.hs" 20
+        , FactDecl (qn "Main" "main" ValueNs) ValueDecl False "app/Main.hs" 3
+        , FactDecl (qn "Main" "main" ValueNs) ValueDecl False "test/Main.hs" 4
+        , FactDecl (qn "Ext.Pkg" "helper" ValueNs) ValueDecl False "src/Ext.hs" 7
         ]
       pm    = metaFor ["src/Demo/Core.hs", "app/Main.hs", "test/Main.hs", "src/Ext.hs"]
       gated = gateFacts pm facts
@@ -3333,11 +3475,11 @@ refFixtureFacts :: [Fact]
 refFixtureFacts =
   [ FactModule "src/Demo/Core.hs" (mn "Demo.Core")
   , FactModule "src/Demo/App.hs" (mn "Demo.App")
-  , FactDecl (qn "Demo.Core" "Foo" TypeNs) DataDecl "src/Demo/Core.hs" 10
-  , FactDecl (qn "Demo.Core" "Foo" DataConNs) DataDecl "src/Demo/Core.hs" 10
-  , FactDecl (qn "Demo.Core" "name" FieldNs) ValueDecl "src/Demo/Core.hs" 11
-  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
-  , FactDecl (qn "Demo.App" "run" ValueNs) ValueDecl "src/Demo/App.hs" 5
+  , FactDecl (qn "Demo.Core" "Foo" TypeNs) DataDecl False "src/Demo/Core.hs" 10
+  , FactDecl (qn "Demo.Core" "Foo" DataConNs) DataDecl False "src/Demo/Core.hs" 10
+  , FactDecl (qn "Demo.Core" "name" FieldNs) ValueDecl False "src/Demo/Core.hs" 11
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl False "src/Demo/Core.hs" 20
+  , FactDecl (qn "Demo.App" "run" ValueNs) ValueDecl False "src/Demo/App.hs" 5
   , mkRef "Demo.App" refFixtureRunQ (qn "Demo.Core" "Foo" TypeNs) "src/Demo/App.hs" 6
   , mkRef "Demo.App" refFixtureRunQ (qn "Demo.Core" "render" ValueNs) "src/Demo/App.hs" 7
   , mkRef "Demo.App" refFixtureRunQ (qn "Demo.Core" "Foo" DataConNs) "src/Demo/App.hs" 8
@@ -3404,10 +3546,10 @@ moduleSourcedFacts =
   [ FactModule "app/Main.hs" (mn "Main")
   , FactModule "test/Main.hs" (mn "Main")
   , FactModule "src/Demo/Core.hs" (mn "Demo.Core")
-  , FactDecl (qn "Demo.Core" "Foo" TypeNs) DataDecl "src/Demo/Core.hs" 10
-  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
-  , FactDecl (qn "Main" "main" ValueNs) ValueDecl "app/Main.hs" 3
-  , FactDecl (qn "Main" "main" ValueNs) ValueDecl "test/Main.hs" 4
+  , FactDecl (qn "Demo.Core" "Foo" TypeNs) DataDecl False "src/Demo/Core.hs" 10
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl False "src/Demo/Core.hs" 20
+  , FactDecl (qn "Main" "main" ValueNs) ValueDecl False "app/Main.hs" 3
+  , FactDecl (qn "Main" "main" ValueNs) ValueDecl False "test/Main.hs" 4
   , mkRef "Main" Nothing (qn "Demo.Core" "render" ValueNs) "app/Main.hs" 12
   , mkRef "Main" Nothing (qn "Demo.Core" "Foo" TypeNs) "test/Main.hs" 13
   , mkRef "Main" (Just (qn "Main" "main" ValueNs))
@@ -3437,7 +3579,7 @@ testRefModuleSourced = testCase "test_ref_module_sourced" $ do
         [ FactModule "src/A1.hs" (mn "A")
         , FactModule "src/A2.hs" (mn "A")
         , FactModule "src/B.hs" (mn "B")
-        , FactDecl (qn "B" "x" ValueNs) ValueDecl "src/B.hs" 2
+        , FactDecl (qn "B" "x" ValueNs) ValueDecl False "src/B.hs" 2
         , mkRef "A" Nothing (qn "B" "x" ValueNs) "src/Other.hs" 4
         ]
   depEdges e2 @?= []
@@ -3455,7 +3597,7 @@ implementsFacts :: [Fact]
 implementsFacts =
   [ FactModule "src/Demo/Class.hs" (mn "Demo.Class")
   , FactModule "src/Demo/Impl.hs" (mn "Demo.Impl")
-  , FactDecl (qn "Demo.Class" "Renderable" TypeNs) ClassDecl "src/Demo/Class.hs" 8
+  , FactDecl (qn "Demo.Class" "Renderable" TypeNs) ClassDecl False "src/Demo/Class.hs" 8
   , FactInstance (qn "Demo.Class" "Renderable" TypeNs) (T.pack "Renderable Sprite")
       "src/Demo/Impl.hs" 40
   ]
@@ -3511,7 +3653,7 @@ testImplementsEdges = testCase "test_implements_edges" $ do
   -- 假設 A4:來源端解析失敗時不另發警告(F002 的 RContains 支已發過一則)
   let (e4, _, ws4) = edgesWith (metaFor ["src/Demo/Class.hs", "src/Orphan.hs"])
         [ FactModule "src/Demo/Class.hs" (mn "Demo.Class")
-        , FactDecl (qn "Demo.Class" "Renderable" TypeNs) ClassDecl "src/Demo/Class.hs" 8
+        , FactDecl (qn "Demo.Class" "Renderable" TypeNs) ClassDecl False "src/Demo/Class.hs" 8
         , FactInstance (qn "Demo.Class" "Renderable" TypeNs) (T.pack "Renderable Sprite")
             "src/Orphan.hs" 5
         ]
@@ -3527,9 +3669,9 @@ refWarnFacts =
   , FactModule "src/B.hs" (mn "B")
   , FactModule "app/Main.hs" (mn "Main")
   , FactModule "test/Main.hs" (mn "Main")
-  , FactDecl (qn "A" "f" ValueNs) ValueDecl "src/A.hs" 1
-  , FactDecl (qn "Main" "main" ValueNs) ValueDecl "app/Main.hs" 3
-  , FactDecl (qn "Main" "main" ValueNs) ValueDecl "test/Main.hs" 4
+  , FactDecl (qn "A" "f" ValueNs) ValueDecl False "src/A.hs" 1
+  , FactDecl (qn "Main" "main" ValueNs) ValueDecl False "app/Main.hs" 3
+  , FactDecl (qn "Main" "main" ValueNs) ValueDecl False "test/Main.hs" 4
   ]
   <> [mkRef "A" Nothing (qn "B" "g" ValueNs) "src/A.hs" ln | ln <- [10 .. 14]]
   <> [ mkRef "A" Nothing (qn "Main" "main" ValueNs) "src/A.hs" 20
@@ -3579,9 +3721,9 @@ dedupeFacts =
   , FactModule "src/Demo/App.hs" (mn "Demo.App")
   , FactImport (mn "Demo.App") (mn "Demo.Core") "src/Demo/App.hs" 2
   , FactImport (mn "Demo.App") (mn "Data.Text") "src/Demo/App.hs" 3
-  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl "src/Demo/Core.hs" 20
-  , FactDecl (qn "Demo.App" "run" ValueNs) ValueDecl "src/Demo/App.hs" 5
-  , FactDecl (qn "Demo.Core" "generated" ValueNs) ValueDecl "src/Demo/Core.hs" 0
+  , FactDecl (qn "Demo.Core" "render" ValueNs) ValueDecl False "src/Demo/Core.hs" 20
+  , FactDecl (qn "Demo.App" "run" ValueNs) ValueDecl False "src/Demo/App.hs" 5
+  , FactDecl (qn "Demo.Core" "generated" ValueNs) ValueDecl False "src/Demo/Core.hs" 0
   ]
   <> [ mkRef "Demo.App" refFixtureRunQ (qn "Demo.Core" "render" ValueNs)
          "src/Demo/App.hs" ln
@@ -3614,7 +3756,7 @@ testDeclEdgeDedupeSelfloop = testCase "test_decl_edge_dedupe_selfloop" $ do
   -- 去重鍵含 relation:同一對端點的 RCalls 與 RContains 不被誤併
   let (e2, st2, ws2) = edgesWith (metaFor ["src/A.hs"])
         [ FactModule "src/A.hs" (mn "A")
-        , FactDecl (qn "A" "x" ValueNs) ValueDecl "src/A.hs" 5
+        , FactDecl (qn "A" "x" ValueNs) ValueDecl False "src/A.hs" 5
         , mkRef "A" Nothing (qn "A" "x" ValueNs) "src/A.hs" 9
         ]
   map edgeTriple e2 @?= [(nid "A", RCalls, nid "A.x"), (nid "A", RContains, nid "A.x")]
@@ -3624,7 +3766,7 @@ testDeclEdgeDedupeSelfloop = testCase "test_decl_edge_dedupe_selfloop" $ do
   -- 純自環事實流:不產邊、不計統計、不發警告
   let (e3, st3, ws3) = edgesWith (metaFor ["src/A.hs"])
         [ FactModule "src/A.hs" (mn "A")
-        , FactDecl (qn "A" "loop" ValueNs) ValueDecl "src/A.hs" 5
+        , FactDecl (qn "A" "loop" ValueNs) ValueDecl False "src/A.hs" 5
         , mkRef "A" (Just (qn "A" "loop" ValueNs)) (qn "A" "loop" ValueNs) "src/A.hs" 6
         , mkRef "A" (Just (qn "A" "loop" ValueNs)) (qn "A" "loop" ValueNs) "src/A.hs" 7
         ]
@@ -3666,8 +3808,8 @@ testDeclEdgesDeterministic = testGroup "test_decl_edges_deterministic"
       refSpecs <- forAll (Gen.list (Range.linear 0 20) (genRefSpec modSpecs declQs))
       impPairs <- forAll (Gen.list (Range.linear 0 6)
                     (genImportPair intMods [ModuleName (T.pack "zimp")]))
-      let declFacts = [FactDecl q ValueDecl (fileOf (qnModule q)) 7 | q <- declQs]
-          refFacts  = [FactRef from mdecl tgt False file ln
+      let declFacts = [FactDecl q ValueDecl False (fileOf (qnModule q)) 7 | q <- declQs]
+          refFacts  = [FactRef from mdecl tgt False False file ln
                       | (from, mdecl, tgt, file, ln) <- refSpecs]
           impFacts  = [FactImport from to (fileOf from) ln | (from, to, ln) <- impPairs]
           facts     = modFacts <> declFacts <> refFacts <> impFacts
@@ -5309,3 +5451,76 @@ testRunCommandDispatch = testCase "test_run_command_dispatch" $
     (_, unknownCode) <- expectParseFailure ["nope"]
     unknownCode @?= ExitFailure 1
 
+
+--------------------------------------------------------------------------------
+-- G-E003 產生碼過濾的對稱化(跨 extraction + graph-core)
+--------------------------------------------------------------------------------
+
+globalE003Tests :: TestTree
+globalE003Tests = testGroup "global/G-E003 generated-decl-filter"
+  [ testGeneratedFilterSelfcheck   -- T6
+  ]
+
+-- | G-E003 T6:對 knot-hs 自身唯讀實跑,逐一釘住四個量化目標。
+--
+-- 需要 hiedb 與自身的 @.hie@;缺任一就印明原因跳過(ADR-002 的降級原則,
+-- 比照 'testHiedbFactsSelfcheck')。
+testGeneratedFilterSelfcheck :: TestTree
+testGeneratedFilterSelfcheck = testCase "test_generated_filter_selfcheck" $ do
+  pm <- loadProjectMeta (defOpts ".")
+  case pmHie pm of
+    Just hie | not (null (hieFiles hie)) -> do
+      knotBefore <- doesDirectoryExist ".knot"
+      tmp <- getTemporaryDirectory
+      let db = tmp </> "knot-hs-ge003-self" </> "self.sqlite"
+      removePathForcibly (takeDirectory db)
+      res <- extract ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just db }) pm
+      if erLevel res /= DeclLevel
+        then putStrLn
+          "[skip] test_generated_filter_selfcheck: hiedb unavailable, no decl layer"
+        else do
+          let g = buildGraph defBuildOpts pm res
+              dollarNodes = [ t | NodeId t <- map gnId (cgNodes g)
+                            , T.pack "$" `T.isInfixOf` t ]
+              dollarEdges = [ ()
+                            | e <- cgEdges g
+                            , let NodeId s = geSource e
+                            , let NodeId t = geTarget e
+                            , T.pack "$" `T.isInfixOf` s
+                                || T.pack "$" `T.isInfixOf` t ]
+              unresolved  = [ gwMessage w
+                            | w <- cgWarnings g
+                            , hasText "unresolved reference target $" (gwMessage w) ]
+          -- 目標 1:deriving 字典不再成為節點
+          assertBool ("generated dictionary nodes leaked into the graph: "
+                       <> show (take 5 dollarNodes)) (null dollarNodes)
+          [] @?= dollarEdges
+          -- 目標 2:同源的 unresolved 警告歸零
+          assertBool ("unresolved $-target warnings remain: " <> show (take 5 unresolved))
+            (null unresolved)
+          -- 目標 4:決定性——同一份事實流兩次組裝完全相同
+          buildGraph defBuildOpts pm res @?= g
+          -- 目標 3:兩種 hiedb 索引建法(走目錄 vs 逐檔清單)產出的圖相同。
+          -- 走目錄會多收 8 個 deriving 字典的 defs 列(逐檔清單收不到),
+          -- 過濾對稱化之後那 8 筆兩邊都被濾掉,節點與邊必須逐一相等。
+          mExe <- findExecutable "hiedb"
+          forM_ mExe $ \exe -> do
+            let dirDb = tmp </> "knot-hs-ge003-self" </> "dir.sqlite"
+            (code, _, _) <- readProcessWithExitCode exe
+              ["-D", dirDb, "--src-base-dir", ".", "index", hieDir hie] ""
+            code @?= ExitSuccess
+            resDir <- extract
+              ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just dirDb }) pm
+            let gDir = buildGraph defBuildOpts pm resDir
+            cgNodes gDir @?= cgNodes g
+            cgEdges gDir @?= cgEdges g
+          -- 唯讀驗收:目標專案內不得新建 .knot/
+          doesDirectoryExist ".knot" >>= (@?= knotBefore)
+          putStrLn ("[selfcheck/G-E003] nodes=" <> show (length (cgNodes g))
+            <> " edges=" <> show (length (cgEdges g))
+            <> " filteredGenerated=" <> show (gsFilteredGenerated (cgStats g))
+            <> " warnings=" <> show (length (cgWarnings g)))
+      removePathForcibly (takeDirectory db)
+    _ -> putStrLn
+      "[skip] test_generated_filter_selfcheck: knot-hs itself has no .hie files \
+      \(build with -fwrite-ide-info -hiedir .hie to enable this check)"

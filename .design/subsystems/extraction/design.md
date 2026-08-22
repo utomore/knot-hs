@@ -5,7 +5,7 @@ title: extraction
 description: 事實抽取子系統:統一抽取契約與 import-scan、hiedb 雙後端
 status: active
 created: 2026-08-20
-updated: 2026-08-21
+updated: 2026-08-22
 parent: system
 related-adr: [ADR-002]
 code-paths: [src/Knot/Extract, src/Knot/Extract.hs]
@@ -82,12 +82,14 @@ data Fact
       , fiFile :: FilePath, fiLine :: Int }
   | FactDecl                            -- 頂層宣告
       { fdName :: QualName, fdKind :: DeclKind
+      , fdGenerated :: Bool             -- 宣告本身是產生碼(G-E003)
       , fdFile :: FilePath, fdLine :: Int }
   | FactRef                             -- 名稱引用(calls / uses 邊的原料)
       { frFromModule :: ModuleName
       , frFromDecl   :: Maybe QualName  -- 引用發生在哪個頂層宣告內,由後端解析
       , frTarget     :: QualName
-      , frGenerated  :: Bool            -- deriving / TH 產生碼(hiedb refs.is_generated)
+      , frGenerated  :: Bool            -- 引用**站點**是產生碼(hiedb refs.is_generated)
+      , frTargetGenerated :: Bool       -- 引用**目標**是產生碼宣告(G-E003)
       , frFile :: FilePath, frLine :: Int }
   | FactInstance                        -- implements 邊的兩端
       { fiClass    :: QualName          -- class(TypeNs)
@@ -129,7 +131,17 @@ data ExtractWarning = ExtractWarning   -- (批次澄清裁定,比照 MetaWarning
 
    **候選集是該檔的全部 `decls` 列,不得以 `is_root` 過濾**——這是個會靜默失敗的陷阱:hiedb 的 `isRoot` 只對 `ValBind InstanceBind` 與 `Decl` 為真,**一般頂層函式繫結是 `is_root = 0`**(2026-08-21 實測 knot-hs 自身索引:`v:` 前綴 108 筆全部 `is_root = False`,含 `buildGraph` / `extract` / `writeCodegraph`;只有 `c:` 95 筆與 `t:` 50 筆為 True)。帶著該過濾,「引用寫在哪個函式裡」會**永遠**解析不到而 `calls` 邊全空,但查詢本身不會報錯。安全性由 hiedb 上游的 `nameModule_maybe` 條件保證——局部繫結本來就不會進 `decls`
 
-4a. **產生碼旗標不由 extraction 判斷**:`FactRef.frGenerated` 原樣轉載 hiedb 的 `refs.is_generated`(2026-08-21 實測本專案 672/4740 = 14% 為 deriving 產生)。extraction **不過濾**、不詮釋;要不要丟棄是 graph-core 的決定(其 `GraphStats.gsFilteredGenerated` 因此有事實可依,不必靠「異常 span」啟發式)。import-scan 後端不產 `FactRef`,不受影響
+4a. **產生碼只標註、不過濾**(G-E003 起涵蓋三個面):extraction 標註產生碼的三個面,一律**不過濾**、不詮釋;要不要丟棄是 graph-core 規則 3 的決定(其 `GraphStats.gsFilteredGenerated` 因此有事實可依,不必靠「異常 span」啟發式)。import-scan 後端不產 `FactDecl` / `FactRef`,不受影響。
+
+   | 欄位 | 標的 | 判準 |
+   |---|---|---|
+   | `FactRef.frGenerated` | 引用**站點** | 原樣轉載 hiedb `refs.is_generated`(2026-08-21 實測本專案 672/4740 = 14% 為 deriving 產生) |
+   | `FactDecl.fdGenerated` | 宣告**本身** | 該名字在其 module 的 `decls` 表**沒有列** |
+   | `FactRef.frTargetGenerated` | 引用**目標** | 同上,只是查的是**目標** module 的 `decls`;目標 module 不在索引內(外部套件)或對映不唯一時恆 `False` |
+
+   後兩者的判準是 hiedb 兩張表的**結構事實**,不是 `$f` 前綴的名字啟發式:上游 `HieDb/Utils.hs` 的 `goDec` 只在遇到 `Decl` / `ValBind` context 時建 `decls` 列,而 `defs` 額外收編譯器產生的定義點,故「在 `defs` 不在 `decls`」⇔「沒有人寫過那一行」。2026-08-22 實測 knot-hs 自身索引:`defs \ decls` 為 106 筆且 106/106 全是 deriving 字典,2834 筆真名零誤傷;ref 側同一判準命中 254 筆,同樣零誤傷。
+
+   **降級**(規則 7):`decls` 讀不到或整張表為空時,兩個新旗標一律 `False` 並發一則警告——退回 G-E003 前的行為。**絕不因為查不到就把全部宣告當成產生碼**,那會一次清空整個 decl 層
 5. **相容性探測**:hiedb-driver 需能區分並回報「執行檔不存在」「索引失敗/`.hie` 版本不合」兩類不可用(探測手段屬 Level 3 自主權);extraction 是全系統唯一允許讀 `.hie` 內容的子系統
 6. **索引快取**:預設 `<root>/.knot/hiedb.sqlite`(目標專案內**唯一允許新建**的路徑,`dbPath` 可改道,root 取自 `ExtractOptions.rootDir`);索引重用交給 `hiedb index` 自身的增量機制。**`dbPath` 為相對路徑時以 `rootDir` 為錨點**,與 project-meta 的 `hieDirOverride` 同語意——同一支 CLI 的兩個路徑覆寫旗標不應有兩套規則;要寫到專案外用絕對路徑(唯讀驗收本來就會給絕對路徑)
 7. **best-effort**:單檔解析失敗、單表查詢失敗 → 警告 + 跳過;整個後端失敗 → 降級 + 報告,不中斷
@@ -263,7 +275,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 - **階段**:階段二
 - **負責模組**:hiedb-facts
-- **實作的 Level 2 介面**:`Backend` 介面 hiedb 實例的執行面(`bRun`,經 `ensureIndex` 取得 `IndexHandle` 後呼叫 `readIndexFacts`);模組介面 `readIndexFacts`;產出 `FactDecl` / `FactRef`;落實抽取規則 4(fromDecl 由 SQL span 包含 join 解析、取最內層)與 4a(`frGenerated` 原樣轉載)
+- **實作的 Level 2 介面**:`Backend` 介面 hiedb 實例的執行面(`bRun`,經 `ensureIndex` 取得 `IndexHandle` 後呼叫 `readIndexFacts`);模組介面 `readIndexFacts`;產出 `FactDecl` / `FactRef`;落實抽取規則 4(fromDecl 由 SQL span 包含 join 解析、取最內層)與 4a(產生碼三個面的標註:`frGenerated` 原樣轉載,`fdGenerated` / `frTargetGenerated` 由「`defs` 有列、`decls` 無列」判定)
 - **資料流管線段落**:從 `IndexHandle` 進,查 mods/decls/defs/refs 表,出 decl 層事實流
-- **驗收標準**:對 fixture 專案(自建、含 GHC 9.14.1 產出的真實 `.hie`,兩 module、跨 module 呼叫)執行——跨 module 呼叫產出 `FactRef` 且 `frFromDecl` 指向正確的頂層宣告(多候選時為 span 最內層者);`qnSpace` 正確區分四種 namespace(`v:` / `c:` / `t:` / `f<父型別>:`);`frGenerated` 與 hiedb 的 `refs.is_generated` 逐筆相符;產出的 `QualName` 全部可對映回 `pmSources` 的 module(對映不到的印警告);連續兩次執行輸出相同
+- **驗收標準**:對 fixture 專案(自建、含 GHC 9.14.1 產出的真實 `.hie`,兩 module、跨 module 呼叫)執行——跨 module 呼叫產出 `FactRef` 且 `frFromDecl` 指向正確的頂層宣告(多候選時為 span 最內層者);`qnSpace` 正確區分四種 namespace(`v:` / `c:` / `t:` / `f<父型別>:`);`frGenerated` 與 hiedb 的 `refs.is_generated` 逐筆相符;deriving 產生的 `$f…` 字典其 `fdGenerated` 為 True 而手寫名字為 False,指向它們的 ref `frTargetGenerated` 為 True(G-E003);產出的 `QualName` 全部可對映回 `pmSources` 的 module(對映不到的印警告);連續兩次執行輸出相同
 - **明確不做**:**不產出 `FactInstance`**——2026-08-21 實測 hiedb 0.8 的 schema(mods / decls / defs / refs / exports / imports / typenames / typerefs)**沒有 instance 表**,`FactInstance` 需要的「class + instance 標頭」無直接來源,要靠 refs 到 class 名反推外圍 decl,不確定性遠高於本卡其餘部分。建構子保留但零邏輯(比照 graph-core 階段一對未來建構子的做法),`implements` 邊另開 feature 處理;不輸出型別資訊(`typerefs` / `typenames` 表本版不用,DTO 已預留擴充空間);不判斷產生碼要不要丟棄(只轉載旗標,取捨是 graph-core 的職責);不做圖層面的聚合

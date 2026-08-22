@@ -5,7 +5,7 @@ title: knot-hs
 description: 讀 Haskell 專案的 .hie 與 import 產出 dev-flow 相容程式碼知識圖
 status: active
 created: 2026-08-20
-updated: 2026-08-21
+updated: 2026-08-22
 subsystems: [project-meta, extraction, graph-core, export-query]
 ---
 
@@ -41,6 +41,24 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
   - `hiedb` 執行檔(選用):函式級抽取的後端,由使用者以同版 GHC 加 `--allow-newer=hie-compat:base` 安裝;不存在時函式級能力自動降級,module 級不受影響(→ ADR-002)
   - 下游消費者:dev-flow `arch-audit/scripts/scan-graph.mjs`(非依賴,是契約對象;→ ADR-003)
 - **發佈形式**:`cabal install` 產生獨立執行檔;文件明載版本鎖要求,執行時檢查 `.hie` header 的 GHC 版本並對不合者告警
+
+### 建置品質閘門(`-Wall` 零警告)
+
+全專案三個 component 都帶 `-Wall`,**零警告**是硬性要求。閘門與收尾的驗收指令**只有這一條**:
+
+```
+cabal clean && cabal build all --enable-tests --ghc-options=-Werror
+```
+
+**`cabal clean` 是必要條件,不是保險。** 少了它,兩種看似合理的做法都會回報「乾淨」而實際不然(2026-08-22 實測,G-E002):
+
+| 想走的捷徑 | 實際結果 | 為什麼是假答案 |
+|---|---|---|
+| `--ghc-options=-fforce-recomp` | `Up to date`、0 警告 | cabal 自己的 up-to-date 檢查先短路,GHC 根本沒被呼叫 |
+| `--ghc-options=-Werror`(不 clean) | exit 0、0 警告 | cabal 會重新呼叫 GHC,但 **GHC 的重編檢查不理會警告旗標的變動**,每個模組都被跳過、警告不重印 |
+| `touch` 原始檔 | 同上 | cabal 用內容雜湊而非 mtime 判斷 |
+
+根因是**增量建置不重印警告**:GHC 只在真的重編某個模組時才發警告。這讓警告能在無人察覺下長回來——`-Wall` 零警告曾在四次子系統閘門被宣告「達成」,而全量重建的真實數字是 9 筆(G-E002 的發現依據)。任何「本次零警告」的宣告,都必須出自上面那條 clean 指令。
 
 ## 系統對外介面(External I/O Contract)
 

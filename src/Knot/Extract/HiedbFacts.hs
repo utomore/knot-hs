@@ -5,14 +5,16 @@
 -- Level 2 契約:@.design/subsystems/extraction/design.md@「模組間公開介面」
 -- 的 'readIndexFacts',以及 @Backend@ hiedb 實例的__執行面__ @bRun@
 -- (經 'ensureIndex' 取得 'IndexHandle' 後呼叫 'readIndexFacts');落實抽取
--- 規則 4(fromDecl 由 span 包含 join 解析、取最內層)、4a(@frGenerated@
--- 原樣轉載)、7(best-effort:單查詢失敗 → 警告)、8(決定性)。
+-- 規則 4(fromDecl 由 span 包含 join 解析、取最內層)、4a(產生碼的三個面
+-- 只標註不過濾:@frGenerated@ 原樣轉載 @refs.is_generated@,@fdGenerated@ 與
+-- @frTargetGenerated@ 由 @defs@ \\ @decls@ 判定,見 'qDeclOccs')、
+-- 7(best-effort:單查詢失敗 → 警告)、8(決定性)。
 --
 -- __不做__:不產出 @FactInstance@(hiedb 0.8 的 schema 無 instance 表,已於
 -- 上游 @HieDb/Create.hs@ 的 @setupHieDb@ 複查屬實);不產出 @FactModule@ \/
 -- @FactImport@(規則 2:那是 import-scan 的唯一職責);不輸出型別資訊
--- (@typenames@ \/ @typerefs@ 本版不用);不判斷產生碼要不要丟棄(只轉載
--- 旗標,取捨是 graph-core 的職責);不做圖層面的聚合。
+-- (@typenames@ \/ @typerefs@ 本版不用);__不判斷產生碼要不要丟棄__
+-- (只標註旗標,取捨是 graph-core 規則 3 的職責);不做圖層面的聚合。
 --
 -- __本模組全程不印任何輸出__(委派決策 D4):所有提示一律走
 -- @ExtractWarning@,由 CLI 組裝層決定怎麼印。
@@ -35,6 +37,9 @@ module Knot.Extract.HiedbFacts
   , declKindOf
   , resolveModuleSource
   , pickFromDecl
+  , SourceDecls (..)
+  , unavailableSourceDecls
+  , isGeneratedName
   ) where
 
 import Control.Exception
@@ -47,6 +52,8 @@ import Data.List (minimumBy, sort)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Ord (Down (..), comparing)
+import Data.Set (Set)
+import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.Text (Text)
 import Database.SQLite.Simple
@@ -129,8 +136,9 @@ readIndexFacts h pm = do
     , ewMessage = T.pack ("cannot read index " <> ihDbPath h <> ": ") <> reason
     }
 
--- | 三條查詢的編排。@mods@ 失敗即整體放棄(沒有 module 對映就什麼都產不出);
--- @defs@ \/ @refs@ 失敗只讓該類事實為空,另一類照出。
+-- | 四條查詢的編排。@mods@ 失敗即整體放棄(沒有 module 對映就什麼都產不出);
+-- @defs@ \/ @refs@ 失敗只讓該類事實為空,另一類照出;@decls@ 的 occ 索引
+-- 失敗只讓兩個產生碼旗標退回 'False'(見 'SourceDecls')。
 collectFacts :: ProjectMeta -> Connection -> IO ([Fact], [ExtractWarning])
 collectFacts pm conn = do
   modsOutcome <- attempt (query_ conn qMods :: IO [ModRow])
@@ -138,17 +146,26 @@ collectFacts pm conn = do
     Left reason -> pure ([], [queryWarning "mods" reason])
     Right modRows -> do
       let (modIndex, mapWarnings) = buildModIndex (pmSources pm) modRows
-      declOutcome <- attempt (query_ conn qDefs :: IO [DefRow])
-      refOutcome  <- attempt (query_ conn qRefs :: IO [RefJoinRow])
-      let (declFacts, declUnknown, declWarns) = case declOutcome of
+      declOutcome    <- attempt (query_ conn qDefs :: IO [DefRow])
+      refOutcome     <- attempt (query_ conn qRefs :: IO [RefJoinRow])
+      srcDeclOutcome <- attempt (query_ conn qDeclOccs :: IO [(Text, Text)])
+      let (srcDecls, srcDeclWarns) = case srcDeclOutcome of
+            Left reason -> (unavailableSourceDecls, [genFlagWarning reason])
+            -- 整張表空 ⇒ 上游行為變了(hiedb 不再填 decls),不是「全部都是
+            -- 產生碼」。走同一條降級路徑,免得整個 decl 層被靜默清空。
+            Right []    -> ( unavailableSourceDecls
+                           , [genFlagWarning (T.pack "decls table is empty")] )
+            Right rows  -> (buildSourceDecls modIndex rows, [])
+          (declFacts, declUnknown, declWarns) = case declOutcome of
             Left reason -> ([], Map.empty, [queryWarning "defs" reason])
-            Right rows  -> let (fs, u) = declFactsOf modIndex rows in (fs, u, [])
+            Right rows  -> let (fs, u) = declFactsOf srcDecls modIndex rows in (fs, u, [])
           (refFacts, refUnknown, refWarns) = case refOutcome of
             Left reason -> ([], Map.empty, [queryWarning "refs" reason])
-            Right rows  -> let (fs, u) = refFactsOf modIndex rows in (fs, u, [])
+            Right rows  -> let (fs, u) = refFactsOf srcDecls modIndex rows in (fs, u, [])
           unknown = Map.unionWith (+) declUnknown refUnknown
       pure ( declFacts <> refFacts
-           , mapWarnings <> declWarns <> refWarns <> unknownWarnings unknown
+           , mapWarnings <> srcDeclWarns <> declWarns <> refWarns
+               <> unknownWarnings unknown
            )
 
 --------------------------------------------------------------------------------
@@ -168,6 +185,21 @@ qMods = sql "SELECT hieFile, mod, hs_src, is_boot FROM mods ORDER BY hieFile"
 -- | @defs@ 的 @PRIMARY KEY(hieFile, occ)@ 保證每個名字剛好一列。
 qDefs :: Query
 qDefs = sql "SELECT hieFile, occ, sl FROM defs ORDER BY hieFile, occ"
+
+-- | G-E003:__有原始碼宣告__的名字清單,兩個產生碼旗標的唯一判準。
+--
+-- 上游 @HieDb/Utils.hs@ 的 @goDec@ 只在遇到 @Decl@ \/ @ValBind@ context 時
+-- 建 @decls@ 列,而 @defs@ 額外收編譯器產生的定義點,故
+-- 「在 @defs@ 不在 @decls@」⇔「沒有人寫過那一行」。2026-08-22 實測
+-- knot-hs 自身索引:@defs \\ decls@ 為 106 筆且 106\/106 全是 @$f…@ 字典,
+-- 2834 筆真名零誤傷;fixture @test\/fixtures\/hiedb@ 為 @$fEqColor@ \/
+-- @$fShowColor@ 兩筆。這是 hiedb 兩張表的__結構事實__,不是 @$f@ 前綴的
+-- 名字啟發式(graph-core design.md「不做啟發式」因此不受影響)。
+--
+-- 只取 @(hieFile, occ)@:@decls@ 的 span 欄位是 'qRefs' 那條 join 的事,
+-- 本查詢只要「有沒有這一列」。
+qDeclOccs :: Query
+qDeclOccs = sql "SELECT hieFile, occ FROM decls ORDER BY hieFile, occ"
 
 -- | 抽取規則 4:span 包含 join 出候選(一對多),最內層挑選在 Haskell 做。
 --
@@ -307,13 +339,59 @@ resolveModuleSource sfs modName mHsSrc =
     _   -> Nothing    -- 零筆或多筆(例:多個 Main)都視為落空
 
 --------------------------------------------------------------------------------
+-- 產生碼判準(G-E003)
+--------------------------------------------------------------------------------
+
+-- | @hieFile@ → 該檔__有原始碼宣告__的 @occ@ 原文集合(來自 'qDeclOccs')。
+--
+-- 包一層 'Maybe':'Nothing' 代表 @decls@ 索引__整個不可用__(查詢失敗),
+-- 此時判準一律回 'False'——退回本次優化前的行為。**絕不因為查不到就把全部
+-- 宣告當成產生碼**:那會在一次查詢失敗時清空整個 decl 層。
+newtype SourceDecls = SourceDecls (Maybe (Map Text (Set Text)))
+  deriving (Eq, Show)
+
+-- | @decls@ 查詢失敗時用的降級值。
+unavailableSourceDecls :: SourceDecls
+unavailableSourceDecls = SourceDecls Nothing
+
+-- | @(hieFile, occ)@ 列 → 'SourceDecls'。只收 'buildModIndex' 認得的
+-- @hieFile@(對映不到 @pmSources@ 的 module 其 decl \/ ref 本來就整批跳過)。
+buildSourceDecls :: Map Text ModEntry -> [(Text, Text)] -> SourceDecls
+buildSourceDecls modIndex rows = SourceDecls (Just (foldl' step Map.empty rows))
+ where
+  step acc (hf, occ)
+    | hf `Map.member` modIndex = Map.insertWith Set.union hf (Set.singleton occ) acc
+    | otherwise                = acc
+
+-- | 產生碼判準:__名字在其所屬檔案的 @decls@ 沒有列__ ⇒ 沒有原始碼宣告
+-- AST 節點 ⇒ deriving \/ TH 產生。
+--
+-- 第二參數是該名字所屬檔案的 @hieFile@;'Nothing' 代表名字的 module 不在
+-- 索引內(外部套件)或對映不唯一,一律回 'False'——外部目標本來就由
+-- graph-core 規則 1 丟棄,不該由本旗標處理。
+isGeneratedName :: SourceDecls -> Maybe Text -> Text -> Bool
+isGeneratedName (SourceDecls Nothing)    _         _   = False
+isGeneratedName _                        Nothing   _   = False
+isGeneratedName (SourceDecls (Just idx)) (Just hf) occ =
+  occ `Set.notMember` Map.findWithDefault Set.empty hf idx
+
+-- | @ModuleName@ → @hieFile@ 反查(ref 的__目標__ module 用)。
+--
+-- 同一個 module 名對到多個 @hieFile@ 時存 'Nothing'(不唯一 ⇒ 判不出來 ⇒
+-- 'isGeneratedName' 回 'False',保守放行)。
+hieFileByModule :: Map Text ModEntry -> Map ModuleName (Maybe Text)
+hieFileByModule = Map.foldrWithKey step Map.empty
+ where
+  step hf e = Map.insertWith (\_ _ -> Nothing) (meModule e) (Just hf)
+
+--------------------------------------------------------------------------------
 -- 事實產出
 --------------------------------------------------------------------------------
 
 -- | @defs@ → 'FactDecl'。第二個回傳值是未知 namespace 前綴的計數
 -- (呼叫端彙整成警告)。
-declFactsOf :: Map Text ModEntry -> [DefRow] -> ([Fact], Map Text Int)
-declFactsOf modIndex = foldl' step ([], Map.empty)
+declFactsOf :: SourceDecls -> Map Text ModEntry -> [DefRow] -> ([Fact], Map Text Int)
+declFactsOf srcDecls modIndex = foldl' step ([], Map.empty)
  where
   step acc@(fs, u) r = case Map.lookup (drHieFile r) modIndex of
     Nothing -> acc                                    -- 已在 buildModIndex 記過警告
@@ -323,6 +401,9 @@ declFactsOf modIndex = foldl' step ([], Map.empty)
         ( FactDecl
             { fdName = QualName (meModule e) occ ns
             , fdKind = declKindOf ns
+            -- G-E003:def 有列、decls 無列 ⇒ 沒有原始碼宣告 ⇒ 產生碼
+            , fdGenerated =
+                isGeneratedName srcDecls (Just (drHieFile r)) (drOcc r)
             , fdFile = meFile e
             , fdLine = drLine r
             } : fs
@@ -334,9 +415,10 @@ declFactsOf modIndex = foldl' step ([], Map.empty)
 --
 -- 「ref 鍵」= @(hieFile, sl, sc, el, ec, occ, mod, is_generated)@;@unit@ 不
 -- 入鍵——它只影響「哪個套件定義了這個名字」,而 @QualName@ 沒有 unit 欄位。
-refFactsOf :: Map Text ModEntry -> [RefJoinRow] -> ([Fact], Map Text Int)
-refFactsOf modIndex = foldl' step ([], Map.empty) . groupAdjacent refKey
+refFactsOf :: SourceDecls -> Map Text ModEntry -> [RefJoinRow] -> ([Fact], Map Text Int)
+refFactsOf srcDecls modIndex = foldl' step ([], Map.empty) . groupAdjacent refKey
  where
+  targetHieFile = hieFileByModule modIndex
   step acc@(fs, u) grp@(r : _) = case Map.lookup (rjHieFile r) modIndex of
     Nothing -> acc
     Just e  -> case parseOcc (rjOcc r) of
@@ -347,6 +429,11 @@ refFactsOf modIndex = foldl' step ([], Map.empty) . groupAdjacent refKey
             , frFromDecl   = pickFromDecl (candidates e grp)
             , frTarget     = QualName (ModuleName (rjMod r)) occ ns
             , frGenerated  = rjGenerated r        -- 規則 4a:原樣轉載
+            -- G-E003:判準同 fdGenerated,只是查的是__目標__ module 的 decls。
+            -- 目標為外部套件時 targetHieFile 落空 → 恆 False。
+            , frTargetGenerated = isGeneratedName srcDecls
+                (Map.findWithDefault Nothing (ModuleName (rjMod r)) targetHieFile)
+                (rjOcc r)
             , frFile       = meFile e
             , frLine       = rjSl r
             } : fs
@@ -453,6 +540,15 @@ queryWarning :: String -> Text -> ExtractWarning
 queryWarning table reason = ExtractWarning
   { ewSource  = hiedbName
   , ewMessage = T.pack ("cannot read " <> table <> " table: ") <> reason
+  }
+
+-- | G-E003 的降級警告:@decls@ occ 索引讀不到,兩個產生碼旗標退回 'False'。
+-- 訊息明說「當成非產生碼」,免得下游看到 deriving 字典節點時無從追因。
+genFlagWarning :: Text -> ExtractWarning
+genFlagWarning reason = ExtractWarning
+  { ewSource  = hiedbName
+  , ewMessage = T.pack "cannot read decls table for generated-code flags: "
+      <> reason <> T.pack "; treating every declaration as hand-written"
   }
 
 -- | 規則 7:把任何例外轉成降級原因用的文字。
