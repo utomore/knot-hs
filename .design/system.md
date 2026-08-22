@@ -231,7 +231,7 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 | **S2 .cabal 整合** | project-meta(component 解析、幽靈 `.hie` 過濾) | 免設定即正確排除 `test/`,test 排除改由 component 判定 |
 | **S3 函式級抽取** | extraction(hiedb-sqlite 後端)、graph-core(decl 層、產生碼過濾) | 兩層節點、`calls` / `uses` 邊、hub 洗版實測、循環依賴人工複驗 |
 | **S4 查詢 CLI** | export-query(查詢、CLI 組裝) | `knot query` 四項能力可用,`/feature-design`、`/bugfix` 定位加速接上 |
-| **S5 零前置重構** | extraction(hiedb 嵌入、自驅動建置、移除降級)、export-query(砍旗標) | `knot extract .` 在**沒有 `.hie`、沒裝 hiedb** 的乾淨目標專案上一個命令跑出兩層圖;`--backend` / `--module-only` / `--hiedir` / `--hiedb` / `--db` 全部消失(→ ADR-006) |
+| **S5 零前置重構** | extraction(hiedb 嵌入、自驅動建置、移除降級)、project-meta(hie-locate 退場)、export-query(砍旗標) | `knot extract .` 在**沒有 `.hie`、沒裝 hiedb** 的乾淨目標專案上一個命令跑出兩層圖;`--backend` / `--module-only` / `--hiedir` / `--hiedb` / `--db` 全部消失(→ ADR-006) |
 
 每階段結束以 MagicFarmer 驗收(唯讀)。
 

@@ -270,7 +270,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 - **驗收標準**:`Knot.Extract.Types` 的匯出清單不再含任何廢除的型別,且 `src/` 與 `app/` 全部編譯通過(公開 library 只 re-export 契約模組,廢除的型別若有殘留引用會是編譯錯誤);`build-driver` 回 `BuildFailed` 時 `extract` 回 `Left` 且**零事實**(不是「只有 import 事實」);納入範圍零檔 → `NoSources`;兩層都成立時 `erFacts` 同時含 `FactModule` / `FactImport` / `FactDecl` / `FactRef`;對 knot-hs 自身跑完整管線,節點數不低於 S3 閘門的 548(decl 層沒有因為重構而縮水);五份黃金檔(G-E001)的 module 層輸出 byte 不變;同輸入兩次結果相同。**`test_included_scope`(G-B001)的斷言沿用**:後端收到完整清單、但產出的事實不提及被排除的檔
 - **明確不做**:不動 `Fact` / `QualName` / `NameSpace` / `DeclKind` / `ExtractWarning`;不動 hie-facts 的查詢與解析邏輯;不改 CLI 旗標(export-query 的事,但本 feature 砍掉 `ExtractOptions` 欄位後 CLI 的對映會編不過——**那是預期的,由 export-query 的對應 feature 接手**);不保留任何「只跑一層」的除錯模式
 
-### 歷史契約卡(階段一、二,已完成)
+**歷史契約卡(階段一、二,已完成)**
 
 以下四張為 F001–F004 完成時的契約卡,**所引用的 `Backend` / `ProbeResult` / `BackendChoice` / `CapabilityLevel` / `BackendReport` 已於 S5 廢除**,僅供回溯當時的驗收依據;新的契約以階段三三張卡為準。
 
