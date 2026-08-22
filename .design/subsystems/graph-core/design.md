@@ -64,7 +64,9 @@ data Relation = RImports | RCalls | RUses | RImplements | RContains
 
 data GraphStats = GraphStats
   { gsDroppedExternal    :: Int                    -- 指向外部目標而丟棄的邊數
-  , gsTopExternalTargets :: [(ModuleName, Int)]    -- 被指最多的外部 module(報告用);取前 10,依次數降序、同次數依 module 名字典序
+  , gsTopExternalTargets :: [(Text, Int)]          -- 被指最多的外部 module 名(報告用);取前 10,依次數降序、同次數依 module 名字典序
+                                                   -- G-E001 起改用 Text:公開 DTO 不透出上游 project-meta 的 ModuleName,
+                                                   -- 消費端(export-query)才不必跨段依賴。內部的 EdgeStats.esTopExternal 仍為 ModuleName。
   , gsFilteredGenerated  :: Int                    -- TH/產生碼過濾掉的事實數
   , gsDedupedEdges       :: Int                    -- 去重合併的邊數
   }

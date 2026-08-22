@@ -160,7 +160,7 @@ renderGraphSummary cg = T.unlines
     , T.pack ", top-external=", tshow (length (gsTopExternalTargets stats))
     ]
   topLines =
-    [ T.concat [T.pack "  X ", unMod m, T.pack " ", tshow n]
+    [ T.concat [T.pack "  X ", m, T.pack " ", tshow n]
     | (m, n) <- gsTopExternalTargets stats
     ]
   nodeLine n = T.concat
@@ -185,6 +185,5 @@ renderGraphSummary cg = T.unlines
   relText RImplements = T.pack "implements"
   relText RContains   = T.pack "contains"
   unNodeId (NodeId t) = t
-  unMod (ModuleName m) = m
   tshow :: Show a => a -> Text
   tshow = T.pack . show

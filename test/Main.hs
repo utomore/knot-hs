@@ -72,6 +72,7 @@ import Knot.App.Cli
   , QueryCmd (..)
   , SummaryMode (..)
   , cliParserInfo
+  , defaultOutputPath
   , toBuildOptions
   , toExportOptions
   , toExtractOptions
@@ -94,7 +95,6 @@ import Knot.Export.Types
   ( CommitPolicy (..)
   , ExportOptions (..)
   , ExportReport (..)
-  , defaultOutputPath
   )
 -- F004:'ExportOptions' 與 'ExtractOptions' 的 @rootDir@ 同名,裸選擇器不可用
 -- → 匯出面的裸取值走 qualified(沿用 F001 假設 A7 留下的 'XT' 慣例)。
@@ -296,6 +296,7 @@ tests mHiedb = testGroup "knot-hs"
   , exportQueryF003Tests
   , exportQueryF004Tests
   , globalE003Tests
+  , globalE001Tests
   ]
 
 f001Tests :: TestTree
@@ -2488,10 +2489,10 @@ testGraphTypesConstruct = testCase "test_graph_types_construct" $ do
   sort [nid "Main", nid "Demo.Core", nid "Main@app/Main.hs"]
     @?= [nid "Demo.Core", nid "Main", nid "Main@app/Main.hs"]
   let st = GraphStats
-        { gsDroppedExternal = 3, gsTopExternalTargets = [(mn "Data.Text", 2)]
+        { gsDroppedExternal = 3, gsTopExternalTargets = [(T.pack "Data.Text", 2)]
         , gsFilteredGenerated = 0, gsDedupedEdges = 1 }
   gsDroppedExternal st    @?= 3
-  gsTopExternalTargets st @?= [(mn "Data.Text", 2)]
+  gsTopExternalTargets st @?= [(T.pack "Data.Text", 2)]
   gsFilteredGenerated st  @?= 0
   gsDedupedEdges st       @?= 1
   let w = GraphWarning { gwSource = T.pack "Main", gwMessage = T.pack "collision" }
@@ -2754,7 +2755,7 @@ testBuildGraphAssemble = testCase "test_build_graph_assemble" $ do
   -- GraphStats 四欄(decl 事實全部通過閘門 → gsFilteredGenerated 仍為 0)
   cgStats g @?= GraphStats
     { gsDroppedExternal    = 2
-    , gsTopExternalTargets = [(mn "Data.Text", 2)]
+    , gsTopExternalTargets = [(T.pack "Data.Text", 2)]
     , gsFilteredGenerated  = 0
     , gsDedupedEdges       = 1
     }
@@ -2827,7 +2828,7 @@ testBuildGraphDeterministic = testGroup "test_build_graph_deterministic"
       -- 外部 import 全數落進 gsDroppedExternal;自 import 不產邊也不計統計
       cgStats g @?= GraphStats
         { gsDroppedExternal    = 3
-        , gsTopExternalTargets = [(mn "Data.Text", 2), (mn "Data.Map", 1)]
+        , gsTopExternalTargets = [(T.pack "Data.Text", 2), (T.pack "Data.Map", 1)]
         , gsFilteredGenerated  = 0
         , gsDedupedEdges       = 1
         }
@@ -2888,7 +2889,7 @@ testRenderGraphSummary = testCase "test_render_graph_summary" $ do
             [GraphEdge (nid "Main@app/Main.hs") (nid "Demo.Core") RImports (Just 6)]
         , cgStats = GraphStats
             { gsDroppedExternal    = 4
-            , gsTopExternalTargets = [(mn "Data.Text", 3), (mn "Data.Map", 1)]
+            , gsTopExternalTargets = [(T.pack "Data.Text", 3), (T.pack "Data.Map", 1)]
             , gsFilteredGenerated  = 0
             , gsDedupedEdges       = 2
             }
@@ -3284,8 +3285,8 @@ testModuleOnlyDecl = testCase "test_module_only_decl" $ do
   -- (Demo.Class);gMod 走規則 6 忽略 decl 層事實,故仍只有 Data.Text 一筆
   gsDroppedExternal (cgStats gFull) @?= 2
   gsDroppedExternal (cgStats gMod)  @?= 1
-  gsTopExternalTargets (cgStats gFull) @?= [(mn "Data.Text", 1), (mn "Demo.Class", 1)]
-  gsTopExternalTargets (cgStats gMod)  @?= [(mn "Data.Text", 1)]
+  gsTopExternalTargets (cgStats gFull) @?= [(T.pack "Data.Text", 1), (T.pack "Demo.Class", 1)]
+  gsTopExternalTargets (cgStats gMod)  @?= [(T.pack "Data.Text", 1)]
   -- D5:混合節點與 relation 下 cgNodes / cgEdges 仍為全序
   assertBool "cgNodes sorted by NodeId"
     (let ids = map gnId (cgNodes gFull) in and (zipWith (<) ids (drop 1 ids)))
@@ -3323,7 +3324,7 @@ testDeclGraphDeterministic = testGroup "test_decl_graph_deterministic"
       -- 丟棄並計入統計(F002 撰寫時 RImplements 尚未實作,故原值為 zeroStats)
       cgStats g @?= zeroStats
         { gsDroppedExternal    = 1
-        , gsTopExternalTargets = [(mn "Demo.Class", 1)]
+        , gsTopExternalTargets = [(T.pack "Demo.Class", 1)]
         }
   , testProperty "random decl fact streams stay sorted and order-insensitive" $ property $ do
       rawNames <- forAll (Gen.list (Range.linear 1 4) genModName)
@@ -4066,7 +4067,7 @@ testEncodeDocumentLayout = testCase "test_encode_document_layout" $ do
   assertBool "no CR in output"
     (not (T.pack "\r" `T.isInfixOf` encodeText Nothing g))
   -- 驗收標準 5:statsNotes 的行序固定
-  statsNotes (GraphStats 12 [(mn "Data.Text", 7), (mn "Data.Map", 4)] 0 3)
+  statsNotes (GraphStats 12 [(T.pack "Data.Text", 7), (T.pack "Data.Map", 4)] 0 3)
     @?= map T.pack
       [ "dropped external edges: 12"
       , "filtered generated facts: 0"
@@ -4113,7 +4114,7 @@ testWriteCodegraphEntry = testCase "test_write_codegraph_entry" $ do
         , xNode "Main" "Main" "app/Main.hs" (Just 1)
         ]
         [ xEdge "Main" "Demo.Core" RImports (Just 6) ])
-        { cgStats = GraphStats 4 [(mn "Data.Text", 3)] 0 2 }
+        { cgStats = GraphStats 4 [(T.pack "Data.Text", 3)] 0 2 }
   withExportDir "entry" $ \dir -> do
     -- 多層尚未建立的子路徑
     let out = dir </> "a" </> "b" </> "codegraph.json"
@@ -5524,3 +5525,236 @@ testGeneratedFilterSelfcheck = testCase "test_generated_filter_selfcheck" $ do
     _ -> putStrLn
       "[skip] test_generated_filter_selfcheck: knot-hs itself has no .hie files \
       \(build with -fwrite-ide-info -hiedir .hie to enable this check)"
+
+--------------------------------------------------------------------------------
+-- G-E001 內部邊界收斂(跨 project-meta + extraction + graph-core + export-query)
+--------------------------------------------------------------------------------
+
+globalE001Tests :: TestTree
+globalE001Tests = testGroup "global/G-E001 internal-test-exports"
+  [ testCabalContractSurface       -- T1
+  , testDefaultOutputPathHome      -- T2
+  , testModuleSuffixRuleAgrees     -- T3
+  , testGraphStatsTopExternalText  -- T4
+  , testDiscoveryCabalLessDir      -- T5
+  , testDesignDocsMatchGraphStats  -- T6
+  , testAppImportsWithinContract   -- T7
+  , testCodegraphOutputUnchanged   -- 全體回歸
+  ]
+
+-- | Level 2 契約面:公開 library 恰好 reexport 這 9 個模組(→ ADR-004)。
+contractModules :: [Text]
+contractModules = map T.pack
+  [ "Knot.Export"
+  , "Knot.Export.Types"
+  , "Knot.Extract"
+  , "Knot.Extract.Types"
+  , "Knot.Graph"
+  , "Knot.Graph.Types"
+  , "Knot.Meta"
+  , "Knot.Meta.Types"
+  , "Knot.Query"
+  ]
+
+-- | 從 @.cabal@ 原文抓某欄位的項目清單。本檔的 @exposed-modules@ 與
+-- @reexported-modules@ 各只出現一次,故不必追 stanza:取欄位行的值,
+-- 再吃掉後續「有縮排、不含冒號、非註解」的接續行。
+cabalFieldItems :: Text -> String -> [Text]
+cabalFieldItems src field =
+  case dropWhile (not . isField) (T.lines src) of
+    []         -> []
+    (l : rest) ->
+      let headPart = T.drop 1 (T.dropWhile (/= ':') l)
+      in [ item
+         | raw <- T.words (T.unwords (headPart : takeWhile isCont rest))
+         , let item = T.filter (/= ',') raw
+         , not (T.null item)
+         ]
+ where
+  isField ln = (T.pack field <> T.pack ":") `T.isPrefixOf` T.stripStart ln
+  isCont ln =
+    let s = T.strip ln
+    in not (T.null s)
+         && T.pack " " `T.isPrefixOf` ln
+         && not (T.pack "--" `T.isPrefixOf` s)
+         && not (T.any (== ':') s)
+
+-- | G-E001 T1:公開面就是契約面,一個不多一個不少。
+--
+-- 這條擋的是「有人為了省事把某個內部模組加進 reexported-modules」——
+-- GHC-87110 只在有人真的去 import 時才發作,這裡在清單層先擋一次。
+testCabalContractSurface :: TestTree
+testCabalContractSurface = testCase "test_cabal_contract_surface" $ do
+  src <- readUtf8 "knot-hs.cabal"
+  let reexported = cabalFieldItems src "reexported-modules"
+      exposed    = cabalFieldItems src "exposed-modules"
+      private    = [m | m <- exposed, m `notElem` contractModules]
+  -- 公開面恰為契約模組(排序後逐字比對,順序不影響判定)
+  sort reexported @?= sort contractModules
+  -- 內部 library 收全部 26 個模組
+  length exposed @?= 26
+  -- 每個被 reexport 的模組都真的存在於內部 library
+  assertBool ("reexported modules missing from knot-internal: "
+               <> show [m | m <- reexported, m `notElem` exposed])
+    (all (`elem` exposed) reexported)
+  -- 17 個內部模組一個都不得出現在公開面
+  length private @?= 17
+  assertBool ("internal modules leaked into the public surface: "
+               <> show [m | m <- private, m `elem` reexported])
+    (not (any (`elem` reexported) private))
+
+-- | G-E001 T2:@defaultOutputPath@ 的家在組裝層,不在 library 契約模組。
+testDefaultOutputPathHome :: TestTree
+testDefaultOutputPathHome = testCase "test_default_output_path_home" $ do
+  -- 行為與搬遷前一字不差
+  defaultOutputPath "proj" @?= "proj" </> "codegraph.json"
+  defaultOutputPath "." @?= "." </> "codegraph.json"
+  -- F004 既有分工不變:--output 未給時 toExportOptions 取這個預設值(回歸)
+  let cmd = baseExtractCmd { ecPath = graphFixture, ecOutput = Nothing }
+  ET.outputPath (toExportOptions cmd) @?= defaultOutputPath graphFixture
+  -- 已從 library 契約模組移除(公開面漂移防護)。
+  -- 只擋「定義 / 匯出」,不擋 Haddock 的限定交叉引用——後者是有價值的線索。
+  types <- readUtf8 "src/Knot/Export/Types.hs"
+  let mentions = [ln | ln <- T.lines types, hasText "defaultOutputPath" ln]
+  assertBool ("Knot.Export.Types must not define defaultOutputPath: " <> show mentions)
+    (not (any (hasText "defaultOutputPath ::") mentions))
+  assertBool ("only qualified cross-references may remain: " <> show mentions)
+    (all (hasText "Knot.App.Cli.defaultOutputPath") mentions)
+
+-- | G-E001 T3:@.hs@ 與 @.hie@ 兩條尾綴規則等價(去重後只剩一份實作)。
+testModuleSuffixRuleAgrees :: TestTree
+testModuleSuffixRuleAgrees = testGroup "test_module_suffix_rule_agrees"
+  [ testCase "既有具體案例兩邊一致" $ do
+      moduleNameFromPath "src/Demo/Core.hs" @?= moduleNameFromHiePath "src/Demo/Core.hie"
+      moduleNameFromPath "Foo.hs"           @?= moduleNameFromHiePath "Foo.hie"
+      moduleNameFromPath "src/lowercase/util.hs"
+        @?= moduleNameFromHiePath "src/lowercase/util.hie"
+  , testProperty "隨機路徑上兩條規則恆等" $ property $ do
+      lower <- forAll (Gen.list (Range.linear 0 3)
+                        (Gen.string (Range.linear 1 6) Gen.lower))
+      upper <- forAll (Gen.list (Range.linear 1 3)
+                        ((:) <$> Gen.upper <*> Gen.string (Range.linear 0 5) Gen.alpha))
+      let base = concatMap (<> "/") lower <> intercalate "/" upper
+      moduleNameFromPath (base <> ".hs") === moduleNameFromHiePath (base <> ".hie")
+  , testProperty "末段非大寫時兩邊同為 Nothing" $ property $ do
+      seg <- forAll (Gen.string (Range.linear 1 6) Gen.lower)
+      let base = "src/" <> seg
+      moduleNameFromPath (base <> ".hs") === Nothing
+      moduleNameFromHiePath (base <> ".hie") === Nothing
+  ]
+
+-- | G-E001 T4:公開 DTO 不再透出上游型別,且行為零變更。
+testGraphStatsTopExternalText :: TestTree
+testGraphStatsTopExternalText = testCase "test_graph_stats_top_external_text" $ do
+  -- (a) 欄位是 Text;摘要行輸出與型別變更前逐字相同(回歸)
+  let st = GraphStats 12 [(T.pack "Data.Text", 7), (T.pack "Data.Map", 4)] 0 3
+  statsNotes st @?= map T.pack
+    [ "dropped external edges: 12"
+    , "filtered generated facts: 0"
+    , "deduped edges: 3"
+    , "top external target: Data.Text (7)"
+    , "top external target: Data.Map (4)"
+    ]
+  -- (b) 組裝層的圖摘要同樣不變
+  let cg = CodeGraph { cgNodes = [], cgEdges = [], cgStats = st, cgWarnings = [] }
+  assertHasAll "graph summary top lines" (renderGraphSummary cg)
+    ["  X Data.Text 7", "  X Data.Map 4"]
+  -- (c) 驗收標準 4:export-query 的 library 不得再跨段 import 上游子系統
+  forM_ ["src/Knot/Export/Encode.hs", "src/Knot/Export.hs", "src/Knot/Export/Types.hs"
+        , "src/Knot/Export/Commit.hs"] $ \f -> do
+    body <- readUtf8 f
+    assertBool (f <> " must not import project-meta directly (topology bypass)")
+      (not (hasText "import Knot.Meta" body))
+  -- graph-core 的公開 DTO 模組同理:不得再認識 ModuleName
+  gt <- readUtf8 "src/Knot/Graph/Types.hs"
+  assertBool "Knot.Graph.Types must not import Knot.Meta.Types any more"
+    (not (hasText "import Knot.Meta" gt))
+
+-- | G-E001 T5:cabal.project 列的目錄存在卻沒有 @.cabal@ 時不再靜默貢獻零。
+testDiscoveryCabalLessDir :: TestTree
+testDiscoveryCabalLessDir = testCase "test_discovery_cabal_less_dir" $
+  withExportDir "ge001-discovery" $ \dir -> do
+    let mkProject field = do
+          removePathForcibly (dir </> "p")
+          createDirectoryIfMissing True (dir </> "p" </> "pkg-x")
+          writeUtf8 (dir </> "p" </> "cabal.project") (field <> ": pkg-x\n")
+          writeUtf8 (dir </> "p" </> "pkg-x" </> "Lib.hs") "module Lib where\n"
+          findCabalFiles (dir </> "p")
+        emptyDirMsg = "listed package directory contains no .cabal file"
+    -- packages:目錄存在但無 .cabal → per-entry 警告 + 既有的總結警告
+    (foundP, wsP) <- mkProject "packages"
+    foundP @?= []
+    assertBool ("packages entry should warn, got: " <> show (map mwMessage wsP))
+      (any (hasText emptyDirMsg . mwMessage) wsP)
+    length wsP @?= 2
+    -- optional-packages:沿用「optional 缺項靜默」的既有慣例,只留總結警告
+    (foundO, wsO) <- mkProject "optional-packages"
+    foundO @?= []
+    assertBool ("optional-packages entry must stay silent, got: "
+                 <> show (map mwMessage wsO))
+      (not (any (hasText emptyDirMsg . mwMessage) wsO))
+    length wsO @?= 1
+
+-- | G-E001 T6:架構文件與程式碼對同一個契約欄位的敘述不得漂移。
+testDesignDocsMatchGraphStats :: TestTree
+testDesignDocsMatchGraphStats = testCase "test_design_docs_match_graph_stats" $ do
+  code <- readUtf8 "src/Knot/Graph/Types.hs"
+  doc  <- readUtf8 ".design/subsystems/graph-core/design.md"
+  let fieldType = "gsTopExternalTargets :: [(Text, Int)]"
+      staleType = "gsTopExternalTargets :: [(ModuleName, Int)]"
+  assertBool ("code should declare " <> show fieldType) (hasText fieldType code)
+  assertBool ("graph-core/design.md should declare " <> show fieldType)
+    (hasText fieldType doc)
+  assertBool "graph-core/design.md still carries the pre-G-E001 type"
+    (not (hasText staleType doc))
+
+-- | G-E001 T7:組裝層只碰得到契約模組。
+--
+-- GHC-87110 只在建置 executable 時才發作,而 test-suite 依賴的是內部
+-- library——這條測試補上那個空窗,讓違規在測試階段就現形。
+testAppImportsWithinContract :: TestTree
+testAppImportsWithinContract = testCase "test_app_imports_within_contract" $ do
+  pm <- loadProjectMeta (defOpts ".")
+  let appFiles = [sfPath sf | sf <- pmSources pm, "app/" `isPrefixOf` sfPath sf]
+  assertBool "app/ sources should be discoverable" (not (null appFiles))
+  forM_ appFiles $ \f -> do
+    body <- readUtf8 f
+    let imported =
+          [ m
+          | ln <- T.lines body
+          , T.pack "import " `T.isPrefixOf` ln
+          , m <- take 1 (filter (T.pack "Knot." `T.isPrefixOf`)
+                                (T.words (T.drop 7 ln)))
+          ]
+        offenders =
+          [ m | m <- imported
+          , not (T.pack "Knot.App." `T.isPrefixOf` m)
+          , m `notElem` contractModules ]
+    assertBool (f <> " imports non-contract modules: " <> show offenders)
+      (null offenders)
+
+-- | 黃金檔涵蓋的 fixture 專案(以 @test\/fixtures\/golden\/\<name\>.json@ 對應)。
+goldenFixtures :: [FilePath]
+goldenFixtures = ["comps", "graph", "multi", "no-cabal", "proj"]
+
+-- | G-E001 全體回歸:四站管線的 byte 級輸出必須與變更前的黃金檔完全相同。
+--
+-- 黃金檔取自 G-E001 動工前的建置產出,釘住 Scope 的「不改任何演算法行為」。
+-- 固定走 import-scan 後端(結果不隨 hiedb 是否安裝而變)、commit 傳
+-- 'Nothing'(不跑 git,黃金檔才不隨 HEAD 漂移)。
+testCodegraphOutputUnchanged :: TestTree
+testCodegraphOutputUnchanged = testCase "test_codegraph_output_unchanged" $
+  forM_ goldenFixtures $ \name -> do
+    let root   = "test/fixtures" </> name
+        golden = "test/fixtures/golden" </> (name <> ".json")
+    pm <- loadProjectMeta (defOpts root)
+    er <- extract ((extOpts ImportsOnly) { XT.rootDir = root }) pm
+    let g       = buildGraph defBuildOpts pm er
+        encoded = BSL.toStrict (BB.toLazyByteString (encodeCodegraph Nothing g))
+    expected <- BS.readFile golden
+    assertBool
+      (name <> ": codegraph bytes drifted from " <> golden
+        <> " (expected " <> show (BS.length expected) <> " bytes, got "
+        <> show (BS.length encoded) <> ")\n--- got ---\n"
+        <> T.unpack (TE.decodeUtf8 encoded))
+      (encoded == expected)

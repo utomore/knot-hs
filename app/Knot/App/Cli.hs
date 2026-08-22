@@ -26,6 +26,7 @@ module Knot.App.Cli
   , toExtractOptions
   , toBuildOptions
   , toExportOptions
+  , defaultOutputPath
   ) where
 
 import Control.Applicative (optional)
@@ -57,7 +58,9 @@ import Options.Applicative
   , (<**>)
   )
 
-import Knot.Export.Types (CommitPolicy (AutoDetect), defaultOutputPath)
+import System.FilePath ((</>))
+
+import Knot.Export.Types (CommitPolicy (AutoDetect))
 import qualified Knot.Export.Types as ET
 import Knot.Extract.Types (BackendChoice (..))
 import qualified Knot.Extract.Types as XT
@@ -260,6 +263,14 @@ toExtractOptions c = XT.ExtractOptions
 -- | @--module-only@ → graph-core 的選項。
 toBuildOptions :: ExtractCmd -> BuildOptions
 toBuildOptions c = BuildOptions { moduleOnly = ecModuleOnly c }
+
+-- | @rootDir@ → 預設輸出路徑 @\<rootDir\>\/codegraph.json@。
+--
+-- CLI 的預設值屬組裝層,不屬 library 契約面:G-E001 M2 把它從
+-- 'Knot.Export.Types' 搬來這裡,export-query 的公開模組因此只剩契約
+-- (→ ADR-004)。行為與簽名與搬遷前一字不差。
+defaultOutputPath :: FilePath -> FilePath
+defaultOutputPath r = r </> "codegraph.json"
 
 -- | @PATH@ / @--output@ → export-query 匯出面的選項。
 --

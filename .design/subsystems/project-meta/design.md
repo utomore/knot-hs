@@ -5,7 +5,7 @@ title: project-meta
 description: 專案發現子系統:cabal component 解析、檔案歸類、.hie 定位與幽靈過濾
 status: active
 created: 2026-08-20
-updated: 2026-08-21
+updated: 2026-08-22
 parent: system
 related-adr: [ADR-001]
 code-paths: [src/Knot/Meta, src/Knot/Meta.hs]
@@ -133,6 +133,10 @@ indexSources :: MetaOptions -> [PackageMeta] -> IO ([SourceFile], [MetaWarning])
 -- hie-locate
 locateHie :: MetaOptions -> [SourceFile] -> IO (Maybe HieInfo, [MetaWarning])
 ```
+
+**模組間相依**:管線相鄰的 `source-index → hie-locate` 是唯一允許的模組相依——
+`hie-locate` 的路徑 → module 名判定與 `source-index` 是同一條大寫尾綴規則,共用實作
+放在 `source-index`(G-E001 M3),避免兩份會各自漂移的副本。其餘模組彼此不相依。
 
 ## 使用的技術
 

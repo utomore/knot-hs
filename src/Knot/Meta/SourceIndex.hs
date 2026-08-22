@@ -5,8 +5,9 @@
 -- 無 owner 的檔案退回 S1 的大寫尾綴法與路徑啟發式(F002 假設 A5)。
 module Knot.Meta.SourceIndex
   ( indexSources
-    -- * 內部純函數(僅為 1-to-1 測試而匯出,非 Level 2 契約面)
+    -- * 內部純函數(非 Level 2 契約面;1-to-1 測試與 hie-locate 取用)
   , moduleNameFromPath
+  , moduleNameFromPathExt
   ) where
 
 import Control.Exception (IOException, try)
@@ -122,11 +123,19 @@ skipDir name      = name == "dist-newstyle"
 -- 末段去 .hs 副檔名後,從尾端往前取最長的、每段皆大寫開頭的連續段序列,
 -- 以 "." 連接;末段本身非大寫開頭 → Nothing。
 moduleNameFromPath :: FilePath -> Maybe ModuleName
-moduleNameFromPath path =
+moduleNameFromPath = moduleNameFromPathExt "hs"
+
+-- | 大寫尾綴法的共用實作,第一參數為副檔名(不含點)。
+--
+-- source-index 的 @.hs@ 與 hie-locate 的 @.hie@ 是同一條規則、只差副檔名;
+-- 兩份副本會各自漂移(G-E001 現況分析 (2)),故收斂於此。相依方向
+-- source-index → hie-locate 與資料流管線同向。
+moduleNameFromPathExt :: String -> FilePath -> Maybe ModuleName
+moduleNameFromPathExt ext path =
   case reverse (splitDirectories path) of
     [] -> Nothing
     (file : revDirs) -> do
-      stem <- stripExtension "hs" file
+      stem <- stripExtension ext file
       if upperSeg stem
         then Just (ModuleName (T.pack (intercalate "."
                (reverse (stem : takeWhile upperSeg revDirs)))))

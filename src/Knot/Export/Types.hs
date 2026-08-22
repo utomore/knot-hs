@@ -1,23 +1,20 @@
 -- | export-query 匯出面對外 DTO。
 --
 -- Level 2 契約:@.design/subsystems/export-query/design.md@「對外契約 › 匯出面」。
--- 三個型別的欄位名與型別依契約原文;'defaultOutputPath' 為非契約面
--- (供 F004 CLI 組裝取預設路徑,見 F001 假設 A2)。
+-- 三個型別的欄位名與型別依契約原文;本模組是公開 library 的一員
+-- (→ ADR-004),因此只放契約面——CLI 預設輸出路徑歸組裝層所有,見
+-- @Knot.App.Cli.defaultOutputPath@(G-E001 M2)。
 module Knot.Export.Types
-  ( -- * 對外契約
-    ExportOptions (..)
+  ( ExportOptions (..)
   , CommitPolicy (..)
   , ExportReport (..)
-    -- * 非契約面
-  , defaultOutputPath
   ) where
 
 import Data.Text (Text)
-import System.FilePath ((</>))
 
 -- | 匯出選項。@rootDir@ 是目標專案根目錄('AutoDetect' 在此跑 git);
 -- @outputPath@ 為權威輸出路徑('writeCodegraph' 原樣使用,不做 fallback;
--- 預設值由 CLI 層以 'defaultOutputPath' 算,見假設 A2)。
+-- 預設值由 CLI 層的 @Knot.App.Cli.defaultOutputPath@ 算,見假設 A2)。
 data ExportOptions = ExportOptions
   { rootDir      :: FilePath      -- ^ 目標專案根目錄
   , outputPath   :: FilePath      -- ^ 權威輸出路徑(CLI @-o@ 覆寫)
@@ -39,8 +36,3 @@ data ExportReport = ExportReport
   , xrNotes     :: [Text]
   }
   deriving (Eq, Show)
-
--- | 非契約面(供 F004 CLI 組裝):@rootDir@ → 預設輸出路徑
--- @\<rootDir\>\/codegraph.json@。
-defaultOutputPath :: FilePath -> FilePath
-defaultOutputPath r = r </> "codegraph.json"

@@ -42,6 +42,22 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
   - 下游消費者:dev-flow `arch-audit/scripts/scan-graph.mjs`(非依賴,是契約對象;→ ADR-003)
 - **發佈形式**:`cabal install` 產生獨立執行檔;文件明載版本鎖要求,執行時檢查 `.hie` header 的 GHC 版本並對不合者告警
 
+### package 佈局(契約面收斂)
+
+`knot-hs` package 內為**雙 library**(→ ADR-004,G-E001 落地):
+
+| stanza | 內容 | 誰依賴它 |
+|---|---|---|
+| `library knot-internal`(`visibility: private`) | `src/` 全部 26 個模組 | `test-suite knot-test` |
+| `library`(公開) | 只 `reexported-modules` 四個子系統的進入點與對外 DTO 共 9 個模組 | `executable knot` |
+
+**exe 只依賴公開 library、test-suite 依賴 private sublibrary**——組裝層碰到非契約
+模組時是編譯錯誤(`GHC-87110 hidden package`),而 1-to-1 測試仍摸得到內部純函數。
+子系統內部模組的匯出清單因此不再是「對外公開面」,重構它們不必回頭改架構文件。
+
+公開 `library` 的 `hs-source-dirs` 必須明寫 `src`:省略的話 cabal 套用預設值 `.`,
+該 component 就宣告擁有整個 repo,knot 掃自己時連 `test/fixtures/**.hs` 都會被認領。
+
 ### 建置品質閘門(`-Wall` 零警告)
 
 全專案三個 component 都帶 `-Wall`,**零警告**是硬性要求。閘門與收尾的驗收指令**只有這一條**:
@@ -145,6 +161,10 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 - **拓撲**:單向 in-memory 管線,無反向呼叫、無旁路:
 
   `project-meta → extraction → graph-core → export-query`
+- **共用詞彙型別的邊界**:`ModuleName` 等詞彙型別由 project-meta 定義、沿管線流動、
+  零轉換(extraction Level 2 的批次澄清裁定)。「無旁路」的判準畫在**公開 DTO**:
+  子系統內部可以用上游詞彙型別,但**對外契約 DTO 不得透出**,否則消費端會被迫跨段
+  依賴。graph-core 的 `GraphStats` 是唯一踩過線的案例,由 G-E001 修正
 - **全域錯誤處理**:best-effort——單一檔案讀不過(壞 `.hie`、版本不合、解析失敗)印警告到 stderr、跳過續跑,仍產出部分圖;有跳檔時 exit code 仍為 0,`--strict` 使任何跳檔變 exit 1。不認得的 relation 或資料一律列印,不靜默吞掉
 - **降級原則**:函式級後端(hiedb)不可用時自動降到 module 級並明確告知,而非整體失敗
 

@@ -5,7 +5,7 @@ title: json-export
 description: 把 CodeGraph 投影成 codegraph.json 並回報匯出摘要
 status: done
 created: 2026-08-21
-updated: 2026-08-21
+updated: 2026-08-22
 depends-on: [project-meta/F001, extraction/F001, extraction/F002, graph-core/F001]
 related-adr: [ADR-003]
 related-feature: []
@@ -77,7 +77,7 @@ Level 2 的內部模組表只列一個 `export-writer`(且明載「匯出面單�
 
 | Haskell 模組 | 職責 | IO |
 |---|---|---|
-| `Knot.Export.Types` | `ExportOptions` / `CommitPolicy` / `ExportReport` + 非契約面 `defaultOutputPath` | 無 |
+| `Knot.Export.Types` | `ExportOptions` / `CommitPolicy` / `ExportReport`(`defaultOutputPath` 已於 G-E001 M2 移入 `Knot.App.Cli`) | 無 |
 | `Knot.Export.Encode` | 投影規則 1–5 的**純函數**:`CodeGraph → Builder`、`GraphStats → [Text]` | 無 |
 | `Knot.Export.Commit` | `CommitPolicy → rootDir → IO (Maybe Text)`:commit 偵測 | 有(唯讀:跑 git) |
 | `Knot.Export` | 進入點 `writeCodegraph`:偵測 → 編碼 → 建父目錄 → 寫檔 → 組 `ExportReport` | 有(寫檔) |
@@ -293,7 +293,7 @@ writeCodegraph :: ExportOptions -> CodeGraph -> IO ExportReport
 ## 待確認假設
 
 - A1: Level 2 的內部模組表只列一個 `export-writer` 且明載「匯出面單一模組無內部介面」,但純函數投影、IO commit 偵測與寫檔進入點混在一個 Haskell 模組會讓 T2–T4 只能透過檔案系統間接測 → 採取:拆成 `Knot.Export` / `.Types` / `.Encode` / `.Commit` 四個 Haskell 模組(內部實作自主權,形狀沿用既有三個子系統),Level 2 的「export-writer」對應這一整組 → 影響:若編排者要求嚴格一模組一檔,合併成單一 `Knot.Export`,T2/T3/T4 改為對 `writeCodegraph` 的落地檔案做斷言(測試變慢、失敗訊息變模糊,但驗收標準不變)
-- A2: 契約註解寫「`outputPath` 預設 `<rootDir>/codegraph.json`(CLI `-o` 覆寫)」,但 `outputPath :: FilePath` 不是 `Maybe`,沒說預設值由誰算 → 採取:`writeCodegraph` 把 `outputPath` 當**權威值**原樣使用(不做任何 fallback,空字串就是錯誤輸入),另在 `Knot.Export.Types` 匯出非契約面 `defaultOutputPath :: FilePath -> FilePath` 供 `F004` 組裝時取預設,避免 CLI 層硬寫檔名 → 影響:若裁定 `writeCodegraph` 應自行套預設(例如 `outputPath` 為空字串時 fallback 到 `rootDir`),改進入點一行,`defaultOutputPath` 保留給 CLI 顯示用
+- A2: 契約註解寫「`outputPath` 預設 `<rootDir>/codegraph.json`(CLI `-o` 覆寫)」,但 `outputPath :: FilePath` 不是 `Maybe`,沒說預設值由誰算 → 採取:`writeCodegraph` 把 `outputPath` 當**權威值**原樣使用(不做任何 fallback,空字串就是錯誤輸入),另在 `Knot.Export.Types` 匯出非契約面 `defaultOutputPath :: FilePath -> FilePath` 供 `F004` 組裝時取預設,避免 CLI 層硬寫檔名 → 影響:若裁定 `writeCodegraph` 應自行套預設(例如 `outputPath` 為空字串時 fallback 到 `rootDir`),改進入點一行,`defaultOutputPath` 保留給 CLI 顯示用 → **G-E001 M2 後修正**:`defaultOutputPath` 改由組裝層 `Knot.App.Cli` 定義並匯出。`Knot.Export.Types` 是公開 library 的契約模組(→ ADR-004),CLI 預設值不屬契約面;`writeCodegraph` 仍把 `outputPath` 當權威值,分工本身不變
 - A3: `xrNotes` 契約寫的是「`GraphStats` 摘要行」,但 `CodeGraph` 還帶 `cgWarnings`,若不進報告就沒有任何通道會被 CLI 印出來 → 採取:`xrNotes` **只**放 `GraphStats` 摘要(嚴守契約原文);`cgWarnings` 由 `F004` 的 CLI 層直接從手上的 `CodeGraph` 取用列印(它本來就持有整個圖)→ 影響:若裁定匯出報告要一站式涵蓋警告,`statsNotes` 改吃 `CodeGraph` 並追加警告行,`F004` 的列印來源改為單一 `xrNotes`
 - A4: `xrNotes` 的行文格式契約未定 → 採取:固定五種英文小寫行(`dropped external edges: N` / `filtered generated facts: N` / `deduped edges: N` / `top external target: <module> (<n>)`),風格對齊既有 `app/Knot/App/Summary.hs` 的 `stats:` 行,順序固定以維持決定性 → 影響:格式若要改中文或鍵值化,只動 `statsNotes` 一處,測試 T3 跟著改
 - ~~A5~~ **(已裁決:輸出)**:投影規則 3 原未把邊的 `geLine` 列入輸出,但下游 `scan-graph.mjs` 第 265 行讀 `e.source_location ?? src.source_location` 當循環依賴的證據行;而 S1 的 module 節點 `gnLine` 恆為 `Nothing`(已查證 `src/Knot/Graph/NodeMint.hs:59`),節點層 fallback 也給不出證據 → **階段一閘門裁決為「輸出」,`design.md` 投影規則 3 與本 feature 的契約卡驗收標準已同步修訂**。落地:`geLine == Just n` 時邊物件在 `confidence` 之後追加 `"source_location":"L<n>"`,`Nothing` 時該鍵不存在;T2 與 T6 各有對應斷言。`F002` graph-load 不受影響(它本來就忽略未知/選填欄位)

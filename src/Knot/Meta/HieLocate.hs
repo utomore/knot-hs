@@ -11,7 +11,6 @@ module Knot.Meta.HieLocate
   ) where
 
 import Control.Exception (IOException, try)
-import Data.Char (isUpper)
 import Data.List (intercalate, sort)
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -20,11 +19,11 @@ import System.FilePath
   ( isRelative
   , makeRelative
   , splitDirectories
-  , stripExtension
   , takeExtension
   , (</>)
   )
 
+import Knot.Meta.SourceIndex (moduleNameFromPathExt)
 import Knot.Meta.Types
   ( HieDirSource (..)
   , HieInfo (..)
@@ -163,20 +162,12 @@ commonAncestor files = intercalate "/" (foldr1 commonPrefix (map parentSegs file
 
 -- | .hie 路徑 → module 名(純函數):末段以 @stripExtension "hie"@ 去副檔名,
 -- 從尾端往前取最長的、每段首字元大寫的連續段序列,以 "." 連接;
--- 末段非大寫開頭 → Nothing。與 F001 大寫尾綴法同構,僅副檔名不同。
+-- 末段非大寫開頭 → Nothing。
+--
+-- 與 F001 的大寫尾綴法同構、僅副檔名不同,故直接沿用 source-index 的共用
+-- 實作(G-E001 M3),不留第二份會漂移的副本。
 moduleNameFromHiePath :: FilePath -> Maybe ModuleName
-moduleNameFromHiePath path =
-  case reverse (splitDirectories path) of
-    [] -> Nothing
-    (file : revDirs) -> do
-      stem <- stripExtension "hie" file
-      if upperSeg stem
-        then Just (ModuleName (T.pack (intercalate "."
-               (reverse (stem : takeWhile upperSeg revDirs)))))
-        else Nothing
- where
-  upperSeg (c : _) = isUpper c
-  upperSeg []      = False
+moduleNameFromHiePath = moduleNameFromPathExt "hie"
 
 -- | Windows 反斜線正規化為正斜線。
 toSlash :: FilePath -> FilePath

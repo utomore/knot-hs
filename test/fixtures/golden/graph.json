@@ -1,0 +1,13 @@
+{
+  "directed": true,
+  "nodes": [
+    {"id":"Demo.Core","label":"Demo.Core","source_file":"src/Demo/Core.hs"},
+    {"id":"Demo.Render","label":"Demo.Render","source_file":"src/Demo/Render.hs"},
+    {"id":"Main","label":"Main","source_file":"app/Main.hs"}
+  ],
+  "links": [
+    {"source":"Demo.Render","target":"Demo.Core","relation":"imports","confidence":"EXTRACTED","source_location":"L3"},
+    {"source":"Main","target":"Demo.Core","relation":"imports","confidence":"EXTRACTED","source_location":"L4"},
+    {"source":"Main","target":"Demo.Render","relation":"imports","confidence":"EXTRACTED","source_location":"L3"}
+  ]
+}

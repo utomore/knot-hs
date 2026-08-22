@@ -57,7 +57,8 @@ buildGraph opts pm result = CodeGraph
 
   stats = GraphStats
     { gsDroppedExternal    = esDroppedExternal estats
-    , gsTopExternalTargets = esTopExternal estats
+    -- G-E001:ModuleName → Text 的轉換收在 graph-core 內部,公開 DTO 不透出上游型別
+    , gsTopExternalTargets = [(m, n) | (ModuleName m, n) <- esTopExternal estats]
     , gsFilteredGenerated  = gfFiltered gated
     , gsDedupedEdges       = esDeduped estats
     }

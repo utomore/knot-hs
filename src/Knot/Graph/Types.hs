@@ -27,7 +27,6 @@ module Knot.Graph.Types
 import Data.Text (Text)
 
 import Knot.Extract.Types (DeclKind)
-import Knot.Meta.Types (ModuleName)
 
 -- | 建圖選項。@moduleOnly@ 對應 CLI @--module-only@:只出 module 節點與
 -- imports 邊(組裝規則 6)。
@@ -76,7 +75,8 @@ data Relation = RImports | RCalls | RUses | RImplements | RContains
 
 data GraphStats = GraphStats
   { gsDroppedExternal    :: Int                  -- ^ 指向外部目標而丟棄的邊數
-  , gsTopExternalTargets :: [(ModuleName, Int)]  -- ^ 前 10,次數降序、同次數依名字典序
+  , gsTopExternalTargets :: [(Text, Int)]        -- ^ 外部 module 名;前 10,次數降序、同次數依名字典序
+                                                 -- (G-E001:公開 DTO 不透出上游的 'ModuleName')
   , gsFilteredGenerated  :: Int                  -- ^ TH/產生碼過濾掉的事實數
   , gsDedupedEdges       :: Int                  -- ^ 去重合併掉的邊數
   }

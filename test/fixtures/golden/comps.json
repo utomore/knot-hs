@@ -1,0 +1,12 @@
+{
+  "directed": true,
+  "nodes": [
+    {"id":"Comps.Core","label":"Comps.Core","source_file":"src/Comps/Core.hs"},
+    {"id":"Comps.FFI","label":"Comps.FFI","source_file":"src/ffi/Comps/FFI.hs"},
+    {"id":"Comps.Sub","label":"Comps.Sub","source_file":"src/sub/Comps/Sub.hs"},
+    {"id":"Demo","label":"Demo","source_file":"examples/Demo.hs"},
+    {"id":"Main","label":"Main","source_file":"app/Main.hs"},
+    {"id":"Util","label":"Util","source_file":"src/lowercase/util.hs"}
+  ],
+  "links": []
+}
