@@ -3,6 +3,10 @@
 -- F002 cabal-components 落實判定規則 1(kind 排除)、2(一對多歸類與納入
 -- 判定)、3(精確 module 對映,取最長命中 hs-source-dirs)、7(決定性)。
 -- 無 owner 的檔案退回 S1 的大寫尾綴法與路徑啟發式(F002 假設 A5)。
+--
+-- E001 起規則 2 不只看目錄前綴:檔案還得是該 component 宣告的 module
+-- (exposed-modules / other-modules)或 main-is,否則不算它的——hs-source-dirs
+-- 取預設值 "." 的 component 因此不會把整個 repo 認走。
 module Knot.Meta.SourceIndex
   ( indexSources
     -- * 內部純函數(非 Level 2 契約面;1-to-1 測試與 hie-locate 取用)
@@ -40,34 +44,59 @@ indexSources opts pkgs = do
  where
   -- 順序 = pmPackages 序 × pkgComponents 序 × compSourceDirs 序(決定性)
   ownerIndex =
-    [ (ComponentRef (pkgName p, compName c), compKind c, dirSegs d)
+    [ Owner
+        { ownerRef    = ComponentRef (pkgName p, compName c)
+        , ownerKind   = compKind c
+        , ownerDir    = dirSegs d
+        , ownerMods   = compModules c
+        , ownerMainIs = fmap splitDirectories (compMainIs c)
+        }
     | p <- pkgs, c <- pkgComponents p, d <- compSourceDirs c
     ]
   dirSegs d = case splitDirectories d of
-    ["."] -> []              -- "." 視為根(恆命中)
+    ["."] -> []              -- "." 視為根:前綴恆命中,但仍受 module 清單約束(E001)
     segs  -> segs
   -- 判定規則 1:kind 排除
   excludedKind k = k `elem` [TestSuite, Benchmark] && not (includeTests opts)
 
   toSourceFile segs =
-    let path    = intercalate "/" segs   -- 正斜線重組:Windows 反斜線在此消除
-        matches = [m | m@(_, _, dsegs) <- ownerIndex, dsegs `dirPrefixOf` segs]
+    let path = intercalate "/" segs   -- 正斜線重組:Windows 反斜線在此消除
+        hits = [ Hit o via | o <- ownerIndex, Just via <- [claim o segs] ]
     in SourceFile
          { sfPath     = path
-         , sfModule   = case matches of
+         , sfModule   = case hits of
              [] -> moduleNameFromPath path            -- S1 尾綴法退回(假設 A5)
-             _  -> modFromSegs (longestDir matches) segs   -- 規則 3
-         , sfOwners   = nub [ref | (ref, _, _) <- matches]     -- 規則 2(保序去重)
-         , sfIncluded = case matches of
-             [] -> includedByHeuristic (includeTests opts) segs    -- S1 規則 4 退回
-             _  -> any (\(_, k, _) -> not (excludedKind k)) matches -- 規則 1 + 2
+             _  -> case [ (ownerDir o, m) | Hit o (ViaModule m) <- hits ] of
+               []  -> Just (ModuleName (T.pack "Main"))  -- 規則 3:僅 main-is 命中
+               dms -> Just (snd (longestDir dms))         -- 規則 3:最長 dir 勝出
+         , sfOwners   = nub [ownerRef o | Hit o _ <- hits]       -- 規則 2(保序去重)
+         , sfIncluded = case hits of
+             [] -> includedByHeuristic (includeTests opts) segs  -- S1 規則 4 退回
+             _  -> any (\(Hit o _) -> not (excludedKind (ownerKind o))) hits  -- 規則 1 + 2
          }
+  -- 規則 2(E001):dir 是前綴,且 module 名在清單內或相對路徑就是 main-is
+  claim o segs
+    | not (ownerDir o `dirPrefixOf` segs) = Nothing
+    | Just m <- modFromSegs (ownerDir o) segs, m `elem` ownerMods o = Just (ViaModule m)
+    | Just mi <- ownerMainIs o, drop (length (ownerDir o)) segs == mi = Just ViaMainIs
+    | otherwise = Nothing
   -- dir 的段序列為 path 段序列的前綴,且 path 還有剩餘段
   dirPrefixOf dsegs segs = dsegs `isPrefixOf` segs && length segs > length dsegs
-  -- 規則 3:取命中的最長 hs-source-dirs(段數相同代表同一個 dir)
-  longestDir matches =
-    let allDirs = [dsegs | (_, _, dsegs) <- matches]
-    in foldr (\d acc -> if length d > length acc then d else acc) [] allDirs
+  -- 規則 3:取命中的最長 hs-source-dirs(段數相同代表同一個 dir,module 名也相同)
+  longestDir = foldr1 (\a b -> if length (fst a) > length (fst b) then a else b)
+
+-- | ownerIndex 的一列:一個 component 的一個 hs-source-dir。
+data Owner = Owner
+  { ownerRef    :: ComponentRef
+  , ownerKind   :: ComponentKind
+  , ownerDir    :: [FilePath]         -- ^ hs-source-dir 的段序列("." 為 [])
+  , ownerMods   :: [ModuleName]       -- ^ compModules
+  , ownerMainIs :: Maybe [FilePath]   -- ^ compMainIs 的段序列
+  }
+
+-- | 一個檔案被某個 Owner 認領的方式:以 module 清單(帶推得的 module 名)或 main-is。
+data Hit = Hit Owner Via
+data Via = ViaModule ModuleName | ViaMainIs
 
 -- | 規則 3 的精確 module 對映(純函數):path 去掉所屬 dir 的前綴段、
 -- 末段去 .hs 副檔名,剩餘每段首字元必須大寫,以 "." 連接;否則 Nothing。

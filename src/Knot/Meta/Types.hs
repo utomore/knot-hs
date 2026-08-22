@@ -41,6 +41,8 @@ data ComponentMeta = ComponentMeta
   { compName       :: Text             -- ^ 如 "lib:magic-core"、"exe:particle-magic"
   , compKind       :: ComponentKind
   , compSourceDirs :: [FilePath]       -- ^ hs-source-dirs(repo 相對)
+  , compModules    :: [ModuleName]     -- ^ exposed-modules ++ other-modules(宣告序、去重;E001)
+  , compMainIs     :: Maybe FilePath   -- ^ main-is,相對 hs-source-dirs 的原樣路徑(正斜線);library / flib 為 Nothing(E001)
   , compExcluded   :: Bool             -- ^ 依 kind 與 includeTests 判定
   }
   deriving (Eq, Show)

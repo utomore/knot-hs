@@ -12,19 +12,25 @@ module Knot.Meta.CabalModel
 
 import Control.Exception (IOException, try)
 import qualified Data.ByteString as BS
+import Data.List (intercalate, nub)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 
 import Distribution.Compiler
   (AbiTag (NoAbiTag), CompilerFlavor (GHC), CompilerId (CompilerId), CompilerInfo, unknownCompilerInfo)
+import qualified Distribution.ModuleName as CabalModName
 import Distribution.PackageDescription
-  ( PackageDescription
+  ( BenchmarkInterface (..)
+  , PackageDescription
+  , TestSuiteInterface (..)
   , benchmarkBuildInfo
+  , benchmarkInterface
   , benchmarkName
   , benchmarks
   , buildInfo
   , executables
   , exeName
+  , exposedModules
   , foreignLibBuildInfo
   , foreignLibName
   , foreignLibs
@@ -32,9 +38,12 @@ import Distribution.PackageDescription
   , libBuildInfo
   , libName
   , library
+  , modulePath
+  , otherModules
   , package
   , subLibraries
   , testBuildInfo
+  , testInterface
   , testName
   , testSuites
   )
@@ -56,6 +65,7 @@ import Knot.Meta.Types
   ( ComponentKind (..)
   , ComponentMeta (..)
   , MetaWarning (..)
+  , ModuleName (..)
   , PackageMeta (..)
   )
 
@@ -100,15 +110,20 @@ toPackageMeta cabalPath pd = PackageMeta
   { pkgName       = T.pack rawPkgName
   , pkgCabalFile  = takeFileName cabalPath
   , pkgComponents =
-         [ mk "lib" rawPkgName MainLibrary (libBuildInfo l) | Just l <- [library pd] ]
-      <> [ mk "lib" (subLibNameOf l) NamedLibrary (libBuildInfo l) | l <- subLibraries pd ]
-      <> [ mk "exe" (unUnqualComponentName (exeName e)) Executable (buildInfo e)
+         [ mk "lib" rawPkgName MainLibrary (libBuildInfo l) (exposedModules l) Nothing
+         | Just l <- [library pd] ]
+      <> [ mk "lib" (subLibNameOf l) NamedLibrary (libBuildInfo l) (exposedModules l) Nothing
+         | l <- subLibraries pd ]
+      <> [ mk "exe" (unUnqualComponentName (exeName e)) Executable (buildInfo e) []
+              (Just (relPath (modulePath e)))
          | e <- executables pd ]
-      <> [ mk "flib" (unUnqualComponentName (foreignLibName f)) ForeignLibrary (foreignLibBuildInfo f)
+      <> [ mk "flib" (unUnqualComponentName (foreignLibName f)) ForeignLibrary (foreignLibBuildInfo f) [] Nothing
          | f <- foreignLibs pd ]
       <> [ mk "test" (unUnqualComponentName (testName t)) TestSuite (testBuildInfo t)
+              (testModules (testInterface t)) (testMainIs (testInterface t))
          | t <- testSuites pd ]
-      <> [ mk "bench" (unUnqualComponentName (benchmarkName b)) Benchmark (benchmarkBuildInfo b)
+      <> [ mk "bench" (unUnqualComponentName (benchmarkName b)) Benchmark (benchmarkBuildInfo b) []
+              (benchMainIs (benchmarkInterface b))
          | b <- benchmarks pd ]
   }
  where
@@ -117,10 +132,26 @@ toPackageMeta cabalPath pd = PackageMeta
     LSubLibName n -> unUnqualComponentName n
     LMainLibName  -> rawPkgName   -- subLibraries 內不會出現,防禦性退回
   -- compName 前綴命名(F002 假設 A3:比照 cabal component target 語法)
-  mk prefix nm kind bi = ComponentMeta
+  -- E001:module 清單 = 該 component 型別專屬的清單(exposed-modules / detailed
+  -- test-module)++ BuildInfo 的 other-modules,宣告序去重;main-is 只有
+  -- exe / exitcode test / exitcode bench 才有。
+  mk prefix nm kind bi ownMods mainIs = ComponentMeta
     { compName       = T.pack (prefix <> ":" <> nm)
     , compKind       = kind
     , compSourceDirs = map (toSlash . normalise . getSymbolicPath) (hsSourceDirs bi)
+    , compModules    = nub (map toModuleName (ownMods <> otherModules bi))
+    , compMainIs     = mainIs
     , compExcluded   = False
     }
+  toModuleName = ModuleName . T.pack . intercalate "." . CabalModName.components
+  relPath      = toSlash . normalise . getSymbolicPath
+  testMainIs i = case i of
+    TestSuiteExeV10 _ p -> Just (relPath p)
+    _                   -> Nothing
+  testModules i = case i of
+    TestSuiteLibV09 _ m -> [m]   -- detailed-0.9:test-module 就是它的入口 module
+    _                   -> []
+  benchMainIs i = case i of
+    BenchmarkExeV10 _ p -> Just (relPath p)
+    _                   -> Nothing
   toSlash = map (\c -> if c == '\\' then '/' else c)

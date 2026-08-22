@@ -1,0 +1,27 @@
+cabal-version:      3.4
+name:               dotdir
+version:            0.1.0.0
+build-type:         Simple
+
+-- E001 fixture:library 與 test-suite 都省略 hs-source-dirs(Cabal 預設 `.`),
+-- executable 的 main-is 落在子目錄。examples/ 與 test/fixtures/ 的雜檔沒有任何
+-- component 列出它們,不得被認領。
+
+library
+    exposed-modules:  Foo
+                      Foo.Bar
+    build-depends:    base
+    default-language: GHC2024
+
+executable dotdir-exe
+    hs-source-dirs:   app
+    main-is:          Cli/Main.hs
+    build-depends:    base, dotdir
+    default-language: GHC2024
+
+test-suite dotdir-test
+    type:             exitcode-stdio-1.0
+    main-is:          Spec.hs
+    other-modules:    Foo
+    build-depends:    base
+    default-language: GHC2024
