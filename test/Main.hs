@@ -12,7 +12,7 @@ import qualified Data.Aeson.KeyMap as AKM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Lazy as BSL
-import Data.Char (isDigit, isSpace)
+import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.Containers.ListUtils (nubOrd)
 import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -297,6 +297,7 @@ tests mHiedb = testGroup "knot-hs"
   , exportQueryF004Tests
   , globalE003Tests
   , globalE001Tests
+  , globalE004Tests
   ]
 
 f001Tests :: TestTree
@@ -5758,3 +5759,183 @@ testCodegraphOutputUnchanged = testCase "test_codegraph_output_unchanged" $
         <> show (BS.length encoded) <> ")\n--- got ---\n"
         <> T.unpack (TE.decodeUtf8 encoded))
       (encoded == expected)
+
+--------------------------------------------------------------------------------
+-- G-E004 契約標籤對帳與 ModuleName 的傳遞型 re-export
+--------------------------------------------------------------------------------
+
+globalE004Tests :: TestTree
+globalE004Tests = testGroup "global/G-E004 contract-surface-labels"
+  [ testExtractionReexportsModuleName          -- T1
+  , testGraphCoreNamesModuleNameViaExtraction  -- T2
+  , testQueryTypesContractLabels               -- T3
+  , testBackendConstantLabels                  -- T4
+  , testDocsMatchContractLabels                -- T5
+  , testContractLabelTable                     -- T6
+  ]
+
+-- | 讀一個模組的匯出清單,回傳 @(符號, 所屬小節標題)@ 對照。
+--
+-- 只掃 @module … ( … ) where@ 之間:以 @-- *@ 開頭的行切換小節,其餘註解
+-- (含 @-- |@ 的補充說明)不切換;非註解行取第一個識別字當符號名。
+exportGroups :: FilePath -> IO [(Text, Text)]
+exportGroups path = do
+  src <- readUtf8 path
+  let body = takeWhile (not . isEnd)
+               (drop 1 (dropWhile (not . isStart) (T.lines src)))
+  pure (walk (T.pack "(未分組)") body)
+ where
+  isStart ln = T.pack "module " `T.isPrefixOf` ln
+  isEnd   ln = T.pack ") where" `T.isSuffixOf` T.strip ln
+  -- 去掉行首的 "(" / "," 與空白,讓小節標題與符號都落在行首
+  clean = T.dropWhile (\c -> c == '(' || c == ',' || c == ' ') . T.strip
+  -- 本專案的匯出符號都不帶 prime,故識別字只認英數與底線
+  ident = T.takeWhile (\ch -> isAlphaNum ch || ch == '_')
+  walk _ [] = []
+  walk cur (ln : rest)
+    | T.pack "-- *" `T.isPrefixOf` c = walk (T.strip (T.drop 4 c)) rest
+    | T.pack "--"   `T.isPrefixOf` c = walk cur rest
+    | T.null c                       = walk cur rest
+    | otherwise = case T.words c of
+        (w : _) | not (T.null (ident w)) -> (ident w, cur) : walk cur rest
+        _                                -> walk cur rest
+   where c = clean ln
+
+-- | 查表:符號 → 小節標題;查不到回 'Nothing'。
+groupOf :: [(Text, Text)] -> String -> Maybe Text
+groupOf gs sym = lookup (T.pack sym) gs
+
+-- | G-E004 T1:extraction 的契約模組代為 re-export 'ModuleName'。
+--
+-- 這條測試__能編譯本身就是斷言__:@XT.ModuleName@ 只有在
+-- 'Knot.Extract.Types' 真的 re-export 了型別與建構子時才解析得到,
+-- 而與 'Knot.Meta.Types' 的同一個型別比較則釘住「不是另外定義了一個」。
+testExtractionReexportsModuleName :: TestTree
+testExtractionReexportsModuleName = testCase "test_extraction_reexports_module_name" $ do
+  XT.ModuleName (T.pack "Demo.Core") @?= mn "Demo.Core"
+  gs <- exportGroups "src/Knot/Extract/Types.hs"
+  case groupOf gs "ModuleName" of
+    Nothing -> assertFailure
+      ("Knot.Extract.Types should re-export ModuleName; exports: " <> show (map fst gs))
+    Just grp -> assertBool
+      ("ModuleName should sit in the shared-vocabulary section, got: " <> show grp)
+      (hasText "共用詞彙型別" grp)
+
+-- | G-E004 T2:graph-core 改由 extraction 契約命名 'ModuleName'。
+--
+-- 反向斷言同樣重要:'Knot.Graph' 與 fact-gate 另需 @ProjectMeta@ /
+-- @SourceFile@,那兩處的 import __不得__被順手刪掉(拓撲的邊 2)。
+testGraphCoreNamesModuleNameViaExtraction :: TestTree
+testGraphCoreNamesModuleNameViaExtraction =
+  testCase "test_graph_core_names_module_name_via_extraction" $ do
+    forM_ ["src/Knot/Graph/EdgeDerive.hs", "src/Knot/Graph/NodeMint.hs"] $ \f -> do
+      body <- readUtf8 f
+      assertBool (f <> " should name ModuleName via Knot.Extract.Types, not project-meta")
+        (not (hasText "import Knot.Meta" body))
+    forM_ ["src/Knot/Graph.hs", "src/Knot/Graph/FactGate.hs"] $ \f -> do
+      body <- readUtf8 f
+      assertBool (f <> " still needs ProjectMeta/SourceFile from project-meta (edge 2)")
+        (hasText "import Knot.Meta.Types" body)
+
+-- | G-E004 T3:'Knot.Query.Types' 的契約標籤,以及公開面不得變質。
+testQueryTypesContractLabels :: TestTree
+testQueryTypesContractLabels = testCase "test_query_types_contract_labels" $ do
+  gs <- exportGroups "src/Knot/Query/Types.hs"
+  let expectGroup sym want = case groupOf gs sym of
+        Nothing  -> assertFailure (sym <> " missing from Knot.Query.Types exports")
+        Just grp -> assertBool
+          (sym <> " should be in a " <> want <> " section, got: " <> show grp)
+          (hasText want grp)
+  -- NodeId 由 design.md 查詢面契約定義 → 契約面(本次修正的那一項)
+  expectGroup "NodeId" "對外契約"
+  expectGroup "QueryGraph" "對外契約"
+  expectGroup "LoadError" "對外契約"
+  -- QueryNode 不在契約裡 → 維持非契約面
+  expectGroup "QueryNode" "非契約面"
+  -- 公開面:Knot.Query 只 re-export 抽象 QueryGraph,欄位不得外露
+  pub <- readUtf8 "src/Knot/Query.hs"
+  assertBool "Knot.Query must keep QueryGraph abstract (no field selectors)"
+    (not (hasText "QueryGraph (..)" pub))
+  assertBool "Knot.Query should still re-export NodeId with its constructor"
+    (hasText "NodeId (..)" pub)
+
+-- | G-E004 T4:'Knot.Extract.Backend' 的每個非契約小節都要標明契約狀態。
+testBackendConstantLabels :: TestTree
+testBackendConstantLabels = testCase "test_backend_constant_labels" $ do
+  gs <- exportGroups "src/Knot/Extract/Backend.hs"
+  forM_ ["importScanName", "hiedbName", "runBackends"] $ \sym ->
+    case groupOf gs sym of
+      Nothing  -> assertFailure (sym <> " missing from Knot.Extract.Backend exports")
+      Just grp -> assertBool
+        (sym <> " should sit in a section labelled 非契約面, got: " <> show grp)
+        (hasText "非契約面" grp)
+
+-- | G-E004 T5:架構文件與 feature 文檔已同步。
+testDocsMatchContractLabels :: TestTree
+testDocsMatchContractLabels = testCase "test_docs_match_contract_labels" $ do
+  adr <- readUtf8 ".design/adr/ADR-005-shared-vocabulary-type-boundary.md"
+  assertBool "ADR-005 should no longer claim the re-export is an obligation"
+    (not (hasText "依附帶義務應補上 re-export" adr))
+  assertBool "ADR-005 should point at G-E004" (hasText "G-E004" adr)
+  f002 <- readUtf8 ".design/subsystems/export-query/features/F002-graph-load.md"
+  assertBool "F002 should record that NodeId was promoted to the contract surface"
+    (hasText "已升為契約面" f002)
+
+-- | 契約標籤對帳表:@(檔案, 符號, 是否應為非契約面)@。
+--
+-- 期望值來自 2026-08-22 對四處標籤的逐一對帳(見 G-E004「現況分析 (2)」),
+-- 依據是各子系統 @design.md@ 的「對外契約」與「模組間公開介面」兩節。
+contractLabelTable :: [(FilePath, String, Bool)]
+contractLabelTable =
+  -- 對帳 1:extraction 對外契約只有 extract;模組間公開介面只有
+  -- Backend / ProbeResult / ensureIndex / readIndexFacts
+  [ ("src/Knot/Extract/Backend.hs", "Backend",             False)
+  , ("src/Knot/Extract/Backend.hs", "ProbeResult",         False)
+  , ("src/Knot/Extract/Backend.hs", "importScanName",      True)
+  , ("src/Knot/Extract/Backend.hs", "hiedbName",           True)
+  , ("src/Knot/Extract/Backend.hs", "runBackends",         True)
+  -- 對帳 2:graph-core 模組間公開介面只列 mint* 四項
+  , ("src/Knot/Graph/NodeMint.hs",  "mintModuleId",        False)
+  , ("src/Knot/Graph/NodeMint.hs",  "mintDeclId",          False)
+  , ("src/Knot/Graph/NodeMint.hs",  "mintInstanceId",      False)
+  , ("src/Knot/Graph/NodeMint.hs",  "mintNodes",           False)
+  , ("src/Knot/Graph/NodeMint.hs",  "moduleFiles",         True)
+  , ("src/Knot/Graph/NodeMint.hs",  "disambiguate",        True)
+  , ("src/Knot/Graph/NodeMint.hs",  "moduleOfFile",        True)
+  , ("src/Knot/Graph/NodeMint.hs",  "declNodeIndex",       True)
+  -- 對帳 3:export-query 查詢面契約五函式,本檔佔兩個
+  , ("src/Knot/Query/Load.hs",      "queryGraphNotes",     False)
+  , ("src/Knot/Query/Load.hs",      "queryGraphHasNode",   False)
+  , ("src/Knot/Query/Load.hs",      "parseQueryGraph",     True)
+  , ("src/Knot/Query/Load.hs",      "RelationClass",       True)
+  , ("src/Knot/Query/Load.hs",      "classifyRelation",    True)
+  , ("src/Knot/Query/Load.hs",      "dependencyRelations", True)
+  , ("src/Knot/Query/Load.hs",      "structuralRelations", True)
+  -- 對帳 4:NodeId 由 design.md 查詢面契約定義(G-E004 修正的那一項)
+  , ("src/Knot/Query/Types.hs",     "LoadError",           False)
+  , ("src/Knot/Query/Types.hs",     "QueryCommand",        False)
+  , ("src/Knot/Query/Types.hs",     "Direction",           False)
+  , ("src/Knot/Query/Types.hs",     "QueryResult",         False)
+  , ("src/Knot/Query/Types.hs",     "NodeId",              False)
+  , ("src/Knot/Query/Types.hs",     "QueryGraph",          False)
+  , ("src/Knot/Query/Types.hs",     "QueryNode",           True)
+  ]
+
+-- | G-E004 T6:四處標籤的全表對帳,把 2026-08-22 的結論鎖成回歸。
+--
+-- 涵蓋本次__不動__的兩處(node-mint、graph-load)——它們對帳結果是正確的,
+-- 測試的作用是不讓它們日後默默漂掉。
+testContractLabelTable :: TestTree
+testContractLabelTable = testCase "test_contract_label_table" $ do
+  let files = nubOrd [f | (f, _, _) <- contractLabelTable]
+  groups <- mapM (\f -> (,) f <$> exportGroups f) files
+  forM_ contractLabelTable $ \(file, sym, wantNonContract) ->
+    case lookup file groups >>= \gs -> groupOf gs sym of
+      Nothing -> assertFailure (file <> ": " <> sym <> " not found in the export list")
+      Just grp -> do
+        let isNonContract = hasText "非契約面" grp
+        assertBool
+          (file <> ": " <> sym <> " should be "
+            <> (if wantNonContract then "非契約面" else "契約面")
+            <> ", but its section reads " <> show grp)
+          (isNonContract == wantNonContract)

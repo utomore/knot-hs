@@ -12,19 +12,23 @@
 module Knot.Query.Types
   ( -- * 對外契約
     LoadError (..)
-  , QueryGraph (..)
   , QueryCommand (..)
   , Direction (..)
   , QueryResult (..)
-    -- * 非契約面(F003 \/ F004 取用,見「新增的介面 › 非契約面」)
   , NodeId (..)
+    -- | 契約是**抽象型別本身**;七個欄位選擇器屬 Level 3,只給 graph-load 與
+    -- query-engine 內部用——公開的 "Knot.Query" 只 re-export 不帶欄位的
+    -- 'QueryGraph'(G-E004 對帳)。
+  , QueryGraph (..)
+    -- * 非契約面(F003 取用)
   , QueryNode (..)
   ) where
 
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 
--- | 查詢面的節點 id(見假設 A1)。'Ord' 是 'Map' 鍵與「同值按 id 字典序」
+-- | 查詢面的節點 id(F002 假設 A1;該假設已於 @design.md@ 補上契約定義後消解,
+-- G-E004 據此把它從非契約面升為對外契約)。'Ord' 是 'Map' 鍵與「同值按 id 字典序」
 -- (查詢規則 4)的前提;字典序即 'Text' 的碼位序。
 newtype NodeId = NodeId Text
   deriving (Eq, Ord, Show)
