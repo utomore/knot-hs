@@ -7,8 +7,9 @@
 -- 五條通道與其「非印不可」的出處:
 --
 -- * 'metaNoteLines' ← @pmWarnings@("Knot.Meta.Types" haddock:「由呼叫端印到 stderr」)
--- * 'extractNoteLines' ← @erLevel@ \/ @erReports@ \/ @erWarnings@
---   ("Knot.Graph" haddock:「由 CLI 印 stderr,graph-core 不轉載」;ADR-002 的降級告知)
+-- * 'extractNoteLines' ← @erWarnings@("Knot.Graph" haddock:「由 CLI 印
+--   stderr,graph-core 不轉載」);'extractFailureLines' ← @Left ExtractFailure@
+--   (ADR-006:整體失敗 exit 1,不寫檔)
 -- * 'graphNoteLines' ← @cgWarnings@(__硬性要求__:'Knot.Export.writeCodegraph'
 --   完全不碰它,漏接的話同名 module 碰撞警告永遠不會被使用者看到)
 -- * 'exportNoteLines' ← @xrNotes@("Knot.Export.Types" haddock:「由 CLI 層列印」)
@@ -20,6 +21,7 @@ module Knot.App.Report
   ( -- * 五條通道的行渲染(純函數)
     metaNoteLines
   , extractNoteLines
+  , extractFailureLines
   , graphNoteLines
   , exportNoteLines
   , queryNoteLines
@@ -34,7 +36,7 @@ import System.IO (Handle)
 
 import Knot.Export.Types (ExportReport (..))
 import Knot.Extract.Types
-  ( BackendReport (..)
+  ( ExtractFailure (..)
   , ExtractResult (..)
   , ExtractWarning (..)
   )
@@ -49,27 +51,36 @@ metaNoteLines pm =
   | w <- pmWarnings pm
   ]
 
--- | 通道 2:@erLevel@ \/ @erReports@ \/ @erWarnings@。
+-- | 通道 2:@erWarnings@ → @extract: \<ewSource\>: \<ewMessage\>@;空輸入回 @[]@。
 --
--- @extract: level \<erLevel\>@ 是本通道的__標頭行__:只在通道有話說時輸出
--- (降級報告或警告非空),讓「無事發生」的預設路徑維持零噪音——與其餘四條
--- 通道「空輸入回 @[]@」的規則一致。@brUsed = True@ 的報告不產生行。
+-- S5 起沒有能力等級標頭行、沒有降級報告行——extraction 兩層全有全無,
+-- 能走到這裡就是兩層都成立,剩下的只有各站的單檔警告。
 extractNoteLines :: ExtractResult -> [Text]
-extractNoteLines er
-  | null degradeLines && null warningLines = []
-  | otherwise = levelLine : degradeLines <> warningLines
- where
-  levelLine = T.pack ("extract: level " <> show (erLevel er))
-  degradeLines =
+extractNoteLines er =
+  [ T.concat [T.pack "extract: ", ewSource w, T.pack ": ", ewMessage w]
+  | w <- erWarnings er
+  ]
+
+-- | 整體失敗(ADR-006)→ stderr 行。四個建構子各自可辨識;永遠非空。
+--
+-- 'BuildFailed' 的 @bfDetail@ 可能多行:逐行縮排列印,不截斷——cabal 的輸出
+-- 雖已由 build-driver 即時轉發,尾段重印一次讓失敗原因緊貼在 exit 之前。
+-- 'VersionMismatch' 附上修法原文 @cabal install knot-hs -w ghc-\<vmHie\>@。
+extractFailureLines :: ExtractFailure -> [Text]
+extractFailureLines failure = case failure of
+  BuildFailed c d ->
+    (T.pack "extract: build failed for " <> c)
+      : [ T.pack "extract:   " <> l | l <- T.lines d ]
+  VersionMismatch h k ->
     [ T.concat
-        [T.pack "extract: backend ", brBackend r, T.pack " unused: ", brDetail r]
-    | r <- erReports er
-    , not (brUsed r)
+        [ T.pack "extract: .hie files were produced by GHC ", h
+        , T.pack ", but this knot was built with GHC ", k ]
+    , T.pack "extract: install a matching knot: cabal install knot-hs -w ghc-" <> h
     ]
-  warningLines =
-    [ T.concat [T.pack "extract: ", ewSource w, T.pack ": ", ewMessage w]
-    | w <- erWarnings er
-    ]
+  IndexFailed d ->
+    [T.pack "extract: index failed: " <> d]
+  NoSources ->
+    [T.pack "extract: no Haskell sources in scope (check PATH and --include-tests)"]
 
 -- | 通道 3(__硬性要求__):@cgWarnings@ → @graph: \<gwSource\>: \<gwMessage\>@。
 --

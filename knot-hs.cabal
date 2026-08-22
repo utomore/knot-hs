@@ -15,12 +15,12 @@ library knot-internal
                       Knot.Meta.Discovery
                       Knot.Meta.CabalModel
                       Knot.Meta.SourceIndex
-                      Knot.Meta.HieLocate
                       Knot.Extract
                       Knot.Extract.Types
-                      Knot.Extract.Backend
+                      Knot.Extract.Pipeline
+                      Knot.Extract.BuildDriver
                       Knot.Extract.ImportScan
-                      Knot.Extract.HiedbDriver
+                      Knot.Extract.HieIndex
                       Knot.Extract.HiedbFacts
                       Knot.Graph
                       Knot.Graph.Types
@@ -44,6 +44,7 @@ library knot-internal
                     , containers
                     , directory
                     , filepath
+                    , hiedb ^>=0.8
                     , process
                     , sqlite-simple ^>=0.4.19
                     , text

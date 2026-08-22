@@ -62,7 +62,6 @@ import System.FilePath ((</>))
 
 import Knot.Export.Types (CommitPolicy (AutoDetect))
 import qualified Knot.Export.Types as ET
-import Knot.Extract.Types (BackendChoice (..))
 import qualified Knot.Extract.Types as XT
 import Knot.Graph.Types (BuildOptions (..))
 import Knot.Meta.Types (MetaOptions (..))
@@ -78,19 +77,16 @@ data Command
   | CmdQuery QueryCmd
   deriving (Eq, Show)
 
--- | @knot extract [PATH]@ 的八個旗標 + C6 的 @--summary@。
+-- | @knot extract [PATH]@ 的四個旗標(S5 cli-zero-setup 起:@--backend@ \/
+-- @--module-only@ \/ @--hiedir@ \/ @--hiedb@ \/ @--db@ 五個旗標已廢,
+-- @knot extract .@ 是使用者需要知道的全部,ADR-006)。
 --
 -- 欄位序即 'extractParser' 的解析序(applicative 串接),兩者必須一致;
 -- 順序照 system.md「CLI 介面(頂層契約)」的旗標列表。
 data ExtractCmd = ExtractCmd
   { ecPath         :: FilePath           -- ^ 位置參數 PATH,預設 "."
   , ecOutput       :: Maybe FilePath     -- ^ --output
-  , ecBackend      :: BackendChoice      -- ^ --backend,預設 Auto
-  , ecModuleOnly   :: Bool               -- ^ --module-only
   , ecIncludeTests :: Bool               -- ^ --include-tests
-  , ecHieDir       :: Maybe FilePath     -- ^ --hiedir
-  , ecHiedbExe     :: Maybe FilePath     -- ^ --hiedb
-  , ecDbPath       :: Maybe FilePath     -- ^ --db
   , ecStrict       :: Bool               -- ^ --strict
   , ecSummary      :: Maybe SummaryMode  -- ^ --summary;Nothing = 寫 codegraph.json
   }
@@ -141,28 +137,9 @@ extractParser = ExtractCmd
         (strOption
           (long "output" <> short 'o' <> metavar "FILE"
             <> help "output path (default: <PATH>/codegraph.json)"))
-  <*> option backendReader
-        (long "backend" <> metavar "auto|imports|hiedb"
-          <> value Auto <> showDefault
-          <> help "fact extraction backend")
-  <*> switch
-        (long "module-only"
-          <> help "module nodes and imports edges only")
   <*> switch
         (long "include-tests"
           <> help "include test-suite and benchmark components")
-  <*> optional
-        (strOption
-          (long "hiedir" <> metavar "DIR"
-            <> help "override the .hie directory"))
-  <*> optional
-        (strOption
-          (long "hiedb" <> metavar "PATH"
-            <> help "override the hiedb executable location"))
-  <*> optional
-        (strOption
-          (long "db" <> metavar "FILE"
-            <> help "override the index location (default: <PATH>/.knot/hiedb.sqlite)"))
   <*> switch
         (long "strict"
           <> help "exit 1 when there is any warning")
@@ -219,14 +196,6 @@ nodeIdArgument :: String -> String -> Parser NodeId
 nodeIdArgument mv doc =
   NodeId . T.pack <$> strArgument (metavar mv <> help doc)
 
--- | @--backend@ 的三個取值;認不得時列出合法選項(驗收標準 5)。
-backendReader :: ReadM BackendChoice
-backendReader = eitherReader $ \s -> case s of
-  "auto"    -> Right Auto
-  "imports" -> Right ImportsOnly
-  "hiedb"   -> Right HiedbOnly
-  _         -> Left ("expected auto|imports|hiedb, got " <> show s)
-
 -- | @--summary@ 的三個取值(C6 的三條唯讀驗收輸出)。
 summaryReader :: ReadM SummaryMode
 summaryReader = eitherReader $ \s -> case s of
@@ -239,41 +208,23 @@ summaryReader = eitherReader $ \s -> case s of
 -- 旗標 → Options DTO 的純對映(驗收標準 1)
 --------------------------------------------------------------------------------
 
--- | @PATH@ / @--include-tests@ / @--hiedir@ → project-meta 的選項。
+-- | @PATH@ / @--include-tests@ → project-meta 的選項。
 toMetaOptions :: ExtractCmd -> MetaOptions
 toMetaOptions c = MetaOptions
-  { root           = ecPath c
-  , includeTests   = ecIncludeTests c
-  , hieDirOverride = ecHieDir c
+  { root         = ecPath c
+  , includeTests = ecIncludeTests c
   }
 
--- | @PATH@ / @--backend@ / @--hiedb@ / @--db@ → extraction 的選項。
---
--- 四個欄位全部逐字透傳;@--hiedb@ 與 @--db@ 對映 system.md「CLI 介面
--- (頂層契約)」明列的兩個旗標,@--db@ 是唯讀驗收的載重旗標(改道後
--- 目標專案內不會被建 @.knot\/@)。
+-- | @PATH@ → extraction 的選項。S5 起只剩 @rootDir@:沒有後端可選、
+-- 沒有執行檔可指、索引固定住在 @\<PATH\>\/.knot\/@(ADR-006)。
 toExtractOptions :: ExtractCmd -> XT.ExtractOptions
-toExtractOptions c = XT.ExtractOptions
-  { XT.rootDir       = ecPath c
-  , XT.backendChoice = narrowedBackend
-  , XT.hiedbExe      = ecHiedbExe c
-  , XT.dbPath        = ecDbPath c
-  }
- where
-  -- @--module-only@ 下 hiedb 不可能貢獻任何東西:抽取規則 2 明訂
-  -- @FactImport@ __永遠且只__來自 import-scan,而組裝規則 6 會讓 graph-core
-  -- 丟掉全部 decl 層事實。跑它只是白花索引時間——實測 knot-hs 自身
-  -- 2500 ms vs 120 ms,而兩者的 @codegraph.json@ 逐 byte 相同。
-  --
-  -- 只在 @--backend@ 停留在預設值 'Auto' 時收窄;使用者明確指定後端時
-  -- 尊重其選擇(例如拿 @--backend hiedb --module-only@ 除錯)。
-  narrowedBackend = case (ecModuleOnly c, ecBackend c) of
-    (True, Auto) -> ImportsOnly
-    (_,    b)    -> b
+toExtractOptions c = XT.ExtractOptions { XT.rootDir = ecPath c }
 
--- | @--module-only@ → graph-core 的選項。
+-- | graph-core 的選項。@--module-only@ 已廢(S5):extraction 兩層全有全無,
+-- 沒有「只要 module 層」的路徑;@moduleOnly@ 是 graph-core 契約欄位,保留
+-- 並固定填 'False',不越界去 graph-core 刪欄位。
 toBuildOptions :: ExtractCmd -> BuildOptions
-toBuildOptions c = BuildOptions { moduleOnly = ecModuleOnly c }
+toBuildOptions _ = BuildOptions { moduleOnly = False }
 
 -- | @rootDir@ → 預設輸出路徑 @\<rootDir\>\/codegraph.json@。
 --

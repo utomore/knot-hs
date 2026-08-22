@@ -5,9 +5,9 @@ title: export-query
 description: 匯出與查詢子系統:codegraph.json 投影與四項導航查詢 CLI
 status: active
 created: 2026-08-20
-updated: 2026-08-21
+updated: 2026-08-22
 parent: system
-related-adr: [ADR-003]
+related-adr: [ADR-003, ADR-006]
 code-paths: [src/Knot/Export, src/Knot/Export.hs, src/Knot/Query, src/Knot/Query.hs, app]
 ---
 
@@ -21,6 +21,8 @@ code-paths: [src/Knot/Export, src/Knot/Export.hs, src/Knot/Query, src/Knot/Query
 - **查詢面**(S4):`knot query` 讀既有 `codegraph.json`,回答 dev-flow 的四項導航能力——關鍵字查節點、(反向)可達、兩點最短路徑、連通度排名
 
 **明確不做**:不建圖、不改圖(查詢只讀不寫);不做視覺化;不重跑抽取(查詢面只認 JSON 檔,不碰 `.hie` 或原始碼)。
+
+**S5(ADR-006)對本子系統的影響全部落在 cli-assembly**:`knot extract` 砍掉五個旗標(`--backend`、`--module-only`、`--hiedir`、`--hiedb`、`--db`)、新增 extraction 整體失敗 → exit 1 的通道、`--summary` 不再印能力等級與 `.hie` 資訊。匯出面與查詢面的 library 契約**零變動**。
 
 ## 對外契約(Public Interface & DTOs)
 
@@ -118,6 +120,33 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
 
 參數解析屬 CLI 組裝層;本子系統收 `QueryCommand`。
 
+### CLI `extract` 旗標對映與 exit code(承接 system.md 頂層契約,S5 起)
+
+cli-assembly 不是 library 契約面,但它承接 system.md「CLI 介面(頂層契約)」,旗標 → 上游 Options DTO 的對映與 exit code 語意在此定死,feature 不得自行增減旗標。
+
+| 旗標 | 對映到 | 備註 |
+|---|---|---|
+| `[PATH]`(預設 `.`) | `MetaOptions.root`、`ExtractOptions.rootDir`、`ExportOptions.rootDir` | 三個 DTO 的路徑欄位同源 |
+| `--output FILE` | `ExportOptions.outputPath` | 未給時為 `<PATH>/codegraph.json`,預設值由 cli-assembly 算(library 不擁有 CLI 預設值,G-E001) |
+| `--include-tests` | `MetaOptions.includeTests` | 單點落實:project-meta 據此填 `sfIncluded` / `compExcluded`,extraction 只消費判定結果 |
+| `--strict` | cli-assembly 自己的 exit code 判定 | 見下 |
+| `--summary meta\|facts\|graph` | cli-assembly 自己的輸出模式 | 印該站摘要到 stdout,不寫 `codegraph.json` |
+
+**S5 移除**:`--backend`、`--module-only`(extraction 沒有後端選擇與能力分級了)、`--hiedir`(`.hie` 由 extraction 自建)、`--hiedb`(hiedb 已嵌入)、`--db`(`.knot/` 固定位置不改道)。對映上也就不再有 `ExtractOptions.backendChoice` / `hiedbExe` / `dbPath` 與 `MetaOptions.hieDirOverride` 可填。
+
+**exit code 語意**(與 system.md「全域錯誤處理」兩層對齊):
+
+| 情況 | exit | 與 `--strict` 的關係 |
+|---|---|---|
+| `extract` 回 `Left ExtractFailure`(建置失敗、GHC 版本不合、索引失敗、零原始檔) | **1** | 無關——這是整體失敗,不是警告;錯誤訊息印 stderr,**不寫** `codegraph.json`。**`VersionMismatch` 的訊息必須含 `cabal install knot-hs -w ghc-<vmHie>`**——一份 knot 只能讀一版 GHC 的 `.hie`,這是使用者唯一能做的事(extraction 規則 8) |
+| `writeCodegraph` 拋 `IOException`(寫不出檔) | 1 | 無關 |
+| 三站警告(`pmWarnings` + `erWarnings` + `cgWarnings`)總數 > 0 | 0 | `--strict` 時改為 1 |
+| 一切正常 | 0 | — |
+| `query` 的 `LoadError` | 1 | 無關 |
+| `query` 查無結果 | 0 | 正常結果 |
+
+**`--summary` 三站的內容**(S5 起):`meta` 印套件 / component / 檔案清單與 project-meta 警告,**不再有 `.hie` 段**;`facts` 印事實筆數(依 `Fact` 建構子分計)與 extraction 警告,**不再印能力等級與各後端報告**;`graph` 不變。`--summary` 仍會驅動插樁建置(它要的是真實的那一站輸出),`extract` 回 `Left` 時同樣 exit 1。
+
 ## 內部模組劃分(Internal Modules)
 
 | 模組 | 單一職責 |
@@ -126,7 +155,7 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
 | **graph-load** | 讀 `codegraph.json` → 驗證 → `QueryGraph`;未知 relation 的彙整排除 |
 | **query-engine** | 四種查詢演算法(純函數,BFS/度數統計) |
 | **query-render** | `QueryResult` → 人類可讀文字 |
-| **cli-assembly** | (executable,非 library)`knot` 的參數解析與管線組裝:`extract` / `query` 兩個子命令、旗標對映成各子系統的 Options DTO、報告與警告列印、exit code |
+| **cli-assembly** | (executable,非 library)`knot` 的參數解析與管線組裝:`extract` / `query` 兩個子命令、旗標對映成各子系統的 Options DTO、報告與警告列印、exit code(含 S5 的整體失敗通道:`Left ExtractFailure` → 訊息 + exit 1) |
 
 ## 資料流管線(Data Flow Pipeline)
 
@@ -139,6 +168,15 @@ knot query rank [--top N]            → RankConnectivity(N 預設 10)
   → graph-load:   讀檔 → 驗證 → 依賴類/結構類分流 → QueryGraph(壞檔 → LoadError,exit 1)
   → query-engine: QueryCommand → QueryResult(純函數)
   → query-render: 文字 → stdout
+
+組裝(knot extract,cli-assembly 負責串接;S5 起):argv
+  → 解析 → MetaOptions / ExtractOptions / BuildOptions / ExportOptions
+  → project-meta: loadProjectMeta → ProjectMeta
+  → extraction:   extract → Left ExtractFailure ⇒ 印訊息、exit 1、不寫檔、到此為止
+                            Right ExtractResult ⇒ 續行
+  → graph-core:   buildGraph(ProjectMeta, ExtractResult)→ CodeGraph
+  → export-writer: writeCodegraph → codegraph.json + ExportReport
+  → 三站警告匯流印 stderr → exit code(--strict 判定)
 ```
 
 查詢面的錯誤策略:`LoadError` 屬「使用者給錯輸入」,直接失敗(exit 1)而非 best-effort——與匯出管線的 best-effort 區隔,因為沒有「部分查詢結果」可言;查無節點(`FindNodes` 空集合、`PathResult Nothing`)是正常結果,exit 0。
@@ -176,9 +214,11 @@ commit 偵測呼叫 `git rev-parse HEAD`(在 `rootDir` 執行,對目標專案唯
  (repo 根目錄)
 ```
 
+cli-assembly 不在圖內:它是 executable 的組裝層,串接四個子系統,見「資料流管線 › 組裝」。
+
 ## 開發階段
 
-對應主架構 S1(json-export)與 S4(graph-load、query-commands)。無額外內部里程碑。
+對應主架構 S1(json-export)、S4(graph-load、query-commands、cli-wiring)與 **S5**(cli-zero-setup:砍旗標、整體失敗通道、`--summary` 收斂)。無額外內部里程碑。
 
 ## 功能規劃
 
@@ -196,7 +236,13 @@ commit 偵測呼叫 `git rev-parse HEAD`(在 `rootDir` 執行,對目標專案唯
 | 3 | query-commands | 四查詢演算法與文字輸出 | query-engine、query-render | #2 | F003 |
 | 4 | cli-wiring | knot extract / query 兩子命令的參數解析與管線組裝 | cli-assembly | #1, #3 | F004 |
 
-(共 4 個 features、2 個階段;全部完成即子系統可交付)
+### 階段三:S5 零前置重構(ADR-006)
+
+| # | feature | 一句話說明 | 模組 | 依賴 | doc |
+|---|---------|-----------|------|------|-----|
+| 5 | cli-zero-setup | 砍五個旗標、`Left ExtractFailure` → exit 1 通道、`--summary` 不印能力等級與 `.hie`、Options 對映同步上游新形狀 | cli-assembly | #4, extraction/F007, project-meta/F004 | F005 |
+
+(共 5 個 features、3 個階段。**#5 是「S5 收尾三件套」之一**:它、extraction 的 two-layer-contract、project-meta 的 hie-retire 三者改的是同一組 DTO 的定義端與消費端,**必須同一批提交**——任一邊先落地都會讓另一邊編不過。2026-08-22 三份設計齊備,批次順序裁定為 extraction/F007 → project-meta/F004 → export-query/F005,#5 是讓整套重新編得過、測試重新跑得動的收尾者)
 
 ## Feature 契約卡
 
@@ -229,6 +275,8 @@ commit 偵測呼叫 `git rev-parse HEAD`(在 `rootDir` 執行,對目標專案唯
 
 ### cli-wiring
 
+**F004 已完成;本卡為當時的驗收依據**。其驗收標準列的 `--backend` / `--module-only` / `--hiedir` 已於 S5 砍除(ADR-006),現行契約以上方「CLI `extract` 旗標對映與 exit code」節與 #5 cli-zero-setup 的卡為準。
+
 CLI 組裝層是跨子系統的黏合層,不屬任何單一子系統的 library 契約;落在 export-query 是因為 `knot` 的兩個子命令(`extract` 的終點、`query` 的全部)主體都在此,且管線末站才看得到完整的輸出與 exit code 語意。
 
 - **階段**:階段二
@@ -237,3 +285,12 @@ CLI 組裝層是跨子系統的黏合層,不屬任何單一子系統的 library 
 - **資料流管線段落**:從 `argv` 進,解析成各子系統的 Options DTO,依 `project-meta → extraction → graph-core → export-query` 呼叫,出檔案 / stdout / stderr 與 exit code
 - **驗收標準**:`knot extract [PATH]` 六個旗標(`--output`、`--backend auto|imports|hiedb`、`--module-only`、`--include-tests`、`--hiedir DIR`、`--strict`)全部解析正確且對映到正確的 Options 欄位;`knot query find|reachable|path|rank` 四子命令(含 `--reverse`、`--top N`,N 預設 10)對映到正確的 `QueryCommand`;`--summary meta|facts|graph` 保留三個既有唯讀驗收輸出,不給時 `extract` 的預設行為是寫 `codegraph.json`;`--help` 對頂層與每個子命令都可用;無效旗標與缺參數 exit 非 0 且訊息指出問題;`LoadError` exit 1、查無結果 exit 0;有跳檔時預設 exit 0 而 `--strict` 下 exit 1;`ExportReport` 的 `xrNotes` 與 `queryGraphNotes` 由本層印出(library 仍全程不印);以 MagicFarmer 與 particle-magic 唯讀實跑,產出的 `codegraph.json` 經 dev-flow `scan-graph.mjs` 解析成功
 - **明確不做**:不含任何投影、載入或查詢邏輯(全部委由四個子系統的契約函式);不新增 library 公開面;不改動任何子系統的 Options DTO 形狀(需要改就停下回報)
+
+### cli-zero-setup
+
+- **階段**:階段三
+- **負責模組**:cli-assembly(在 executable `knot`,非 library)
+- **實作的 Level 2 介面**:不新增 library 契約面。落實本文件「CLI `extract` 旗標對映與 exit code」節的**全部**內容:五個旗標移除、`MetaOptions` / `ExtractOptions` 對映同步上游的新形狀(`MetaOptions` 無 `hieDirOverride`;`ExtractOptions` 只剩 `rootDir`)、`extract` 的 `Either ExtractFailure ExtractResult` 回傳處理、`--summary meta` / `facts` 的內容收斂。消費既有契約 `loadProjectMeta`、`extract`、`buildGraph`、`writeCodegraph`,簽名以各子系統 S5 後的 `design.md` 為準
+- **資料流管線段落**:「資料流管線 › 組裝」整段——從 `argv` 進,經四站串接,出檔案 / stdout / stderr 與 exit code;新增的分支是 extraction 回 `Left` 時的短路
+- **驗收標準**:`knot extract --help` **不再列出** `--backend` / `--module-only` / `--hiedir` / `--hiedb` / `--db`,給這些旗標 exit 非 0 且訊息指出不認得;`knot extract [PATH]` 剩餘四個旗標(`--output`、`--include-tests`、`--strict`、`--summary`)解析正確且對映到正確的 Options 欄位;`ExtractOptions` 對映只填 `rootDir`、`MetaOptions` 對映無 `hieDirOverride`(型別檢查即證明,殘留欄位是編譯錯誤);以假的 `extract` 回 `Left BuildFailed` → exit 1、stderr 含 `bfComponent` 與 `bfDetail`、**`codegraph.json` 不存在**;`Left` 的四種建構子各自有可辨識的訊息;`--strict` 的判定不受 `Left` 影響(`Left` 永遠 exit 1);`--summary facts` 的輸出**不含**「level」「backends」字樣、`--summary meta` 的輸出**不含** `.hie` 段;`--summary` 在 `extract` 回 `Left` 時亦 exit 1;既有 `knot query` 四子命令行為零變動(F003 測試全綠);**對一個乾淨的目標專案(無 `.hie`、無 `.knot/`)執行 `knot extract .`,一個命令跑完,產出兩層圖**——這是 ADR-006 的端對端驗收,也是 S5 三件套同批落地的證明;五份黃金檔 byte 不變;閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` exit 0
+- **明確不做**:不含任何投影、載入或查詢邏輯;不新增 library 公開面;**不替上游定義 DTO**(`ExtractFailure` 等由 extraction 定義,本 feature 只消費);不提供任何「相容舊旗標」的別名或靜默忽略——舊旗標就是錯誤;不改 `knot query` 的任何旗標與語意;不動 README(那是文件任務,等三件套落地後一併改)

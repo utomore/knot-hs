@@ -32,8 +32,7 @@ import Knot.Meta.Types (ModuleName (..), ProjectMeta)
 
 -- | graph-core 唯一對外進入點。
 --
--- 只消費 @erFacts@:@erLevel@ / @erReports@ / @erWarnings@ 由 CLI 印
--- stderr,graph-core 不轉載。
+-- 只消費 @erFacts@:@erWarnings@ 由 CLI 印 stderr,graph-core 不轉載。
 buildGraph :: BuildOptions -> ProjectMeta -> ExtractResult -> CodeGraph
 buildGraph opts pm result = CodeGraph
   { cgNodes    = sortOn gnId nodes

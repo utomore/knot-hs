@@ -130,9 +130,9 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 已建 Level 2:`.design/subsystems/project-meta/design.md`
 
-- **職責**:解析 `.cabal` / `cabal.project` 取得 component(library / executable / test-suite 等,支援多套件)與 `hs-source-dirs`,把每個原始碼檔歸類到 component(一對多);定位 `.hie` 目錄;過濾幽靈 `.hie`(對應原始檔已刪除者);產出 test 排除判定
-- **邊界(不做)**:不讀原始碼內容、不讀 `.hie` 內容、不建圖
-- **對外契約摘要**:輸入專案根目錄,輸出「專案描述」——檔案清單(含 module 名對映、component 歸屬、是否排除)與 `.hie` 目錄資訊
+- **職責**:解析 `.cabal` / `cabal.project` 取得 component(library / executable / test-suite 等,支援多套件)與 `hs-source-dirs`,把每個原始碼檔歸類到 component(一對多);產出 test 排除判定(檔案級的 `sfIncluded` 與 component 級的 `compExcluded`)。**`.hie` 的定位、列舉與幽靈過濾自 S5 起移交 extraction**(ADR-006:`.hie` 由 extraction 自建於 `.knot/`,project-meta 跑在建置之前、看不到它)
+- **邊界(不做)**:不讀原始碼內容、**不碰 `.hie`**、不建圖、不觸發任何編譯
+- **對外契約摘要**:輸入專案根目錄,輸出「專案描述」——檔案清單(含 module 名對映、component 歸屬、是否排除)與 component 清單(extraction 據此決定建置哪些 component)
 
 ### extraction — 事實抽取
 
@@ -154,7 +154,7 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 已建 Level 2:`.design/subsystems/export-query/design.md`
 
-- **職責**:把圖 IR 投影成 `codegraph.json`(欄位規格與 relation 分類遵守 ADR-003,`built_at_commit` 自動偵測);S4 起提供查詢 CLI(關鍵字查節點、反向可達、兩點最短路徑、連通度排名,只走依賴類邊);**並承載 CLI 組裝層**——`knot` 的參數解析、四站管線串接、上游警告匯流與 exit code 決定。組裝層本身是跨子系統的黏合層,落在此處是因為兩個子命令的主體都在管線末站
+- **職責**:把圖 IR 投影成 `codegraph.json`(欄位規格與 relation 分類遵守 ADR-003,`built_at_commit` 自動偵測);S4 起提供查詢 CLI(關鍵字查節點、反向可達、兩點最短路徑、連通度排名,只走依賴類邊);**並承載 CLI 組裝層**——`knot` 的參數解析、四站管線串接、上游警告匯流與 exit code 決定(含 extraction 整體失敗 → exit 1 且不寫檔,ADR-006)。組裝層本身是跨子系統的黏合層,落在此處是因為兩個子命令的主體都在管線末站
 - **邊界(不做)**:不建圖、不改圖;查詢只讀不寫;組裝層不含任何投影/載入/查詢邏輯(全部委由四個子系統的契約函式)
 - **對外契約摘要**:輸入圖 IR(或既有 codegraph.json),輸出 JSON 檔與 stdout 查詢結果
 
@@ -231,7 +231,7 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 | **S2 .cabal 整合** | project-meta(component 解析、幽靈 `.hie` 過濾) | 免設定即正確排除 `test/`,test 排除改由 component 判定 |
 | **S3 函式級抽取** | extraction(hiedb-sqlite 後端)、graph-core(decl 層、產生碼過濾) | 兩層節點、`calls` / `uses` 邊、hub 洗版實測、循環依賴人工複驗 |
 | **S4 查詢 CLI** | export-query(查詢、CLI 組裝) | `knot query` 四項能力可用,`/feature-design`、`/bugfix` 定位加速接上 |
-| **S5 零前置重構** | extraction(hiedb 嵌入、自驅動建置、移除降級)、export-query(砍旗標) | `knot extract .` 在**沒有 `.hie`、沒裝 hiedb** 的乾淨目標專案上一個命令跑出兩層圖;`--backend` / `--module-only` / `--hiedir` / `--hiedb` / `--db` 全部消失(→ ADR-006) |
+| **S5 零前置重構** | extraction(hiedb 嵌入、自驅動建置、移除降級)、project-meta(hie-locate 退場)、export-query(砍旗標) | `knot extract .` 在**沒有 `.hie`、沒裝 hiedb** 的乾淨目標專案上一個命令跑出兩層圖;`--backend` / `--module-only` / `--hiedir` / `--hiedb` / `--db` 全部消失(→ ADR-006) |
 
 每階段結束以 MagicFarmer 驗收(唯讀)。
 

@@ -1,15 +1,17 @@
--- | import-scan 後端(T0):以輕量掃描(非完整 Haskell 語法解析)抽出
--- 'FactModule' 與 'FactImport'。
+-- | import-scan 模組:以輕量掃描(非完整 Haskell 語法解析)抽出
+-- 'FactModule' 與 'FactImport'——fact-pipeline 的第一站(F007 起)。
 --
 -- Level 2 契約:@.design/subsystems/extraction/design.md@「內部模組劃分 ›
--- import-scan」;落實抽取規則 2(imports 唯一來源、無 module 標頭視為
--- @Main@)、7(best-effort)、8(決定性)。
+-- import-scan」與模組間公開介面 'scanImports';落實抽取規則 2(imports 唯一
+-- 來源、無 module 標頭視為 @Main@)、9(單檔 best-effort)、10(決定性)。
 --
 -- 掃描管線(單檔):@rootDir \</\> sfPath@ → 位元組讀檔 → UTF-8 解碼 →
 -- 'stripCommentLines' → 'headerModuleOf' / 'importsOf' → 'scanSource'。
 module Knot.Extract.ImportScan
-  ( -- * 後端
-    importScanBackend
+  ( -- * Level 2 模組介面
+    scanImports
+    -- * 站名常數(非契約面:@ewSource@ 的值域是契約,具名常數本身不是)
+  , importScanName
     -- * 內部純函數(僅為 1-to-1 測試而匯出,非 Level 2 契約面)
   , scanSource
   , stripCommentLines
@@ -26,39 +28,32 @@ import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8')
 import System.FilePath ((</>))
 
-import Knot.Extract.Backend (Backend (..), ProbeResult (..), importScanName)
 import Knot.Extract.Types
-  ( CapabilityLevel (..)
-  , ExtractOptions (..)
+  ( ExtractOptions (..)
   , ExtractWarning (..)
   , Fact (..)
   )
 import Knot.Meta.Types (ModuleName (..), ProjectMeta (..), SourceFile (..))
 
 --------------------------------------------------------------------------------
--- 後端值
+-- Level 2 模組介面
 --------------------------------------------------------------------------------
 
--- | import-scan 後端(T0):零外部依賴,@bLevel = ModuleLevel@,
--- @bProbe@ 恆 'Available'。
+-- | import-scan 站的契約名(即 @ewSource@ 的值域之一)。F007 自
+-- @Knot.Extract.Backend@ 搬來。
+importScanName :: Text
+importScanName = T.pack "import-scan"
+
+-- | 逐檔掃描(Level 2 模組介面,簽名照契約):依 @pmSources@ 原序串接事實與
+-- 警告(規則 10)。全程循序 IO,無並發、無 Map/Set 走訪;__不抛例外__
+-- (單檔失敗在 'scanFile' 轉警告)。
 --
 -- 收到的 'ProjectMeta' 是**完整**的(含 @sfIncluded = False@ 的條目);
--- 抽取規則 1(納入範圍)由本後端在自己的迭代點套用(G-B001 起,調度層
--- 不再預先窄化——理由見 'runBackends' 的 haddock)。
-importScanBackend :: Backend
-importScanBackend = Backend
-  { bName  = importScanName
-  , bLevel = ModuleLevel
-  , bProbe = \_ _ -> pure Available
-  , bRun   = runImportScan
-  }
-
--- | 逐檔掃描:依 @pmSources@ 原序串接事實與警告(規則 8)。
--- 全程循序 IO,無並發、無 Map/Set 走訪。
---
--- 規則 1 在此套用:只掃 @sfIncluded = True@ 的檔案(G-B001)。
-runImportScan :: ExtractOptions -> ProjectMeta -> IO ([Fact], [ExtractWarning])
-runImportScan opts pm = do
+-- 抽取規則 1(納入範圍)在本站自己的迭代點套用(G-B001 起管線層不預先
+-- 窄化:預先窄化會抹掉「這份 @.hie@ 屬於一個被排除的檔案」這個事實,讓
+-- hie-facts 的 @hs_src@ 比對落空後誤退回 module 名猜測)。
+scanImports :: ExtractOptions -> ProjectMeta -> IO ([Fact], [ExtractWarning])
+scanImports opts pm = do
   results <- mapM (scanFile (rootDir opts)) (filter sfIncluded (pmSources pm))
   pure (concatMap fst results, concatMap snd results)
 
