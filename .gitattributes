@@ -1,0 +1,5 @@
+# 黃金檔是「行為零變更」的逐 byte 回歸基準(G-E001 的 test_codegraph_output_unchanged)。
+# codegraph.json 的投影規則 5 明訂換行一律單一 \n(見 export-query/design.md);
+# 這些檔被 core.autocrlf 在 checkout 時轉成 CRLF 的話,byte 比對會在別台機器上
+# 直接失敗,而且失敗原因與程式碼無關。一律不做換行轉換。
+test/fixtures/golden/*.json -text

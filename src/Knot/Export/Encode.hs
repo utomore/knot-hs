@@ -35,7 +35,6 @@ import Knot.Graph.Types
   , NodeId (..)
   , Relation (..)
   )
-import Knot.Meta.Types (ModuleName (..))
 
 --------------------------------------------------------------------------------
 -- 文件層(規則 4、5)
@@ -153,7 +152,7 @@ statsNotes st =
          [ T.pack "top external target: ", m
          , T.pack " (", T.pack (show c), T.pack ")"
          ]
-     | (ModuleName m, c) <- gsTopExternalTargets st
+     | (m, c) <- gsTopExternalTargets st
      ]
  where
   note label n = T.pack label <> T.pack (show n)

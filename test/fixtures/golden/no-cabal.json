@@ -1,0 +1,7 @@
+{
+  "directed": true,
+  "nodes": [
+    {"id":"Main","label":"Main","source_file":"src/Foo.hs"}
+  ],
+  "links": []
+}

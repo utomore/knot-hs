@@ -110,9 +110,13 @@ expandProject dir fields = do
               Left (e :: IOException) ->
                 pure ([], [MetaWarning (normRel entry) (T.pack ("cannot read directory: " <> show e))])
               Right names ->
-                pure ( [ normRel (entry </> n)
-                       | n <- sort names, takeExtension n == ".cabal" ]
-                     , [])
+                -- G-E001:目錄存在卻沒有 .cabal 時不再靜默貢獻零,比照
+                -- 「目錄不存在」走 'missing'(packages 出警告、optional 靜默)
+                case [ normRel (entry </> n)
+                     | n <- sort names, takeExtension n == ".cabal" ] of
+                  []    -> missing entry optional
+                             "listed package directory contains no .cabal file"
+                  found -> pure (found, [])
           else missing entry optional "listed package directory not found"
   -- packages 的缺項出警告;optional-packages 靜默略過
   missing entry optional what

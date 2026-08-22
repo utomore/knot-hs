@@ -1,0 +1,9 @@
+{
+  "directed": true,
+  "nodes": [
+    {"id":"Main@app/Main.hs","label":"Main","source_file":"app/Main.hs"},
+    {"id":"Main@src/MagicFarmer/Render/Core.hs","label":"Main","source_file":"src/MagicFarmer/Render/Core.hs"},
+    {"id":"Main@src/lowercase/util.hs","label":"Main","source_file":"src/lowercase/util.hs"}
+  ],
+  "links": []
+}

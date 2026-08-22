@@ -4,7 +4,11 @@ version:            0.0.1.0
 synopsis:           Haskell code knowledge graph generator for dev-flow
 build-type:         Simple
 
-library
+-- 內部實作 library(→ ADR-004、G-E001)。
+-- 四個子系統的全部模組住在這裡;只有 test-suite 依賴它,因此 1-to-1 測試
+-- 摸得到內部純函數,而 package 之外看不到任何一個內部模組。
+library knot-internal
+    visibility:       private
     hs-source-dirs:   src
     exposed-modules:  Knot.Meta
                       Knot.Meta.Types
@@ -46,6 +50,30 @@ library
     ghc-options:      -Wall
     default-language: GHC2024
 
+-- 公開 library = Level 2 契約面,恰好四個子系統的進入點與對外 DTO 模組。
+-- executable 只依賴這裡,所以組裝層碰到內部模組是編譯錯誤
+-- (GHC-87110 hidden package),而不是靠註解自律。新增一列 = 明示地把某個
+-- 模組升格為對外契約,不是預設就開著。
+--
+-- hs-source-dirs 明寫 src(本 stanza 不編譯任何模組):省略的話 cabal 會套
+-- 預設值 `.`,該 component 就宣告擁有整個 repo,knot 掃自己時連
+-- test/fixtures/**.hs 都會被認領進圖。
+library
+    hs-source-dirs:   src
+    reexported-modules: Knot.Meta
+                      , Knot.Meta.Types
+                      , Knot.Extract
+                      , Knot.Extract.Types
+                      , Knot.Graph
+                      , Knot.Graph.Types
+                      , Knot.Export
+                      , Knot.Export.Types
+                      , Knot.Query
+    build-depends:    base ^>=4.22
+                    , knot-hs:knot-internal
+    ghc-options:      -Wall
+    default-language: GHC2024
+
 executable knot
     hs-source-dirs:   app
     main-is:          Main.hs
@@ -54,6 +82,7 @@ executable knot
                       Knot.App.Run
                       Knot.App.Summary
     build-depends:    base ^>=4.22
+                    , filepath
                     , knot-hs
                     , optparse-applicative ^>=0.19
                     , text
@@ -75,7 +104,7 @@ test-suite knot-test
                     , directory
                     , filepath
                     , hedgehog
-                    , knot-hs
+                    , knot-hs:knot-internal
                     , optparse-applicative ^>=0.19
                     , process
                     , sqlite-simple ^>=0.4.19
