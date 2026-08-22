@@ -117,14 +117,14 @@ data ExtractWarning = ExtractWarning   -- 比照 MetaWarning 模式
 
 ### 抽取規則(契約的一部分)
 
-1. **納入範圍**:只處理 `pmSources` 中 `sfIncluded = True` 的檔案;只建置 `pkgComponents` 中 `compExcluded = False` 的 component。**`.hie` 的清單由 extraction 自己列舉**(`.knot/hie/` 下),不再來自 project-meta
+1. **納入範圍**:只處理 `pmSources` 中 `sfIncluded = True` 的檔案;只建置 `pkgComponents` 中 `compExcluded = False` 的 component。**`.hie` 的清單由 extraction 自己列舉**(`.knot/build/` 各 component 輸出目錄下),不再來自 project-meta
 2. **來源職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強);`FactDecl` / `FactRef` **永遠且只**來自 hie-index + hie-facts;`FactModule` 由 import-scan 產出;無 module 標頭的檔案依 Haskell 語意視為 `Main`(多個 `Main` 以 `fmFile` 區分)
 3. **兩層缺一不可**(取代舊規則 3「auto 合成」):import-scan 與 hie-index 兩者**都必須整體成功**才回 `Right ExtractResult`;任一整體失敗回 `Left ExtractFailure`,**不產出部分事實流**。沒有「只跑其中一個」的模式
 4. **fromDecl 由 hie-facts 解析**:`FactRef.frFromDecl` 在事實產出時即填好(以 span 包含關係 join 得出);graph-core 不做 span 比對。span 包含是一對多,取 **span 最小(最內層)** 的候選;span 大小相同時依 `(qnSpace, qnOcc)` 字典序破雷。**候選集是該檔全部 `decls` 列,不得以 `is_root` 過濾**——一般頂層函式繫結是 `is_root = 0`,帶著該過濾 `calls` 邊會全空而查詢不報錯(2026-08-21 實測)
 4a. **產生碼只標註、不過濾**(G-E003):`frGenerated` 原樣轉載 hiedb `refs.is_generated`;`fdGenerated` / `frTargetGenerated` 由「該名字在其 module 的 `defs` 有列、`decls` 無列」判定——這是結構事實,不是 `$f` 前綴的名字啟發式。要不要丟棄是 graph-core 規則 3 的決定。`decls` 表整個讀不到或為空時,兩個旗標一律 `False` 並發一則警告;**絕不因為查不到就把全部宣告當成產生碼**
-5. **插樁建置由 extraction 驅動**(ADR-006):每次 `extract` 都對每個納入的 component 執行目標專案的 `cabal build`,加上 `-fwrite-ide-info` 與指向 `.knot/` 的 builddir / hiedir。**增量交給 cabal**——它用內容雜湊判斷要不要重編,knot 不自己發明一套 mtime 比對(那會漏掉 `.cabal` 改動、旗標改動、相依升版)。沒改動時是一次 up-to-date 檢查(約 1 秒)。任一 component 建置失敗 → `BuildFailed`,**不 fallback**
-6. **每個 component 各自一個 hiedir**:`.knot/hie/<package>/<component>/`。理由:GHC 的 `-hiedir` 依 module 名決定路徑、不含 component,`executable` 與 `test-suite` 都有 `Main` 時共用目錄會互相覆蓋(G-B001 的根因)。分目錄後碰撞在設計上不存在,每個 `.hie` 的 component 歸屬也成為已知事實
-7. **`.knot/` 快取目錄**:固定在 `<root>/.knot/`,**不提供改道**(它是快取,與 `dist-newstyle` 同性質)。佈局:`build/`(cabal builddir)、`hie/`(規則 6)、索引檔、以及**首次建立時自動寫入內容為 `*` 的 `.gitignore`**——使用者連 `.gitignore` 都不用改。內容格式屬 Level 3 自主權;刪掉整個目錄只會讓下次變慢
+5. **插樁建置由 extraction 驅動**(ADR-006):每次 `extract` 都對目標專案執行**一次** `cabal build all`(納入的 test-suite / benchmark 以 `--enable-tests` / `--enable-benchmarks` 帶入),加上 `-fwrite-ide-info` 與指向 `.knot/build/` 的 builddir、**不帶 `-hiedir`**。**增量交給 cabal**——它用內容雜湊判斷要不要重編,knot 不自己發明一套 mtime 比對(那會漏掉 `.cabal` 改動、旗標改動、相依升版)。沒改動時是一次 up-to-date 檢查(實測 247 ms)。**cabal 的 stdout / stderr 即時轉發到呼叫端的 stderr**——這是轉發子程序輸出,不是 library 自行列印(「不印」的對象是警告與報告,那些仍由 CLI 層印);失敗時尾段進 `bfDetail`。任一 component 建置失敗 → `BuildFailed`,**不 fallback**
+6. **每個 component 各自一個 `.hie` 目錄**——由 cabal 天然提供,不由 knot 指定:建置**只帶 `-fwrite-ide-info`、不帶 `-hiedir`**,GHC 會把 `.hie` 寫在 `.hi` 旁,而 cabal 本來就替每個 component 準備獨立輸出目錄(`…/<kind>/<comp>/…/extra-compilation-artifacts/hie/`)。理由:GHC 的 `-hiedir` 依 module 名決定路徑、不含 component,`executable` 與 `test-suite` 都有 `Main` 時共用目錄會互相覆蓋(G-B001 的根因)。**不得改用逐 component 各帶 `-hiedir` 的作法**:2026-08-22 spike 證實換 `--ghc-options` 會被 cabal 當組態變更,每次全量重編(9.2 s vs 247 ms)。分目錄後碰撞在設計上不存在,每個 `.hie` 的 component 歸屬由路徑推得
+7. **`.knot/` 快取目錄**:固定在 `<root>/.knot/`,**不提供改道**(它是快取,與 `dist-newstyle` 同性質)。佈局:`build/`(cabal builddir,`.hie` 在其內各 component 的輸出目錄下,規則 6)、索引檔、以及**首次建立時自動寫入內容為 `*` 的 `.gitignore`**——使用者連 `.gitignore` 都不用改。內容格式屬 Level 3 自主權;刪掉整個目錄只會讓下次變慢
 8. **GHC 版本相容**(ADR-001):`.hie` header 的 GHC 版本必須與 knot 自身相同,不合 → `VersionMismatch` **失敗**(不再是警告或降級)。目標專案若以 `with-compiler` 釘了別的 GHC,就是這條失敗
 9. **單檔 best-effort**(在兩層都整體成立的前提下):單一原始檔解析失敗、單一 `.hie` 對映不到納入範圍內的原始檔(含過期的 `.hie`:模組已刪但舊檔還在 `.knot/hie/`)→ 警告 + 跳過,仍產出事實流。這一條與規則 3 的分界:**整體**拿不到是失敗,**個別**檔案拿不到是警告
 10. **決定性**:事實流排序穩定,同樣輸入產生同樣輸出
@@ -135,7 +135,7 @@ data ExtractWarning = ExtractWarning   -- 比照 MetaWarning 模式
 |---|---|
 | **fact-pipeline**(原 backend-select) | 串接四個模組、落實規則 3(兩層缺一不可)、組裝 `ExtractResult` / `ExtractFailure`;沒有探測、沒有選擇、沒有降級 |
 | **import-scan** | 讀 `.hs` 檔的 module 宣告與 import 行 → `FactModule` / `FactImport` |
-| **build-driver**(新) | 依 `ProjectMeta` 的納入 component 逐一執行插樁建置,維護 `.knot/` 佈局(規則 5、6、7)→ `HieLayout` |
+| **build-driver**(新) | 對目標專案執行一次插樁建置(`cabal build all`,旗標恆定),維護 `.knot/` 佈局(規則 5、6、7),列舉各 component 輸出目錄下的 `.hie` → `HieLayout` |
 | **hie-index**(原 hiedb-driver) | 列舉 `HieLayout`、GHC 版本檢查(規則 8)、以**內嵌的 hiedb library** 增量建索引 → `IndexHandle` |
 | **hie-facts**(原 hiedb-facts) | 讀索引(mods/decls/defs/refs 表)→ `FactDecl` / `FactRef`,含 fromDecl 解析與產生碼標註(規則 4、4a、9) |
 
@@ -144,7 +144,7 @@ data ExtractWarning = ExtractWarning   -- 比照 MetaWarning 模式
 ```text
 ProjectMeta(+ ExtractOptions)
   → import-scan:   included 原始檔 → FactModule / FactImport           (單檔失敗 → 警告跳過;零檔 → NoSources)
-  → build-driver:  納入的 component → cabal build(插樁、增量)→ HieLayout (任一 component 失敗 → BuildFailed)
+  → build-driver:  cabal build all(插樁、增量、旗標恆定)→ HieLayout   (建置失敗 → BuildFailed)
   → hie-index:     HieLayout → 版本檢查 → 內嵌 hiedb 增量索引 → IndexHandle (版本不合 → VersionMismatch;索引失敗 → IndexFailed)
   → hie-facts:     IndexHandle → FactDecl / FactRef                      (單 .hie 對映不到 → 警告跳過)
   → fact-pipeline: 兩層皆成立 → Right ExtractResult → 交給 graph-core
@@ -161,7 +161,7 @@ scanImports :: ExtractOptions -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 ensureHie :: ExtractOptions -> ProjectMeta -> IO (Either ExtractFailure HieLayout)
 
 data HieLayout = HieLayout
-  { hlRoot  :: FilePath                       -- <root>/.knot/hie
+  { hlRoot  :: FilePath                       -- <root>/.knot/build
   , hlFiles :: [(ComponentRef, FilePath)]     -- 每個 .hie 屬於哪個 component;路徑 repo 相對正斜線
   }
 
@@ -197,7 +197,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
  │  import-scan            build-driver ──▶ 目標專案的 cabal build   │
  │      │                      │ HieLayout        (插樁、增量)       │
  │      │                      ▼                    │                │
- │      │                  hie-index ◀──────────────┘ .knot/hie/     │
+ │      │                  hie-index ◀──────────────┘ .knot/build/   │
  │      │                      │ IndexHandle  (內嵌 hiedb library)   │
  │      │                      ▼                                     │
  │      │                  hie-facts ◀── .knot/ 索引                 │
@@ -235,7 +235,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 5 | build-driver | 逐 component 插樁建置進 `.knot/`、每 component 一個 hiedir、`.gitignore` 自建、`BuildFailed` 語意 | build-driver | - | - |
+| 5 | build-driver | 逐 component 插樁建置進 `.knot/`、每 component 一個 hiedir、`.gitignore` 自建、`BuildFailed` 語意 | build-driver | - | F005 |
 | 6 | hiedb-embed | hiedb 改 library 嵌入、列舉 `HieLayout`、版本檢查改為失敗、增量索引 | hie-index | #5 | - |
 | 7 | two-layer-contract | 契約收斂(砍 `BackendChoice` / `CapabilityLevel` / `BackendReport`、加 `ExtractFailure`)、fact-pipeline 全有全無、移除探測與降級 | fact-pipeline、import-scan | #5, #6 | - |
 
@@ -249,7 +249,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 - **負責模組**:build-driver
 - **實作的 Level 2 介面**:模組介面 `ensureHie`、`HieLayout`;DTO `ExtractFailure` 的 `BuildFailed` 建構子;落實抽取規則 5(插樁建置由 extraction 驅動、增量交給 cabal、失敗不 fallback)、6(每 component 一個 hiedir)、7(`.knot/` 佈局與自建 `.gitignore`)
 - **資料流管線段落**:從 `ProjectMeta` 的納入 component 清單進,經目標專案的 `cabal build`,出 `HieLayout`(或 `BuildFailed`)
-- **驗收標準**:對 knot-hs 自身(唯讀)執行——`.knot/build/`、`.knot/hie/knot-hs/<component>/`、`.knot/.gitignore`(內容 `*`)三者存在;對方的 `dist-newstyle/` **位元組級不變**(建置前後比對);`hlFiles` 每筆的 component 與其 `.hie` 所在子目錄一致;**`exe:knot` 與 `test:knot-test` 的 `Main.hie` 落在不同目錄、兩份都存在**(G-B001 的根因不再發生);第二次執行明顯快於第一次(cabal 增量);故意讓某個 component 編不過 → 回 `BuildFailed` 且 `bfComponent` 指名該 component、`bfDetail` 含 cabal 的錯誤訊息;`compExcluded = True` 的 component 不被建置
+- **驗收標準**:對 knot-hs 自身(唯讀)執行——`.knot/build/`、各 component 輸出目錄下的 `.hie`、`.knot/.gitignore`(內容 `*`)三者存在;對方的 `dist-newstyle/` **位元組級不變**(建置前後比對);`hlFiles` 每筆的 component 與其 `.hie` 所在子目錄一致;**`exe:knot` 與 `test:knot-test` 的 `Main.hie` 落在不同目錄、兩份都存在**(G-B001 的根因不再發生);第二次執行明顯快於第一次(cabal 增量);故意讓某個 component 編不過 → 回 `BuildFailed` 且 `bfComponent` 指名該 component、`bfDetail` 含 cabal 的錯誤訊息;`compExcluded = True` 的 component 不被建置
 - **明確不做**:不讀 `.hie` 內容(hie-index 的事);不建索引;不判斷 `.hie` 新不新鮮(規則 5:每次都叫 cabal,由它判斷);不支援 stack(主架構非目標);不清理 `.knot/` 裡過期的 `.hie`(規則 9 的丟棄路徑負責)
 
 ### hiedb-embed
