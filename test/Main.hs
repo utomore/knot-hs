@@ -1318,11 +1318,15 @@ testScanSourceFacts = testCase "test_scan_source_facts" $ do
   case facts of
     (f : imps) -> do
       f @?= FactModule path (mn "Demo.Main")
-      map (\i -> (fiLine i, fiTo i)) imps @?= comboImports
-      forM_ imps $ \i -> do
-        fiFrom i @?= mn "Demo.Main"
-        fiFile i @?= path
-      let ls = map fiLine imps
+      -- 原本直接用 fiLine / fiTo 等部分選擇器(G-E002)。改走 'importOf' 後
+      -- 「第一筆之後全是 FactImport」由隱含假設變成顯式斷言:長度不變即證明。
+      let parsed = mapMaybe importOf imps
+      length parsed @?= length imps
+      map (\(_, to, _, l) -> (l, to)) parsed @?= comboImports
+      forM_ parsed $ \(from, _, fp, _) -> do
+        from @?= mn "Demo.Main"
+        fp   @?= path
+      let ls = [l | (_, _, _, l) <- parsed]
       assertBool "import lines strictly increasing" (and (zipWith (<) ls (drop 1 ls)))
     [] -> assertFailure "expected at least one fact"
   -- 無 module 標頭 → Main(D3)
@@ -1445,9 +1449,9 @@ testImportScanDeterministic = testGroup "test_import_scan_deterministic"
       lns   <- forAll (mapM genImportLine mods)
       let src = srcOf ("module Gen.Root where" : lns)
           (facts, warns) = scanSource "src/Gen/Root.hs" src
-          got = [(fiLine f, fiTo f) | f@FactImport{} <- facts]
+          got = [(l, to) | Just (_, to, _, l) <- map importOf facts]
       warns === []
-      [fmModule f | f@FactModule{} <- facts] === [mn "Gen.Root"]
+      [m | Just (_, m) <- map moduleOf facts] === [mn "Gen.Root"]
       got === zip [2 ..] (map ModuleName mods)
   ]
 
@@ -1906,8 +1910,23 @@ hiedbGatedF004Tests =
   , testHiedbFactsSelfcheck    -- T11
   ]
 
+-- | 安全取出 'FactModule' 的欄位(理由同 'declOf';G-E002)。
+moduleOf :: Fact -> Maybe (FilePath, ModuleName)
+moduleOf (FactModule f m) = Just (f, m)
+moduleOf _                = Nothing
+
+-- | 安全取出 'FactImport' 的欄位(理由同 'declOf';G-E002)。
+importOf :: Fact -> Maybe (ModuleName, ModuleName, FilePath, Int)
+importOf (FactImport from to f l) = Just (from, to, f, l)
+importOf _                        = Nothing
+
 -- | 安全取出 'FactDecl' 的欄位:以位置 pattern 承接,避免對 sum type 用
 -- 部分選擇器(@-Wincomplete-record-selectors@)。
+--
+-- 這一家四個('moduleOf' \/ 'importOf' \/ 'declOf' \/ 'refOf')是本檔取
+-- 'Fact' 欄位的**唯一**手段:@fiLine@ \/ @fmModule@ 等選擇器對 sum type 是
+-- 部分函式,直接用會在全量重建時噴 @-Wincomplete-record-selectors@,而增量
+-- 建置不重印警告,退化會靜悄悄地長回來(G-E002)。
 declOf :: Fact -> Maybe (QualName, DeclKind, Bool, FilePath, Int)
 declOf (FactDecl n k g f l) = Just (n, k, g, f, l)
 declOf _                    = Nothing
