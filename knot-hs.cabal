@@ -21,7 +21,7 @@ library knot-internal
                       Knot.Extract.Backend
                       Knot.Extract.BuildDriver
                       Knot.Extract.ImportScan
-                      Knot.Extract.HiedbDriver
+                      Knot.Extract.HieIndex
                       Knot.Extract.HiedbFacts
                       Knot.Graph
                       Knot.Graph.Types
@@ -45,6 +45,7 @@ library knot-internal
                     , containers
                     , directory
                     , filepath
+                    , hiedb ^>=0.8
                     , process
                     , sqlite-simple ^>=0.4.19
                     , text

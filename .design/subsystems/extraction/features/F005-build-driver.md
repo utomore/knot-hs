@@ -236,3 +236,5 @@ ensureHie :: ExtractOptions -> ProjectMeta -> IO (Either ExtractFailure HieLayou
 - `enumerateHie` 走訪 builddir 全樹收 `*.hie`,不假設 `extra-compilation-artifacts/hie/`
   這個中間層(cabal 版本可能變),component 只看前五段
 - `componentRefOf` 對段數不足的路徑回 `ComponentRef ("", "")`,不拋例外
+
+- **2026-08-22(F006 追加)**:`cabalArgs` 多一個 `rootAbs` 參數並帶 `--project-dir=<root>`,理由與實測見 F006 實作備註 1;`test_cabal_invocation` 的期望同步。

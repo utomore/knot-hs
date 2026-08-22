@@ -3,12 +3,14 @@ name:               buildable
 version:            0.1.0.0
 build-type:         Simple
 
--- F005 T5 fixture:一個 library + 一個 executable,只依賴 base,保證建得起來。
+-- F005 T5 / F006 fixture:一個 library(Demo.Core + Demo.App,沿用 F004 的四 namespace 與
+-- deriving 產生碼樣本)+ 一個 executable,只依賴 base,保證建得起來。
 -- cabal.project 讓 cabal 停在這裡,不會往上找到 knot-hs 自己的專案。
 
 library
     hs-source-dirs:   src
     exposed-modules:  Demo.Core
+                      Demo.App
     build-depends:    base
     default-language: GHC2024
 

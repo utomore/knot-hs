@@ -3,7 +3,7 @@ id: F006
 type: feature
 title: hiedb-embed
 description: hiedb 改 library 嵌入,依 GHC 版本目錄過濾 .hie 並增量索引
-status: open
+status: done
 created: 2026-08-22
 updated: 2026-08-22
 depends-on: [F001, F004, F005, project-meta/F001]
@@ -201,13 +201,13 @@ data IndexStats = IndexStats
 
 ## TodoList
 
-- [ ] T1: `knot-hs.cabal` 加 `hiedb` 相依、`cabal.project` 加 `allow-newer`;閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` 仍 exit 0  `dep: -`
-- [ ] T2: 新模組 `Knot.Extract.HieIndex` 骨架取代 `HiedbDriver`(檔案刪除、cabal 一進一出);`IndexHandle` / `IndexStats` / 四個讀取器;`HiedbFacts` 改 import  `dep: T1`
-- [ ] T3: 版本過濾純函數 `ghcVersionOfPath` / `partitionByGhc` / `ownGhcVersion`,與 `VersionMismatch` / 零檔 `IndexFailed` 的判定  `dep: T2`
-- [ ] T4: `ensureIndex` 本體——`withHieDb` + 逐檔 `addRefsFrom`(`SkipOptions` 跳四表)+ 統計 + 清理(`deleteFileFromIndex` 多餘列、`deleteMissingRealFiles`)  `dep: T3`
-- [ ] T5: 失敗通道——索引檔開不了 / schema 不合 / 目錄被檔案佔住 → `IndexFailed`;單檔例外 → `ihNotes` 警告 + 跳過  `dep: T4`
-- [ ] T6: 過渡期轉接:`hiedbBackend` 的 `bProbe` 恆 `Available`、`bRun` 串 `ensureHie → ensureIndex → readIndexFacts`,失敗沿用 `HiedbFactsError`  `dep: T4`
-- [ ] T7: 測試搬遷——移除 F003 的測試與 `hiedbGatedTests` 跳過機制、刪 `test/fixtures/hiedb/`;F004 的 fixture 測試改走 `buildable` fixture 完整鏈(必要時擴充為兩個互相呼叫的 module);三條 selfcheck 改為直接走完整鏈  `dep: T6`
+- [x] T1: `knot-hs.cabal` 加 `hiedb` 相依、`cabal.project` 加 `allow-newer`;閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` 仍 exit 0  `dep: -`
+- [x] T2: 新模組 `Knot.Extract.HieIndex` 骨架取代 `HiedbDriver`(檔案刪除、cabal 一進一出);`IndexHandle` / `IndexStats` / 四個讀取器;`HiedbFacts` 改 import  `dep: T1`
+- [x] T3: 版本過濾純函數 `ghcVersionOfPath` / `partitionByGhc` / `ownGhcVersion`,與 `VersionMismatch` / 零檔 `IndexFailed` 的判定  `dep: T2`
+- [x] T4: `ensureIndex` 本體——`withHieDb` + 逐檔 `addRefsFrom`(`SkipOptions` 跳四表)+ 統計 + 清理(`deleteFileFromIndex` 多餘列、`deleteMissingRealFiles`)  `dep: T3`
+- [x] T5: 失敗通道——索引檔開不了 / schema 不合 / 目錄被檔案佔住 → `IndexFailed`;單檔例外 → `ihNotes` 警告 + 跳過  `dep: T4`
+- [x] T6: 過渡期轉接:`hiedbBackend` 的 `bProbe` 恆 `Available`、`bRun` 串 `ensureHie → ensureIndex → readIndexFacts`,失敗沿用 `HiedbFactsError`  `dep: T4`
+- [x] T7: 測試搬遷——移除 F003 的測試與 `hiedbGatedTests` 跳過機制、刪 `test/fixtures/hiedb/`;F004 的 fixture 測試改走 `buildable` fixture 完整鏈(必要時擴充為兩個互相呼叫的 module);三條 selfcheck 改為直接走完整鏈  `dep: T6`
 
 ## 1-to-1 測試對照表
 
@@ -223,4 +223,10 @@ data IndexStats = IndexStats
 
 ## 實作備註
 
-(開發過程中與設計的偏差記錄於此,撰寫時留空)
+2026-08-22 實作完成,全部 Todo 與 1-to-1 測試落地;與設計的偏差如下:
+
+1. **build-driver 多帶 `--project-dir=<root>`(動到 F005 的 `cabalArgs`)**。實測:fixture 沒有 `cabal.project` 時 cabal 會往上找到 knot-hs 自己的 `cabal.project`,把整個 knot-hs 建進 fixture 的 `.knot/build/`(F005 當時靠給 fixture 加 `cabal.project` 繞過)。`--project-dir` 讓 cabal 只認指定根目錄:有 `cabal.project` 就用它,沒有就以該目錄的 `.cabal` 為隱含專案。對使用者的語意是「指到哪、建哪」;monorepo 子目錄套件若依賴上層 `cabal.project` 的設定,需指向 monorepo 根。已寫進 L2 規則 5 與 F005 實作備註。
+2. **過渡期的失敗文字 `renderFailure` 放在 `HiedbFacts`(私有)**,`BuildFailed` 只取 `bfDetail` 首行:cabal 的輸出已即時轉發到 stderr,尾段再進報告會讓同一輸入兩次執行的 `--summary facts` 不相等(規則 8 決定性;`test_run_extract` 的 (c) 段逐字元比對)。正式的 CLI 渲染屬 export-query #5。
+3. **測試搬遷的副作用**:`extract` 在 `Auto` 下對不可建置 fixture(proj / comps / graph)會真的叫 cabal、失敗後留下一則 `hiedb` 來源的警告並在 fixture 內建出自我忽略的 `.knot/`。三條只看 import-scan 的既有測試(F001 T7、F002 T6、graph-core F001)改為 `ImportsOnly` 或改斷言為「唯一警告來自 hiedb」;其餘走 `Auto` 的測試語意不變。每次這類失敗建置約 1–4 s,整套測試 204 s(含 knot-hs 自建 19.5 s)。
+4. **單檔失敗的計數**:0 byte 假 `.hie` 混入時 `addRefsFrom` 在讀檔時拋例外,該檔不計入 `indexedCount` / `skippedCount`,只進 `ihNotes`(T5 (b) 以 `IndexStats 0 n` 釘住)。
+5. **驗收數字**(knot-hs 自身,`--include-tests` 關):`.hie` 32 個、decls 673、refs 8210(F004 閘門紀錄 649 / 7899,上升是因為 Demo fixture 與 BuildDriver 之後的程式碼增長);buildable fixture 3 個 `.hie`,第二次 `ensureIndex` 3.6 ms;跳表生效(`typenames` / `typerefs` / `exports` / `imports` 皆 0 列)。

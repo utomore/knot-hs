@@ -4,7 +4,7 @@
 -- F003 query-commands、F004 cli-wiring)的 1-to-1 測試。
 module Main (main) where
 
-import Control.Exception (evaluate, throwIO)
+import Control.Exception (throwIO)
 import Control.Monad (forM, forM_)
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as AK
@@ -23,13 +23,11 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
-import Data.Version (showVersion)
 import System.Directory
   ( copyFile
   , createDirectoryIfMissing
   , doesDirectoryExist
   , doesFileExist
-  , findExecutable
   , getFileSize
   , getModificationTime
   , getTemporaryDirectory
@@ -38,9 +36,8 @@ import System.Directory
   , removePathForcibly
   )
 import System.Exit (ExitCode (..))
-import System.FilePath (isAbsolute, takeDirectory, takeExtension, takeFileName, (</>))
+import System.FilePath (takeDirectory, takeExtension, takeFileName, (</>))
 import GHC.Clock (getMonotonicTime)
-import System.Info (fullCompilerVersion)
 import System.IO
   ( Handle
   , IOMode (WriteMode)
@@ -53,7 +50,7 @@ import System.IO
 import System.Process (readProcessWithExitCode)
 
 -- extraction/F004 T10:驗收標準 3 的「逐筆對帳」要獨立開 DB 查 refs 表。
-import Database.SQLite.Simple (Query (..), query_, withConnection)
+import Database.SQLite.Simple (Only (..), Query (..), execute_, query_, withConnection)
 
 import Options.Applicative
   ( ParserResult (..)
@@ -121,18 +118,18 @@ import Knot.Extract.BuildDriver
   , prepareKnotDir
   , runCabalWith
   )
-import Knot.Extract.HiedbDriver
-  ( IndexStats (..)
-  , chunkFileArgs
-  , defaultDbPath
+import Knot.Extract.HieIndex
+  ( IndexHandle
+  , IndexStats (..)
   , ensureIndex
+  , ghcVersionOfPath
   , ihDbPath
-  , ihExe
   , ihNotes
   , ihRootDir
   , ihStats
-  , parseIndexStats
-  , probeHiedb
+  , indexDbPath
+  , ownGhcVersion
+  , partitionByGhc
   )
 import Knot.Extract.HiedbFacts
   ( SourceDecls (..)
@@ -246,19 +243,6 @@ hieConvFixture, hieDistFixture :: FilePath
 hieConvFixture = "test/fixtures/hie-conv"
 hieDistFixture = "test/fixtures/hie-dist"
 
--- | extraction\/F003 用:2 module 小專案 + GHC 9.14.1 產出的__真實__ @.hie@
--- (入版控,委派決策 D6)。
---
--- @.hie@ 的產生方式(__不入測試流程__,GHC 升版時在 @test\/fixtures\/hiedb\/@
--- 下重跑一次即可;不需 cabal、不留 @dist-newstyle@ \/ @.hi@ \/ @.o@):
---
--- > ghc -fno-code -fwrite-ide-info -hiedir .hie -isrc src/Demo/App.hs src/Demo/Core.hs
---
--- 產生後 @test_hiedb_fixture@ 會比對檔頭第二行與本 GHC 版本,升版忘了重跑
--- 會先在那裡紅掉(而不是讓 hiedb 神秘失敗)。
-hiedbFixture :: FilePath
-hiedbFixture = "test/fixtures/hiedb"
-
 defOpts :: FilePath -> MetaOptions
 defOpts r = MetaOptions { root = r, includeTests = False, hieDirOverride = Nothing }
 
@@ -289,21 +273,18 @@ findSf p sfs = case find ((== p) . sfPath) sfs of
   Just sf -> pure sf
   Nothing -> assertFailure ("source file not found: " <> p)
 
--- | 委派決策 D7:hiedb 是__選用__外部依賴(ADR-002 的降級原則),沒裝時
--- 相依測試自動跳過,但必須__印明原因與跳過數__,不讓專案看起來是壞的。
+-- | F006 起 hiedb 以 library 嵌入(ADR-006):沒有「沒裝就跳過」的分支,
+-- 全部測試無條件掛載。
 main :: IO ()
-main = do
-  mExe <- findExecutable "hiedb"
-  putStrLn (hiedbNotice mExe hiedbGatedCount)
-  defaultMain (tests mExe)
+main = defaultMain tests
 
-tests :: Maybe FilePath -> TestTree
-tests mHiedb = testGroup "knot-hs"
+tests :: TestTree
+tests = testGroup "knot-hs"
   [ f001Tests, f002Tests, f003Tests
   , extractionF001Tests, extractionF002Tests
-  , extractionF003Tests mHiedb
-  , extractionF004Tests mHiedb
+  , extractionF004Tests
   , extractionF005Tests
+  , extractionF006Tests
   , graphCoreF001Tests
   , graphCoreF002Tests
   , graphCoreF003Tests
@@ -1191,7 +1172,8 @@ testExtractEntryEmptyRegistry = testCase "test_extract_entry_registry" $ do
     erLevel r @?= ModuleLevel
   rHiedb <- extract (extOpts HiedbOnly) pm
   erFacts rHiedb    @?= []   -- import-scan 未選中 → 無事實
-  erWarnings rHiedb @?= []
+  -- F006 起 hiedb 真的會去建置 projFixture(老 .cabal,cabal 解不了相依)→ 唯一的警告來自它
+  map ewSource (erWarnings rHiedb) @?= [hiedbName]
 
 --------------------------------------------------------------------------------
 -- extraction/F002 import-scan
@@ -1451,7 +1433,8 @@ testRunBestEffort = testCase "test_run_best_effort" $ do
     _ -> assertFailure ("expected exactly two warnings, got: " <> show ws)
   -- 經 extract 的真實 fixture:被排除檔不產生任何事實
   pm <- loadProjectMeta (defOpts compsFixture)
-  r <- extract ((extOpts Auto) { XT.rootDir = compsFixture }) pm
+  -- 本測試只看 import-scan 的排除行為;comps fixture 建不起來(flib),不必拖 hiedb 進來
+  r <- extract ((extOpts ImportsOnly) { XT.rootDir = compsFixture }) pm
   erWarnings r @?= []
   let excluded = map sfPath (filter (not . sfIncluded) (pmSources pm))
   assertBool "fixture must contain excluded files" (not (null excluded))
@@ -1539,67 +1522,48 @@ testRenderFactSummary = testCase "test_render_fact_summary" $ do
   renderFactSummary res @?= out
 
 --------------------------------------------------------------------------------
--- extraction/F003 hiedb-driver
+-- extraction/F006 hiedb-embed(取代 F003 hiedb-driver:hiedb 以 library 嵌入)
 --------------------------------------------------------------------------------
 
--- | hiedb 不可用時仍會執行的測試 + 依 hiedb 是否存在而掛載的閘門節點(D7)。
-extractionF003Tests :: Maybe FilePath -> TestTree
-extractionF003Tests mHiedb = testGroup "extraction/F003 hiedb-driver" $
-  [ testDefaultDbPath        -- T1
-  , testChunkFileArgs        -- T2
-  , testParseIndexStats      -- T3
-  , testHiedbFixture         -- T4
-  , testHiedbSkipNotice      -- T5
-  , testProbeHiedbNoExe      -- T6(不需 hiedb 的部分)
-  , testHiedbDegrade         -- T10
-  ]
-  ++ case mHiedb of
-       Just _  -> hiedbGatedTests
-       Nothing -> [testCase (hiedbSkipLabel (length hiedbGatedTests)) (pure ())]
-
--- | 需要 hiedb 執行檔才跑得動的測試節點(D7 的管轄範圍)。
-hiedbGatedTests :: [TestTree]
-hiedbGatedTests =
-  [ testProbeHiedbAvailable  -- T6(需 hiedb 的部分)
-  , testEnsureIndex          -- T7
-  , testKnotDirPolicy        -- T8
-  , testIndexReuse           -- T9
-  , testHiedbSelfcheck       -- T11
+extractionF006Tests :: TestTree
+extractionF006Tests = testGroup "extraction/F006 hiedb-embed"
+  [ testHiedbIsBuildDependency   -- T1
+  , testNoHiedbExecutablePath    -- T2
+  , testGhcVersionFilter         -- T3
+  , testEnsureIndexIncremental   -- T4
+  , testEnsureIndexFailures      -- T5
+  , testHiedbBackendAdapter      -- T6
+  -- T7(測試搬遷)= F004 群組裡改走 buildable 完整鏈的 fixture 測試、
+  -- test_hiedb_facts_selfcheck 與 G-E003 的 test_generated_filter_selfcheck
   ]
 
--- | 跳過數常數;由 @test_hiedb_skip_notice@ 與實際掛載的節點數對帳
--- (假設 A7:不引入 @tasty-expected-failure@,跳過數改由訊息與節點名承載)。
---
--- extraction/F004 沿用同一個開關(委派決策 D7:只__加掛__、不另建一套),
--- 故總數是兩個 feature 的受管轄節點數相加。
-hiedbGatedCount :: Int
-hiedbGatedCount = length hiedbGatedTests + length hiedbGatedF004Tests
-
--- | 測試啟動時印的一行:有 hiedb 就說用哪支,沒有就說明原因與跳過數。
-hiedbNotice :: Maybe FilePath -> Int -> String
-hiedbNotice (Just p) _ = "[hiedb] using " <> p
-hiedbNotice Nothing n =
-  "[skip] extraction/F003 hiedb-driver + F004 hiedb-facts: \
-  \hiedb executable not found on PATH; " <> show n <> " tests skipped"
-
--- | 佔位節點的名稱本身帶跳過數,使其也出現在 tasty 的逐項輸出。
-hiedbSkipLabel :: Int -> String
-hiedbSkipLabel n = "skipped (hiedb not on PATH): " <> show n <> " tests"
-
--- | 以 PATH 上的 hiedb + 指定 root 組出 'ExtractOptions'。
-hiedbOpts :: FilePath -> ExtractOptions
-hiedbOpts r = (extOpts Auto) { XT.rootDir = r }
-
--- | 把 hiedb fixture 複製到暫存目錄再跑(假設 A6:版控樹全程唯讀)。
-withHiedbScratch :: String -> (FilePath -> IO a) -> IO a
-withHiedbScratch tag act = do
+-- | 把 fixture 複製到暫存目錄再跑(版控樹全程唯讀;fixture 自帶 cabal.project,
+-- 加上 build-driver 的 @--project-dir@,cabal 不會往上抓到 knot-hs)。
+withFixtureScratch :: FilePath -> String -> (FilePath -> IO a) -> IO a
+withFixtureScratch fixture tag act = do
   tmp <- getTemporaryDirectory
-  let root = tmp </> ("knot-hs-f003-" <> tag)
+  let root = tmp </> ("knot-hs-f006-" <> tag)
   removePathForcibly root
-  copyTree hiedbFixture root
+  copyTree fixture root
   r <- act root
   removePathForcibly root
   pure r
+
+-- | 'buildableFixture' 的暫存副本。
+withBuildableScratch :: String -> (FilePath -> IO a) -> IO a
+withBuildableScratch = withFixtureScratch buildableFixture
+
+-- | 指定 root 的 'ExtractOptions'(其餘欄位沿用 'extOpts' 預設)。
+hiedbOpts :: FilePath -> ExtractOptions
+hiedbOpts r = (extOpts Auto) { XT.rootDir = r }
+
+-- | ensureHie → ensureIndex 兩步到位,回 (ProjectMeta, HieLayout, IndexHandle)。
+indexScratch :: FilePath -> IO (ProjectMeta, XT.HieLayout, IndexHandle)
+indexScratch root = do
+  pm <- loadProjectMeta (defOpts root)
+  layout <- expectRight =<< ensureHie (hiedbOpts root) pm
+  h <- expectRight =<< ensureIndex (hiedbOpts root) layout
+  pure (pm, layout, h)
 
 copyTree :: FilePath -> FilePath -> IO ()
 copyTree from to = do
@@ -1613,333 +1577,202 @@ copyTree from to = do
       createDirectoryIfMissing True (takeDirectory to)
       copyFile from to
 
-expectRight :: Either Text a -> IO a
-expectRight (Left e)  = assertFailure ("expected Right, got: " <> T.unpack e)
+expectRight :: Show e => Either e a -> IO a
+expectRight (Left e)  = assertFailure ("expected Right, got: " <> show e)
 expectRight (Right a) = pure a
 
-expectUnavailable :: String -> ProbeResult -> IO Text
-expectUnavailable pfx r = case r of
-  Available -> assertFailure ("expected Unavailable with prefix " <> show pfx)
-  Unavailable reason -> do
-    assertBool ("expected prefix " <> show pfx <> ", got: " <> T.unpack reason)
-      (T.pack pfx `T.isPrefixOf` reason)
-    pure reason
+-- | 某張表的列數(T4 / T5 直接對索引檔查證)。
+rowCount :: FilePath -> String -> IO Int
+rowCount db table = withConnection db $ \c -> do
+  rows <- query_ c (Query (T.pack ("SELECT count(*) FROM " <> table))) :: IO [Only Int]
+  case rows of
+    [Only n] -> pure n
+    other    -> assertFailure ("count(*) on " <> table <> " returned " <> show (length other) <> " rows")
 
--- extraction/F003 T1: 預設索引位置(規則 6)是純函數
-testDefaultDbPath :: TestTree
-testDefaultDbPath = testCase "test_default_db_path" $ do
-  forM_ ["proj", "/abs/root", "proj/", "C:/x/y"] $ \r -> do
-    let p = defaultDbPath r
-    takeFileName p @?= "hiedb.sqlite"
-    takeFileName (takeDirectory p) @?= ".knot"
-    p @?= r </> ".knot" </> "hiedb.sqlite"
-  -- 純函數、零 IO:求值前後 .knot/ 都不存在
-  tmp <- getTemporaryDirectory
-  let r = tmp </> "knot-hs-f003-pure"
-  removePathForcibly r
-  doesDirectoryExist (r </> ".knot") >>= (@?= False)
-  _ <- evaluate (length (defaultDbPath r))
-  doesDirectoryExist (r </> ".knot") >>= (@?= False)
-  -- IndexStats 的 Eq / Show 可用(F004 與重用驗收都靠它)
-  let st = IndexStats { indexedCount = 2, skippedCount = 0, batchCount = 1 }
-  st @?= IndexStats 2 0 1
-  assertBool "IndexStats Show" ("indexedCount = 2" `isInfixOf` show st)
+-- | 組一條 cabal builddir 佈局下的 @.hie@ 路徑(版本段可指定)。
+hieUnderGhc :: String -> FilePath
+hieUnderGhc v = ".knot/build/build/x86_64-windows/ghc-" <> v
+  <> "/buildable-0.1.0.0/build/extra-compilation-artifacts/hie/Demo/Core.hie"
 
--- extraction/F003 T2: 命令列分批(雙上限、不丟檔、順序保持)
-testChunkFileArgs :: TestTree
-testChunkFileArgs = testGroup "test_chunk_file_args"
-  [ testCase "examples" $ do
-      chunkFileArgs 100 10 [] @?= []
-      -- 檔數上限觸發
-      let xs = map (\i -> "a" <> show i) [1 .. 10 :: Int]
-      map length (chunkFileArgs 100000 3 xs) @?= [3, 3, 3, 1]
-      concat (chunkFileArgs 100000 3 xs) @?= xs
-      -- 字元上限觸發(每個路徑計 length + 3 的餘裕 → 20)
-      let ys = replicate 5 (replicate 17 'x')
-      map length (chunkFileArgs 45 100 ys) @?= [2, 2, 1]
-      -- 單一超長路徑自成一批且不被丟棄
-      let long = replicate 200 'z'
-      chunkFileArgs 10 100 ["a", long, "b"] @?= [["a"], [long], ["b"]]
-  , testProperty "concat . chunkFileArgs a b == id" $ property $ do
-      xs <- forAll (Gen.list (Range.linear 0 40)
-              (Gen.string (Range.linear 1 20) Gen.alphaNum))
-      charCap <- forAll (Gen.int (Range.linear 1 200))
-      fileCap <- forAll (Gen.int (Range.linear 1 10))
-      let batches = chunkFileArgs charCap fileCap xs
-      concat batches === xs
-      annotate ("batch sizes: " <> show (map length batches))
-      assert (all (not . null) batches)
-      assert (all ((<= fileCap) . length) batches)
-  ]
+buildableLib :: ComponentRef
+buildableLib = ComponentRef (T.pack "buildable", T.pack "lib:buildable")
 
--- extraction/F003 T3: hiedb 的 Completed! 行解析(多批相加)
-testParseIndexStats :: TestTree
-testParseIndexStats = testCase "test_parse_index_stats" $ do
-  let one = T.pack "Completed! (2 indexed, 0 skipped in 0.21s + 0.00s gc)\n"
-  parseIndexStats 1 one @?= IndexStats 2 0 1
-  -- 兩批輸出串接 → 計數相加、批數取參數;progress 行不影響
-  let two = one
-        <> T.pack "Processing file src/Demo/App.hie\n"
-        <> T.pack "Completed! (3 indexed, 1 skipped in 0.05s)\n"
-  parseIndexStats 2 two @?= IndexStats 5 1 2
-  -- 重跑的形狀
-  parseIndexStats 1 (T.pack "Completed! (0 indexed, 2 skipped in 0.06s)")
-    @?= IndexStats 0 2 1
-  -- 不含 Completed! 的輸出 → 0/0(exit code 才是權威)
-  parseIndexStats 3 (T.pack "Processing file a\nProcessing file b\n")
-    @?= IndexStats 0 0 3
-  parseIndexStats 0 T.empty @?= IndexStats 0 0 0
+-- F006 T1:hiedb 是 build-depends,cabal.project 有 allow-newer(閘門本身在收尾時跑)
+testHiedbIsBuildDependency :: TestTree
+testHiedbIsBuildDependency = testCase "test_hiedb_is_build_dependency" $ do
+  cabalSrc <- readUtf8 "knot-hs.cabal"
+  let ls = map (T.dropWhileEnd (== '\r')) (T.lines cabalSrc)
+      internal = takeWhile (/= T.pack "library")
+                   (drop 1 (dropWhile (/= T.pack "library knot-internal") ls))
+  assertBool "knot-internal stanza must exist" (not (null internal))
+  assertBool "knot-internal must list hiedb in build-depends"
+    (any (hasText "hiedb") internal)
+  proj <- readUtf8 "cabal.project"
+  assertHasAll "cabal.project" proj ["allow-newer:", "hie-compat:base", "hie-compat:ghc"]
 
--- extraction/F003 T4: fixture 的真實 .hie 存在且與本 GHC 同版
-testHiedbFixture :: TestTree
-testHiedbFixture = testCase "test_hiedb_fixture" $ do
-  let hies = [".hie/Demo/Core.hie", ".hie/Demo/App.hie"]
-  forM_ (["src/Demo/Core.hs", "src/Demo/App.hs"] <> hies) $ \p -> do
-    ok <- doesFileExist (hiedbFixture </> p)
-    assertBool ("fixture file missing: " <> p) ok
-  forM_ hies $ \p -> do
-    bytes <- BS.readFile (hiedbFixture </> p)
-    assertBool ("empty .hie (0 byte 空殼餵不了 hiedb): " <> p) (BS.length bytes > 0)
-    BS.take 3 bytes @?= TE.encodeUtf8 (T.pack "HIE")
-    -- 檔頭第二行 = 產生它的 GHC 版本;GHC 升版時這裡先紅,指向重跑產生指令
-    case BS.split 10 (BS.drop 3 (BS.take 64 bytes)) of
-      (_hieVer : ghcVer : _) ->
-        TE.decodeUtf8 ghcVer @?= T.pack (showVersion fullCompilerVersion)
-      _ -> assertFailure ("unrecognised .hie header: " <> p)
+-- F006 T2:沒有任何 spawn hiedb 執行檔的路徑;模組一進一出
+testNoHiedbExecutablePath :: TestTree
+testNoHiedbExecutablePath = testCase "test_no_hiedb_executable_path" $ do
+  gone <- doesFileExist "src/Knot/Extract/HiedbDriver.hs"
+  assertBool "src/Knot/Extract/HiedbDriver.hs must be gone" (not gone)
+  srcs <- filter ((== ".hs") . takeExtension) <$> listFilesRec "src"
+  forM_ srcs $ \p -> do
+    s <- readUtf8 p
+    forM_ ["proc \"hiedb\"", "chunkFileArgs", "parseIndexStats", "findExecutable \"hiedb\""] $ \needle ->
+      assertBool (p <> " must not contain " <> show needle) (not (hasText needle s))
+  cabalSrc <- readUtf8 "knot-hs.cabal"
+  assertBool "cabal exposes Knot.Extract.HieIndex" (hasText "Knot.Extract.HieIndex" cabalSrc)
+  assertBool "cabal no longer lists HiedbDriver" (not (hasText "HiedbDriver" cabalSrc))
 
--- extraction/F003 T5: 跳過訊息與跳過數(D7 / 假設 A7)
-testHiedbSkipNotice :: TestTree
-testHiedbSkipNotice = testCase "test_hiedb_skip_notice" $ do
-  let absent = hiedbNotice Nothing hiedbGatedCount
-  forM_ ["hiedb", "not found", show hiedbGatedCount] $ \needle ->
-    assertBool ("skip notice must mention " <> show needle <> ": " <> absent)
-      (needle `isInfixOf` absent)
-  let present = hiedbNotice (Just "C:/cabal/bin/hiedb.exe") hiedbGatedCount
-  assertBool ("notice must name the executable: " <> present)
-    ("C:/cabal/bin/hiedb.exe" `isInfixOf` present)
-  -- 佔位節點名稱也帶跳過數,使其出現在 tasty 逐項輸出
-  assertBool "skip label carries the count"
-    (show hiedbGatedCount `isInfixOf` hiedbSkipLabel hiedbGatedCount)
-  -- 常數與實際受管轄的節點數對帳(F003 五個 + F004 加掛的,D7 同一個開關)
-  hiedbGatedCount @?= length hiedbGatedTests + length hiedbGatedF004Tests
-  assertBool "F004 must hang its gated tests on the same switch"
-    (not (null hiedbGatedF004Tests))
+-- F006 T3:版本過濾純函數與零相符的兩種判定(全部不需要真實 .hie)
+testGhcVersionFilter :: TestTree
+testGhcVersionFilter = testCase "test_ghc_version_filter" $ do
+  let own = T.unpack ownGhcVersion
+  ghcVersionOfPath (hieUnderGhc "9.14.1") @?= Just (T.pack "9.14.1")
+  ghcVersionOfPath "dist/ghc-lib-parser-9.14.1/x.hie" @?= Nothing
+  ghcVersionOfPath "src/Foo.hie" @?= Nothing
+  let mixed = XT.HieLayout
+        { XT.hlRoot  = ".knot/build"
+        , XT.hlFiles = [ (buildableLib, hieUnderGhc own)
+                       , (buildableLib, hieUnderGhc "9.12.2")
+                       , (buildableLib, hieUnderGhc "9.10.1") ] }
+      (matching, others) = partitionByGhc ownGhcVersion mixed
+  map snd matching @?= [hieUnderGhc own]
+  others @?= map T.pack ["9.10.1", "9.12.2"]
+  -- 只含別版 → VersionMismatch,兩個版本字串都填
+  r <- ensureIndex (hiedbOpts buildableFixture) mixed { XT.hlFiles = [(buildableLib, hieUnderGhc "9.12.2")] }
+  case r of
+    Left (XT.VersionMismatch h k) -> do
+      h @?= T.pack "9.12.2"
+      k @?= ownGhcVersion
+    other -> assertFailure ("expected VersionMismatch, got " <> either show (const "Right") other)
+  -- 空 layout → IndexFailed(建置成功卻沒產物是異常,不是版本問題)
+  r0 <- ensureIndex (hiedbOpts buildableFixture) mixed { XT.hlFiles = [] }
+  case r0 of
+    Left (XT.IndexFailed d) -> assertBool ("should mention .hie: " <> T.unpack d) (hasText ".hie" d)
+    other -> assertFailure ("expected IndexFailed, got " <> either show (const "Right") other)
+  -- 沒有版本段 → IndexFailed 指明佈局異常
+  r1 <- ensureIndex (hiedbOpts buildableFixture) mixed { XT.hlFiles = [(buildableLib, "weird/Foo.hie")] }
+  case r1 of
+    Left (XT.IndexFailed d) -> assertBool ("should mention ghc-<version>: " <> T.unpack d) (hasText "ghc-<version>" d)
+    other -> assertFailure ("expected IndexFailed, got " <> either show (const "Right") other)
+  -- 以上三條都在 IO 之前判定:版控樹裡的 fixture 不得因此長出 .knot/
+  leaked <- doesDirectoryExist (knotDir buildableFixture)
+  assertBool "pure-path failures must not touch the file system" (not leaked)
 
--- extraction/F003 T6(不需 hiedb):執行檔類不可用,原因指明執行檔
-testProbeHiedbNoExe :: TestTree
-testProbeHiedbNoExe = testCase "test_probe_hiedb" $ do
-  pm <- loadProjectMeta (defOpts hiedbFixture)
-  let missing = hiedbFixture </> "no-such-hiedb-binary"
-      opts = (hiedbOpts hiedbFixture) { XT.hiedbExe = Just missing }
-  reason <- expectUnavailable "hiedb executable " =<< probeHiedb opts pm
-  assertBool ("reason must name the executable: " <> T.unpack reason)
-    (T.pack missing `T.isInfixOf` reason)
-
--- extraction/F003 T6(需 hiedb):.hie 類與版本類的區分,以及全過 → Available
-testProbeHiedbAvailable :: TestTree
-testProbeHiedbAvailable = testCase "test_probe_hiedb_available" $ do
-  pm <- loadProjectMeta (defOpts hiedbFixture)
-  hie <- case pmHie pm of
-    Nothing -> assertFailure "fixture must expose a .hie directory"
-    Just h  -> pure h
-  -- fixture 的 .hie 由本 GHC 產出 → 全過
-  probeHiedb (hiedbOpts hiedbFixture) pm >>= (@?= Available)
-  -- 無 .hie 目錄
-  _ <- expectUnavailable "hie files unavailable: "
-    =<< probeHiedb (hiedbOpts hiedbFixture) pm { pmHie = Nothing }
-  -- 清單為空 → 訊息含 hieDir
-  emptyReason <- expectUnavailable "hie files unavailable: "
-    =<< probeHiedb (hiedbOpts hiedbFixture) pm { pmHie = Just hie { hieFiles = [] } }
-  assertBool ("reason must name hieDir: " <> T.unpack emptyReason)
-    (T.pack (hieDir hie) `T.isInfixOf` emptyReason)
-  -- 版本類:檔頭寫著別版 GHC(ADR-001 版本鎖)
-  withHiedbScratch "probe" $ \root -> do
-    let fake = ".hie/Demo/Fake.hie"
-    BS.writeFile (root </> fake) (TE.encodeUtf8 (T.pack "HIE9141\n8.10.7\n"))
-    mismatch <- expectUnavailable "hie/ghc version mismatch: "
-      =<< probeHiedb (hiedbOpts root) pm { pmHie = Just hie { hieFiles = [fake] } }
-    assertBool ("reason must name the .hie: " <> T.unpack mismatch)
-      (T.pack "Fake.hie" `T.isInfixOf` mismatch)
-    -- 檔頭不成形 → .hie 類(不是版本類)
-    let broken = ".hie/Demo/Broken.hie"
-    BS.writeFile (root </> broken) (TE.encodeUtf8 (T.pack "not a hie file"))
-    _ <- expectUnavailable "hie files unavailable: "
-      =<< probeHiedb (hiedbOpts root) pm { pmHie = Just hie { hieFiles = [broken] } }
-    pure ()
-
--- extraction/F003 T7: ensureIndex 主流程(驗收標準 2)
-testEnsureIndex :: TestTree
-testEnsureIndex = testCase "test_ensure_index" $ withHiedbScratch "ensure" $ \root -> do
-  pm <- loadProjectMeta (defOpts root)
-  hie <- case pmHie pm of
-    Nothing -> assertFailure "scratch tree must expose a .hie directory"
-    Just h  -> pure h
-  length (hieFiles hie) @?= 2
-  h <- expectRight =<< ensureIndex (hiedbOpts root) pm
-  rootAbs <- makeAbsolute root
-  assertBool ("ihDbPath must be absolute: " <> ihDbPath h) (isAbsolute (ihDbPath h))
-  ihDbPath h @?= rootAbs </> ".knot" </> "hiedb.sqlite"
-  doesFileExist (ihDbPath h) >>= (@?= True)
-  -- 「可被 SQLite 開啟」的機器可驗證形式:檔案 magic
-  magic <- BS.take 16 <$> BS.readFile (ihDbPath h)
-  magic @?= TE.encodeUtf8 (T.pack "SQLite format 3") <> BS.pack [0]
-  assertBool ("ihRootDir must be absolute: " <> ihRootDir h) (isAbsolute (ihRootDir h))
-  ihRootDir h @?= rootAbs
-  ihStats h @?= IndexStats { indexedCount = 2, skippedCount = 0, batchCount = 1 }
-  assertBool "ihExe must name the executable actually used" (not (null (ihExe h)))
-  -- 壞檔:單一 0 byte 假 .hie 會讓整批 hiedb index 以 exit 1 中止 → Left
-  let bad = ".hie/Demo/Bad.hie"
-  BS.writeFile (root </> bad) BS.empty
-  broken <- ensureIndex (hiedbOpts root)
-    pm { pmHie = Just hie { hieFiles = hieFiles hie <> [bad] } }
-  case broken of
-    Right _ -> assertFailure "expected Left for a corrupt .hie"
-    Left e  -> assertBool ("expected index-failure prefix, got: " <> T.unpack e)
-      (T.pack "hiedb index failed: " `T.isPrefixOf` e)
-
--- extraction/F003 T8: .knot/ 政策與 dbPath 改道(驗收標準 3)
-testKnotDirPolicy :: TestTree
-testKnotDirPolicy = testCase "test_knot_dir_policy" $ do
-  -- (a) 預設路徑 + 乾淨樹 → 建 .knot/ 並產生恰一則提示
-  withHiedbScratch "knot" $ \root -> do
-    pm <- loadProjectMeta (defOpts root)
-    doesDirectoryExist (root </> ".knot") >>= (@?= False)
-    h1 <- expectRight =<< ensureIndex (hiedbOpts root) pm
-    doesFileExist (root </> ".knot" </> "hiedb.sqlite") >>= (@?= True)
-    case ihNotes h1 of
-      [n] -> do
-        ewSource n @?= hiedbName
-        assertBool ("note must mention .knot: " <> T.unpack (ewMessage n))
-          (T.pack ".knot" `T.isInfixOf` ewMessage n)
-        assertBool ("note must mention .gitignore: " <> T.unpack (ewMessage n))
-          (T.pack ".gitignore" `T.isInfixOf` ewMessage n)
-      ns -> assertFailure ("expected exactly one note, got: " <> show ns)
-    -- (b) 已存在 → 不重複提示
-    h2 <- expectRight =<< ensureIndex (hiedbOpts root) pm
-    ihNotes h2 @?= []
-  -- (c) dbPath 指到專案外的絕對路徑 → .knot/ 完全不被建立、不出提示
-  withHiedbScratch "dbabs" $ \root -> do
-    tmp <- getTemporaryDirectory
-    let outside = tmp </> "knot-hs-f003-dbabs-out" </> "elsewhere.sqlite"
-    removePathForcibly (takeDirectory outside)
-    pm <- loadProjectMeta (defOpts root)
-    h <- expectRight =<< ensureIndex ((hiedbOpts root) { XT.dbPath = Just outside }) pm
-    outsideAbs <- makeAbsolute outside
-    ihDbPath h @?= outsideAbs
-    doesFileExist outside >>= (@?= True)
-    doesDirectoryExist (root </> ".knot") >>= (@?= False)
-    ihNotes h @?= []
-    removePathForcibly (takeDirectory outside)
-  -- (d) dbPath 為相對路徑 → 以 rootDir 為錨點(階段二閘門對假設 A3 的裁決),
-  --     不是行程 cwd;.knot/ 一樣不被建立
-  withHiedbScratch "dbrel" $ \root -> do
-    pm <- loadProjectMeta (defOpts root)
-    let rel = "build/idx.sqlite"
-    h <- expectRight =<< ensureIndex ((hiedbOpts root) { XT.dbPath = Just rel }) pm
+-- F006 T4:真實索引 + 增量重跑 + 跳表生效
+testEnsureIndexIncremental :: TestTree
+testEnsureIndexIncremental = testCase "test_ensure_index_incremental" $
+  withBuildableScratch "incremental" $ \root -> do
+    (_, layout, h) <- indexScratch root
     rootAbs <- makeAbsolute root
-    ihDbPath h @?= rootAbs </> "build" </> "idx.sqlite"
-    doesFileExist (root </> "build" </> "idx.sqlite") >>= (@?= True)
-    doesDirectoryExist (root </> ".knot") >>= (@?= False)
-    -- 錨點確實是 rootDir 而非行程 cwd
-    doesFileExist ("build" </> "idx.sqlite") >>= (@?= False)
-    ihNotes h @?= []
+    let n = length (fst (partitionByGhc ownGhcVersion layout))
+    assertBool "fixture must yield at least one matching .hie" (n > 0)
+    ihRootDir h @?= root
+    ihDbPath h  @?= indexDbPath rootAbs
+    ihNotes h   @?= []
+    ihStats h   @?= IndexStats n 0
+    rowCount (ihDbPath h) "mods" >>= (@?= n)
+    forM_ ["typenames", "typerefs", "exports", "imports"] $ \t ->
+      rowCount (ihDbPath h) t >>= (@?= 0)
+    assertBool "decls must be indexed" . (> 0) =<< rowCount (ihDbPath h) "decls"
+    assertBool "refs must be indexed"  . (> 0) =<< rowCount (ihDbPath h) "refs"
+    -- 第二次:全部雜湊未變 → 零索引、全跳過、列數不變
+    t0 <- getMonotonicTime
+    h2 <- expectRight =<< ensureIndex (hiedbOpts root) layout
+    t1 <- getMonotonicTime
+    ihStats h2 @?= IndexStats 0 n
+    rowCount (ihDbPath h2) "mods" >>= (@?= n)
+    putStrLn ("[F006] hie=" <> show n <> " second ensureIndex " <> show (t1 - t0) <> "s")
 
--- extraction/F003 T9: 索引重用以計數判定,不用計時(驗收標準 4)
-testIndexReuse :: TestTree
-testIndexReuse = testCase "test_index_reuse" $ withHiedbScratch "reuse" $ \root -> do
-  pm <- loadProjectMeta (defOpts root)
-  h1 <- expectRight =<< ensureIndex (hiedbOpts root) pm
-  h2 <- expectRight =<< ensureIndex (hiedbOpts root) pm
-  (indexedCount (ihStats h1), skippedCount (ihStats h1)) @?= (2, 0)
-  (indexedCount (ihStats h2), skippedCount (ihStats h2)) @?= (0, 2)
-  ihDbPath h2 @?= ihDbPath h1
+-- F006 T5:失敗通道——整體失敗 → IndexFailed;單檔失敗 → ihNotes
+testEnsureIndexFailures :: TestTree
+testEnsureIndexFailures = testCase "test_ensure_index_failures" $ do
+  -- (a) .knot 位置被同名檔案佔住 → IndexFailed 且訊息含路徑
+  tmp <- getTemporaryDirectory
+  let blocked = tmp </> "knot-hs-f006-blocked"
+  removePathForcibly blocked
+  createDirectoryIfMissing True blocked
+  writeUtf8 (blocked </> ".knot") "not a directory\n"
+  let layout1 = XT.HieLayout { XT.hlRoot = ".knot/build"
+                             , XT.hlFiles = [(buildableLib, hieUnderGhc (T.unpack ownGhcVersion))] }
+  ra <- ensureIndex (hiedbOpts blocked) layout1
+  case ra of
+    Left (XT.IndexFailed d) -> assertBool ("should name .knot: " <> T.unpack d) (hasText ".knot" d)
+    other -> assertFailure ("expected IndexFailed, got " <> either show (const "Right") other)
+  removePathForcibly blocked
+  -- (b) 0 byte 假 .hie 混進相符清單 → Right,恰一則警告,其餘照常
+  withBuildableScratch "badfile" $ \root -> do
+    (_, layout, _) <- indexScratch root
+    let n   = length (fst (partitionByGhc ownGhcVersion layout))
+        bad = ".knot/build/build/x86_64-windows/ghc-" <> T.unpack ownGhcVersion <> "/fake/Bad.hie"
+    createDirectoryIfMissing True (takeDirectory (root </> bad))
+    BS.writeFile (root </> bad) BS.empty
+    h <- expectRight =<< ensureIndex (hiedbOpts root)
+           layout { XT.hlFiles = XT.hlFiles layout <> [(buildableLib, bad)] }
+    case ihNotes h of
+      [w] -> assertBool ("warning must name the file: " <> T.unpack (ewMessage w))
+               (hasText "Bad.hie" (ewMessage w))
+      ws  -> assertFailure ("expected exactly one warning, got " <> show (map ewMessage ws))
+    ihStats h @?= IndexStats 0 n
+    rowCount (ihDbPath h) "mods" >>= (@?= n)
+  -- (c) 舊索引檔 schema 不合 → IndexFailed,訊息指明刪檔重跑(不擅自刪)
+  withBuildableScratch "schema" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    layout <- expectRight =<< ensureHie (hiedbOpts root) pm
+    rootAbs <- makeAbsolute root
+    let db = indexDbPath rootAbs
+    createDirectoryIfMissing True (takeDirectory db)
+    withConnection db $ \c -> execute_ c (Query (T.pack "PRAGMA user_version = 1"))
+    rc <- ensureIndex (hiedbOpts root) layout
+    case rc of
+      Left (XT.IndexFailed d) -> assertHasAll "schema mismatch message" d ["schema version", "delete"]
+      other -> assertFailure ("expected IndexFailed, got " <> either show (const "Right") other)
+    stillThere <- doesFileExist db
+    assertBool "knot must not delete the user's index file on its own" stillThere
 
--- extraction/F003 T10(不需 hiedb):探測失敗 → 整體降級為 ModuleLevel
--- 而不失敗(驗收標準 1)
-testHiedbDegrade :: TestTree
-testHiedbDegrade = testCase "test_hiedb_degrade" $ do
-  ranRef <- newIORef False
-  let missing = hiedbFixture </> "no-such-hiedb-binary"
-      -- 暫代組裝(F004 已有真的 'hiedbBackend',這裡刻意用替身:
-      -- bRun 被呼叫即代表降級判斷錯了)
-      stubHiedbBackend = Backend
-        { bName  = hiedbName
-        , bLevel = DeclLevel
-        , bProbe = probeHiedb
-        , bRun   = \_ _ -> writeIORef ranRef True >> pure ([], [])
-        }
-      opts = (extOpts Auto)
-        { XT.rootDir = projFixture, XT.hiedbExe = Just missing }
-  pm <- loadProjectMeta (defOpts projFixture)
-  res <- runBackends [importScanBackend, stubHiedbBackend] opts pm
-  erLevel res @?= ModuleLevel
-  case erReports res of
-    [scanRep, hiedbRep] -> do
-      brBackend scanRep @?= importScanName
-      brUsed scanRep @?= True
-      brBackend hiedbRep @?= hiedbName
-      brUsed hiedbRep @?= False
-      assertBool ("degrade reason must name the executable: " <> T.unpack (brDetail hiedbRep))
-        (T.pack "hiedb executable " `T.isPrefixOf` brDetail hiedbRep)
-    rs -> assertFailure ("expected two reports, got: " <> show rs)
-  assertBool "import-scan facts must survive the degrade" (not (null (erFacts res)))
-  readIORef ranRef >>= (@?= False)
-
--- extraction/F003 T11: 以 knot-hs 自身的真實 .hie 唯讀驗收(D8:不碰
--- MagicFarmer / particle-magic);沒有 .hie 時印明原因並跳過
-testHiedbSelfcheck :: TestTree
-testHiedbSelfcheck = testCase "test_hiedb_selfcheck" $ do
-  pm <- loadProjectMeta (defOpts ".")
-  case pmHie pm of
-    Just hie | not (null (hieFiles hie)) -> do
-      knotBefore <- doesDirectoryExist ".knot"
-      tmp <- getTemporaryDirectory
-      let db = tmp </> "knot-hs-f003-self" </> "self.sqlite"
-      removePathForcibly (takeDirectory db)
-      h <- expectRight
-        =<< ensureIndex ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just db }) pm
-      assertBool "self index must index at least one .hie"
-        (indexedCount (ihStats h) > 0)
-      -- 唯讀驗收:目標專案內不得新建 .knot/
-      doesDirectoryExist ".knot" >>= (@?= knotBefore)
-      putStrLn ("[selfcheck] hieFiles=" <> show (length (hieFiles hie))
-        <> " first=" <> show (ihStats h))
-      h2 <- expectRight
-        =<< ensureIndex ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just db }) pm
-      putStrLn ("[selfcheck] second=" <> show (ihStats h2))
-      removePathForcibly (takeDirectory db)
-    _ -> putStrLn
-      "[skip] test_hiedb_selfcheck: knot-hs itself has no .hie files \
-      \(build with -fwrite-ide-info to enable this check)"
+-- F006 T6:過渡期轉接器——bProbe 恆 Available,bRun 串完整鏈,失敗走 HiedbFactsError
+testHiedbBackendAdapter :: TestTree
+testHiedbBackendAdapter = testCase "test_hiedb_backend_adapter" $ do
+  p <- bProbe hiedbBackend (extOpts Auto) emptyMeta
+  p @?= Available
+  withBuildableScratch "adapter" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    (facts, ws) <- bRun hiedbBackend (hiedbOpts root) pm
+    assertBool "decl facts via bRun" (not (null (mapMaybe declOf facts)))
+    assertBool "ref facts via bRun"  (not (null (mapMaybe refOf facts)))
+    forM_ ws $ \w -> putStrLn ("[F006/adapter] warn " <> T.unpack (ewMessage w))
+  withFixtureScratch brokenBuildFixture "adapterboom" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    res <- extract (hiedbOpts root) pm
+    hr <- reportFor hiedbName res
+    brUsed hr @?= False
+    assertBool ("detail must say the build failed: " <> T.unpack (brDetail hr))
+      (T.pack "build failed (" `T.isPrefixOf` brDetail hr)
+    erLevel res @?= ModuleLevel
 
 --------------------------------------------------------------------------------
 -- extraction/F004 hiedb-facts
 --------------------------------------------------------------------------------
 
-extractionF004Tests :: Maybe FilePath -> TestTree
-extractionF004Tests mHiedb = testGroup "extraction/F004 hiedb-facts" $
+-- | F006 起 hiedb 內嵌,原本掛在「hiedb 執行檔存在」開關上的節點全部無條件掛載,
+-- fixture 測試改走 buildable 副本的完整鏈(ensureHie → ensureIndex → readIndexFacts)。
+extractionF004Tests :: TestTree
+extractionF004Tests = testGroup "extraction/F004 hiedb-facts"
   [ testNamespaceAndGenerated  -- T1
   , testHiedbDbFlags           -- T2
   , testHiedbFactsSmoke        -- T3
   , testParseOcc               -- T4
   , testResolveModuleSource    -- T5
   , testPickFromDecl           -- T6
-  , testHiedbBackendRegistered -- T8(不需 hiedb 的部分)
+  , testReadIndexFacts         -- T7
+  , testHiedbBackendRegistered -- T8(降級面)
+  , testHiedbBackendLive       -- T8(完整鏈)
   , testHiedbFactsFixture      -- T9
-  , testGeneratedNameJudgement -- G-E003 T2(純函數面)
-  ]
-  ++ case mHiedb of
-       Just _  -> hiedbGatedF004Tests
-       Nothing -> [testCase (hiedbSkipLabel (length hiedbGatedF004Tests)) (pure ())]
-
--- | F004 加掛到 D7 同一個開關上的節點(需要 hiedb 執行檔才跑得動)。
-hiedbGatedF004Tests :: [TestTree]
-hiedbGatedF004Tests =
-  [ testReadIndexFacts         -- T7
-  , testHiedbBackendLive       -- T8(需 hiedb 的部分)
-  , testGeneratedFlagsFixture  -- G-E003 T2(索引面)
   , testHiedbFactsAcceptance   -- T10
   , testHiedbFactsSelfcheck    -- T11
+  , testGeneratedNameJudgement -- G-E003 T2(純函數面)
+  , testGeneratedFlagsFixture  -- G-E003 T2(索引面)
   ]
 
 -- | 安全取出 'FactModule' 的欄位(理由同 'declOf';G-E002)。
@@ -2034,9 +1867,8 @@ testGeneratedNameJudgement = testCase "test_generated_name_judgement" $ do
 -- @$fEqColor@ / @$fShowColor@ 兩個字典;其餘名字都是手寫的。
 testGeneratedFlagsFixture :: TestTree
 testGeneratedFlagsFixture = testCase "test_generated_flags_fixture" $
-  withHiedbScratch "ge003flags" $ \root -> do
-    pm <- loadProjectMeta (defOpts root)
-    h  <- expectRight =<< ensureIndex (hiedbOpts root) pm
+  withBuildableScratch "ge003flags" $ \root -> do
+    (pm, _, h) <- indexScratch root
     (facts, _) <- readIndexFacts h pm
     let decls = mapMaybe declOf facts
         refs  = mapMaybe refOf facts
@@ -2059,7 +1891,7 @@ testGeneratedFlagsFixture = testCase "test_generated_flags_fixture" $
       (not (any (\(_, _, t, _, tg, _, _) ->
                    qnOcc t == T.pack "greet" && tg) refs))
     -- 目標 module 不在索引內(base / text 等外部套件)→ 旗標恆 False
-    let internal = [mn "Demo.Core", mn "Demo.App"]
+    let internal = [mn "Demo.Core", mn "Demo.App", mn "Main"]
     assertBool "external ref targets must never be flagged generated"
       (not (any (\(_, _, t, _, tg, _, _) ->
                    qnModule t `notElem` internal && tg) refs))
@@ -2221,26 +2053,18 @@ testPickFromDecl = testCase "test_pick_from_decl" $ do
 -- extraction/F004 T9: fixture 的形狀與四 namespace / 產生碼樣本的來源
 testHiedbFactsFixture :: TestTree
 testHiedbFactsFixture = testCase "test_hiedb_facts_fixture" $ do
-  -- 恰好兩個 .hs 與兩個 .hie(釘住 F003 的 IndexStats 2 0 1 不被本次擴充破壞)
-  hs  <- listFilesRec (hiedbFixture </> "src")
-  hie <- listFilesRec (hiedbFixture </> ".hie")
-  sort (map takeFileName hs)  @?= ["App.hs", "Core.hs"]
-  sort (map takeFileName hie) @?= ["App.hie", "Core.hie"]
-  -- .hie 為真實檔且與本 GHC 同版(升版時這裡先紅,指向重產指令)
-  forM_ hie $ \p -> do
-    bytes <- BS.readFile p
-    assertBool ("empty .hie: " <> p) (BS.length bytes > 0)
-    BS.take 3 bytes @?= TE.encodeUtf8 (T.pack "HIE")
-    case BS.split 10 (BS.drop 3 (BS.take 64 bytes)) of
-      (_hieVer : ghcVer : _) ->
-        TE.decodeUtf8 ghcVer @?= T.pack (showVersion fullCompilerVersion)
-      _ -> assertFailure ("unrecognised .hie header: " <> p)
+  -- F006 起 fixture 就是 buildable(兩個 module + Main),.hie 由 knot 自己建,不再預放
+  hs <- listFilesRec (buildableFixture </> "src")
+  sort (map takeFileName hs) @?= ["App.hs", "Core.hs"]
   -- 四 namespace 與產生碼樣本的來源不得被後人改掉
-  core <- readUtf8 (hiedbFixture </> "src" </> "Demo" </> "Core.hs")
+  core <- readUtf8 (buildableFixture </> "src" </> "Demo" </> "Core.hs")
   assertHasAll "fixture Core.hs" core
     ["data Config", "cfgName", "deriving (Eq, Show)", "data Color"]
-  app <- readUtf8 (hiedbFixture </> "src" </> "Demo" </> "App.hs")
+  app <- readUtf8 (buildableFixture </> "src" </> "Demo" </> "App.hs")
   assertHasAll "fixture App.hs" app ["Demo.Core", "greet", "run"]
+  -- 預放 .hie 的舊 fixture 已退場(綁定 GHC 版本的二進位不入版控)
+  stale <- doesDirectoryExist "test/fixtures/hiedb"
+  assertBool "test/fixtures/hiedb must be gone" (not stale)
 
 -- | 遞迴列出目錄下所有檔案(T9 用來數 fixture 的 @.hs@ \/ @.hie@)。
 --
@@ -2262,17 +2086,15 @@ listFilesRec dir = do
 -- extraction/F004 T8(不需 hiedb):後端註冊後探測失敗 → 降級但不失敗
 testHiedbBackendRegistered :: TestTree
 testHiedbBackendRegistered = testCase "test_hiedb_backend_registered" $ do
+  -- projFixture 的 .cabal 老到 cabal 解不了相依 → 建置失敗 → hiedb 降級但整體不失敗
   pm <- loadProjectMeta (defOpts projFixture)
-  let missing = hiedbFixture </> "no-such-hiedb-binary"
-      opts = (extOpts Auto)
-        { XT.rootDir = projFixture, XT.hiedbExe = Just missing }
-  res <- extract opts pm
+  res <- extract (hiedbOpts projFixture) pm
   erLevel res @?= ModuleLevel
   map brBackend (erReports res) @?= [importScanName, hiedbName]
   hr <- reportFor hiedbName res
   brUsed hr @?= False
-  assertBool ("degrade reason must name the executable: " <> T.unpack (brDetail hr))
-    (T.pack "hiedb executable " `T.isPrefixOf` brDetail hr)
+  assertBool ("degrade reason must say the build failed: " <> T.unpack (brDetail hr))
+    (T.pack "build failed (" `T.isPrefixOf` brDetail hr)
   sr <- reportFor importScanName res
   brUsed sr @?= True
   -- import-scan 的事實照出(projFixture 無 import 行,故以 FactModule 為證);
@@ -2285,14 +2107,11 @@ testHiedbBackendRegistered = testCase "test_hiedb_backend_registered" $ do
 -- extraction/F004 T7: readIndexFacts 主流程(驗收標準 2、4)
 testReadIndexFacts :: TestTree
 testReadIndexFacts = testCase "test_read_index_facts" $
-  withHiedbScratch "f004facts" $ \root -> do
-    pm <- loadProjectMeta (defOpts root)
-    h <- expectRight =<< ensureIndex (hiedbOpts root) pm
+  withBuildableScratch "f004facts" $ \root -> do
+    (pm, _, h) <- indexScratch root
     (facts, warns) <- readIndexFacts h pm
-    -- 回傳警告的開頭是 ihNotes(F003 A2 的 .knot/ 首建提示唯一出口)
-    let notes = ihNotes h
-    assertBool "ihNotes must be non-empty on a fresh tree" (not (null notes))
-    take (length notes) warns @?= notes
+    -- 回傳警告以 ihNotes 起頭;F006 起乾淨索引沒有單檔警告,故為空
+    ihNotes h @?= []
     let decls = mapMaybe declOf facts
         refs  = mapMaybe refOf facts
         occOf (q, _, _, _, _) = qnOcc q
@@ -2329,9 +2148,9 @@ testReadIndexFacts = testCase "test_read_index_facts" $
 -- 失敗時的 HiedbFactsError 通道
 testHiedbBackendLive :: TestTree
 testHiedbBackendLive = testCase "test_hiedb_backend_live" $ do
-  withHiedbScratch "f004backend" $ \root -> do
+  withBuildableScratch "f004backend" $ \root -> do
     pm <- loadProjectMeta (defOpts root)
-    res <- extract ((extOpts Auto) { XT.rootDir = root }) pm
+    res <- extract (hiedbOpts root) pm
     erLevel res @?= DeclLevel
     map brBackend (erReports res) @?= [importScanName, hiedbName]
     forM_ (erReports res) $ \r -> do
@@ -2342,30 +2161,23 @@ testHiedbBackendLive = testCase "test_hiedb_backend_live" $ do
       (not (null (mapMaybe refOf (erFacts res))))
     assertBool "hiedb decl facts present"
       (not (null (mapMaybe declOf (erFacts res))))
-  -- ensureIndex 必失敗(0 byte 假 .hie)→ brUsed = False + "hiedb index failed: "
-  withHiedbScratch "f004boom" $ \root -> do
+  -- 建置失敗 → HiedbFactsError 通道 → brUsed = False + "build failed (";import-scan 不受影響
+  withFixtureScratch brokenBuildFixture "f004boom" $ \root -> do
     pm <- loadProjectMeta (defOpts root)
-    hie <- case pmHie pm of
-      Nothing -> assertFailure "scratch tree must expose a .hie directory"
-      Just x  -> pure x
-    let bad = ".hie/Demo/Bad.hie"
-    BS.writeFile (root </> bad) BS.empty
-    let pmBad = pm { pmHie = Just hie { hieFiles = hieFiles hie <> [bad] } }
-    res <- extract ((extOpts Auto) { XT.rootDir = root }) pmBad
+    res <- extract (hiedbOpts root) pm
     hr <- reportFor hiedbName res
     brUsed hr @?= False
-    assertBool ("detail must carry the index-failure prefix: "
+    assertBool ("detail must carry the build-failure prefix: "
                   <> T.unpack (brDetail hr))
-      (hasText "hiedb index failed: " (brDetail hr))
+      (hasText "build failed (" (brDetail hr))
     erLevel res @?= ModuleLevel
-    assertBool "import-scan facts survive" (any isImportFact (erFacts res))
+    assertBool "import-scan facts survive" (not (null (erFacts res)))
 
 -- extraction/F004 T10: 端到端驗收(驗收標準 1、3、5)
 testHiedbFactsAcceptance :: TestTree
 testHiedbFactsAcceptance = testCase "test_hiedb_facts_acceptance" $
-  withHiedbScratch "f004accept" $ \root -> do
-    pm <- loadProjectMeta (defOpts root)
-    h <- expectRight =<< ensureIndex (hiedbOpts root) pm
+  withBuildableScratch "f004accept" $ \root -> do
+    (pm, _, h) <- indexScratch root
     (facts, _) <- readIndexFacts h pm
     let refs = mapMaybe refOf facts
     -- (a) 驗收標準 1:跨 module 呼叫的 frFromDecl 指向正確的頂層宣告
@@ -2409,49 +2221,36 @@ testHiedbFactsAcceptance = testCase "test_hiedb_facts_acceptance" $
 -- extraction/F004 T11: knot-hs 自身唯讀驗收(需 hiedb 且自身有 .hie)
 testHiedbFactsSelfcheck :: TestTree
 testHiedbFactsSelfcheck = testCase "test_hiedb_facts_selfcheck" $ do
+  -- F006 起 knot 自己建置、索引自己,沒有 [skip] 分支
   pm <- loadProjectMeta (defOpts ".")
-  case pmHie pm of
-    Just hie | not (null (hieFiles hie)) -> do
-      knotBefore <- doesDirectoryExist ".knot"
-      tmp <- getTemporaryDirectory
-      let db = tmp </> "knot-hs-f004-self" </> "self.sqlite"
-      removePathForcibly (takeDirectory db)
-      res <- extract ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just db }) pm
-      erLevel res @?= DeclLevel
-      map brBackend (erReports res) @?= [importScanName, hiedbName]
-      forM_ (erReports res) $ \r -> brUsed r @?= True
-      let decls = mapMaybe declOf (erFacts res)
-          refs  = mapMaybe refOf (erFacts res)
-      assertBool "self decl facts" (not (null decls))
-      assertBool "self ref facts" (not (null refs))
-      -- 「對映不到」的警告只允許一種來源:該 module 的原始檔被排除
-      -- (G-B001 的正常丟棄路徑——例如 .hie 以 --enable-tests 產生時,
-      --  test-suite 的 Main.hie 會蓋掉 executable 的)。其餘一律是缺陷。
-      let excludedMods =
-            [ m | sf <- pmSources pm, not (sfIncluded sf), Just m <- [sfModule sf] ]
-          expectedDrop w =
-            any (\(ModuleName m) ->
-                   hasText ("cannot map indexed module " <> T.unpack m <> " back")
-                           (ewMessage w))
-                excludedMods
-          unmapped =
-            [ w | w <- erWarnings res, hasText "cannot map indexed module" (ewMessage w) ]
-          unexpected = filter (not . expectedDrop) unmapped
-      assertBool ("unexpected unmapped modules: " <> show unexpected) (null unexpected)
-      -- 唯讀驗收:目標專案內不得新建 .knot/
-      doesDirectoryExist ".knot" >>= (@?= knotBefore)
-      putStrLn ("[selfcheck/F004] hieFiles=" <> show (length (hieFiles hie))
-        <> " decls=" <> show (length decls)
-        <> " refs=" <> show (length refs)
-        <> " generated=" <> show (length [ () | (_, _, _, g, _, _, _) <- refs, g ])
-        <> " warnings=" <> show (length (erWarnings res)))
-      forM_ (erWarnings res) $ \w ->
-        putStrLn ("[selfcheck/F004] warn " <> T.unpack (ewSource w)
-          <> ": " <> T.unpack (ewMessage w))
-      removePathForcibly (takeDirectory db)
-    _ -> putStrLn
-      "[skip] test_hiedb_facts_selfcheck: knot-hs itself has no .hie files \
-      \(build with -fwrite-ide-info -hiedir .hie to enable this check)"
+  res <- extract (hiedbOpts ".") pm
+  erLevel res @?= DeclLevel
+  map brBackend (erReports res) @?= [importScanName, hiedbName]
+  forM_ (erReports res) $ \r -> brUsed r @?= True
+  let decls = mapMaybe declOf (erFacts res)
+      refs  = mapMaybe refOf (erFacts res)
+  -- 量級不得低於 F004 閘門紀錄(decls 649、refs 7899)的七成
+  assertBool ("self decl facts too few: " <> show (length decls)) (length decls >= 450)
+  assertBool ("self ref facts too few: "  <> show (length refs))  (length refs  >= 5500)
+  -- 「對映不到」的警告只允許一種來源:該 module 的原始檔被排除。其餘一律是缺陷。
+  let excludedMods =
+        [ m | sf <- pmSources pm, not (sfIncluded sf), Just m <- [sfModule sf] ]
+      expectedDrop w =
+        any (\(ModuleName m) ->
+               hasText ("cannot map indexed module " <> T.unpack m <> " back")
+                       (ewMessage w))
+            excludedMods
+      unmapped =
+        [ w | w <- erWarnings res, hasText "cannot map indexed module" (ewMessage w) ]
+      unexpected = filter (not . expectedDrop) unmapped
+  assertBool ("unexpected unmapped modules: " <> show unexpected) (null unexpected)
+  putStrLn ("[selfcheck/F004] decls=" <> show (length decls)
+    <> " refs=" <> show (length refs)
+    <> " generated=" <> show (length [ () | (_, _, _, g, _, _, _) <- refs, g ])
+    <> " warnings=" <> show (length (erWarnings res)))
+  forM_ (erWarnings res) $ \w ->
+    putStrLn ("[selfcheck/F004] warn " <> T.unpack (ewSource w)
+      <> ": " <> T.unpack (ewMessage w))
 
 --------------------------------------------------------------------------------
 -- graph-core/F001 module-graph
@@ -2867,7 +2666,8 @@ testBuildGraphDeterministic = testGroup "test_build_graph_deterministic"
       buildGraph (BuildOptions { moduleOnly = True }) pm r @?= g
   , testCase "graph fixture: internal edges, external drops, dedupe, self-loop" $ do
       pm <- loadProjectMeta (defOpts graphFixture)
-      r <- extract ((extOpts Auto) { XT.rootDir = graphFixture }) pm
+      -- graph fixture 刻意不可建置(F005),module 圖的驗收只需要 import-scan
+      r <- extract ((extOpts ImportsOnly) { XT.rootDir = graphFixture }) pm
       let g = buildGraph defBuildOpts pm r
       erWarnings r @?= []
       map gnId (cgNodes g) @?= graphFixtureNodeIds
@@ -5536,74 +5336,37 @@ globalE003Tests = testGroup "global/G-E003 generated-decl-filter"
 testGeneratedFilterSelfcheck :: TestTree
 testGeneratedFilterSelfcheck = testCase "test_generated_filter_selfcheck" $ do
   pm <- loadProjectMeta (defOpts ".")
-  case pmHie pm of
-    Just hie | not (null (hieFiles hie)) -> do
-      knotBefore <- doesDirectoryExist ".knot"
-      tmp <- getTemporaryDirectory
-      let db = tmp </> "knot-hs-ge003-self" </> "self.sqlite"
-      removePathForcibly (takeDirectory db)
-      res <- extract ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just db }) pm
-      if erLevel res /= DeclLevel
-        then putStrLn
-          "[skip] test_generated_filter_selfcheck: hiedb unavailable, no decl layer"
-        else do
-          let g = buildGraph defBuildOpts pm res
-              dollarNodes = [ t | NodeId t <- map gnId (cgNodes g)
-                            , T.pack "$" `T.isInfixOf` t ]
-              dollarEdges = [ ()
-                            | e <- cgEdges g
-                            , let NodeId s = geSource e
-                            , let NodeId t = geTarget e
-                            , T.pack "$" `T.isInfixOf` s
-                                || T.pack "$" `T.isInfixOf` t ]
-              unresolved  = [ gwMessage w
-                            | w <- cgWarnings g
-                            , hasText "unresolved reference target $" (gwMessage w) ]
-          -- 目標 1:deriving 字典不再成為節點
-          assertBool ("generated dictionary nodes leaked into the graph: "
-                       <> show (take 5 dollarNodes)) (null dollarNodes)
-          [] @?= dollarEdges
-          -- 目標 2:同源的 unresolved 警告歸零
-          assertBool ("unresolved $-target warnings remain: " <> show (take 5 unresolved))
-            (null unresolved)
-          -- 目標 4:決定性——同一份事實流兩次組裝完全相同
-          buildGraph defBuildOpts pm res @?= g
-          -- 目標 3:兩種 hiedb 索引建法(走目錄 vs 逐檔清單)產出的圖相同。
-          -- 走目錄會多收 8 個 deriving 字典的 defs 列(逐檔清單收不到),
-          -- 過濾對稱化之後那 8 筆兩邊都被濾掉,節點與邊必須逐一相等。
-          -- 目標 3 的比對範圍在 G-B002 收斂為「節點與邊的**身分**」,不含行號。
-          --
-          -- 理由(2026-08-22 實測):hiedb 的兩種呼叫形式對**同一個**
-          -- @(hieFile, occ)@ 會寫出不同的 @defs.sl@——`fExportOptions:rootDir`
-          -- 在逐檔清單索引是 19、走目錄索引是 4492,而 @Knot/Export/Types.hs@
-          -- 只有 38 行,4492 是 @test/Main.hs@ 的行號。**走目錄那個是錯的**。
-          -- knot 正式路徑用逐檔清單(為了排除幽靈 .hie),取到的是正確值,
-          -- 所以「兩法必須完全相等」這個不變量本身就不該成立。
-          --
-          -- 原本的意圖(逐檔清單不得漏收任何節點)由身分比對完整保留;
-          -- 行號正確性改由 'testDeclLineWithinFile' 直接守住,比互相比對更強。
-          mExe <- findExecutable "hiedb"
-          forM_ mExe $ \exe -> do
-            let dirDb = tmp </> "knot-hs-ge003-self" </> "dir.sqlite"
-            (code, _, _) <- readProcessWithExitCode exe
-              ["-D", dirDb, "--src-base-dir", ".", "index", hieDir hie] ""
-            code @?= ExitSuccess
-            resDir <- extract
-              ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just dirDb }) pm
-            let gDir = buildGraph defBuildOpts pm resDir
-                edgeId e = (geSource e, geRelation e, geTarget e)
-            map gnId (cgNodes gDir) @?= map gnId (cgNodes g)
-            map edgeId (cgEdges gDir) @?= map edgeId (cgEdges g)
-          -- 唯讀驗收:目標專案內不得新建 .knot/
-          doesDirectoryExist ".knot" >>= (@?= knotBefore)
-          putStrLn ("[selfcheck/G-E003] nodes=" <> show (length (cgNodes g))
-            <> " edges=" <> show (length (cgEdges g))
-            <> " filteredGenerated=" <> show (gsFilteredGenerated (cgStats g))
-            <> " warnings=" <> show (length (cgWarnings g)))
-      removePathForcibly (takeDirectory db)
-    _ -> putStrLn
-      "[skip] test_generated_filter_selfcheck: knot-hs itself has no .hie files \
-      \(build with -fwrite-ide-info -hiedir .hie to enable this check)"
+  res <- extract (hiedbOpts ".") pm
+  -- F006 起 knot 自己建置自己,decl 層必須成立,不再有 [skip] 分支
+  erLevel res @?= DeclLevel
+  let g = buildGraph defBuildOpts pm res
+      dollarNodes = [ t | NodeId t <- map gnId (cgNodes g)
+                    , T.pack "$" `T.isInfixOf` t ]
+      dollarEdges = [ ()
+                    | e <- cgEdges g
+                    , let NodeId s = geSource e
+                    , let NodeId t = geTarget e
+                    , T.pack "$" `T.isInfixOf` s
+                        || T.pack "$" `T.isInfixOf` t ]
+      unresolved  = [ gwMessage w
+                    | w <- cgWarnings g
+                    , hasText "unresolved reference target $" (gwMessage w) ]
+  -- 目標 1:deriving 字典不再成為節點
+  assertBool ("generated dictionary nodes leaked into the graph: "
+               <> show (take 5 dollarNodes)) (null dollarNodes)
+  [] @?= dollarEdges
+  -- 目標 2:同源的 unresolved 警告歸零
+  assertBool ("unresolved $-target warnings remain: " <> show (take 5 unresolved))
+    (null unresolved)
+  -- 目標 4:決定性——同一份事實流兩次組裝完全相同
+  buildGraph defBuildOpts pm res @?= g
+  -- 目標 3(兩種 hiedb 索引建法產出相同的圖)隨 F006 失去對象:hiedb 不再有
+  -- 命令列的「走目錄」形式,knot 只有一條逐檔索引路徑;行號正確性由
+  -- 'testDeclLineWithinFile' 直接守住。
+  putStrLn ("[selfcheck/G-E003] nodes=" <> show (length (cgNodes g))
+    <> " edges=" <> show (length (cgEdges g))
+    <> " filteredGenerated=" <> show (gsFilteredGenerated (cgStats g))
+    <> " warnings=" <> show (length (cgWarnings g)))
 
 --------------------------------------------------------------------------------
 -- G-E001 內部邊界收斂(跨 project-meta + extraction + graph-core + export-query)
@@ -5671,7 +5434,7 @@ testCabalContractSurface = testCase "test_cabal_contract_surface" $ do
   -- 公開面恰為契約模組(排序後逐字比對,順序不影響判定)
   sort reexported @?= sort contractModules
   -- 內部 library 收全部 26 個模組
-  length exposed @?= 27   -- F005 加 Knot.Extract.BuildDriver
+  length exposed @?= 27   -- F005 加 BuildDriver;F006 HiedbDriver → HieIndex 一進一出
   -- 每個被 reexport 的模組都真的存在於內部 library
   assertBool ("reexported modules missing from knot-internal: "
                <> show [m | m <- reexported, m `notElem` exposed])
@@ -6133,11 +5896,12 @@ testKnotDirPrepare = testCase "test_knot_dir_prepare" $
 testCabalInvocation :: TestTree
 testCabalInvocation = testCase "test_cabal_invocation" $ do
   -- (a) argv:基本四段;納入的 test / bench 才帶 --enable-*
-  cabalArgs "/bd" (metaWithComponents [(MainLibrary, False), (Executable, False)])
-    @?= ["build", "all", "--builddir=/bd", "--ghc-options=-fwrite-ide-info"]
-  let withTests = cabalArgs "/bd" (metaWithComponents [(TestSuite, False)])
-      withBench = cabalArgs "/bd" (metaWithComponents [(Benchmark, False)])
-      excluded  = cabalArgs "/bd" (metaWithComponents [(TestSuite, True), (Benchmark, True)])
+  -- F006 加 --project-dir:cabal 只認指定的根目錄,不往上找別人的 cabal.project
+  cabalArgs "/r" "/bd" (metaWithComponents [(MainLibrary, False), (Executable, False)])
+    @?= ["build", "all", "--project-dir=/r", "--builddir=/bd", "--ghc-options=-fwrite-ide-info"]
+  let withTests = cabalArgs "/r" "/bd" (metaWithComponents [(TestSuite, False)])
+      withBench = cabalArgs "/r" "/bd" (metaWithComponents [(Benchmark, False)])
+      excluded  = cabalArgs "/r" "/bd" (metaWithComponents [(TestSuite, True), (Benchmark, True)])
   assertBool "included test-suite → --enable-tests" ("--enable-tests" `elem` withTests)
   assertBool "no --enable-benchmarks without benchmark" ("--enable-benchmarks" `notElem` withTests)
   assertBool "included benchmark → --enable-benchmarks" ("--enable-benchmarks" `elem` withBench)

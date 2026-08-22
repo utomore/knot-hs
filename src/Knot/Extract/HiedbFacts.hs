@@ -64,11 +64,13 @@ import Database.SQLite.Simple
   )
 import Database.SQLite.Simple.FromRow (FromRow (..), field)
 
-import Knot.Extract.Backend (Backend (..), hiedbName)
-import Knot.Extract.HiedbDriver (IndexHandle, ensureIndex, ihDbPath, ihNotes, probeHiedb)
+import Knot.Extract.Backend (Backend (..), ProbeResult (..), hiedbName)
+import Knot.Extract.BuildDriver (ensureHie)
+import Knot.Extract.HieIndex (IndexHandle, ensureIndex, ihDbPath, ihNotes)
 import Knot.Extract.Types
   ( CapabilityLevel (..)
   , DeclKind (..)
+  , ExtractFailure (..)
   , ExtractOptions
   , ExtractWarning (..)
   , Fact (..)
@@ -81,13 +83,15 @@ import Knot.Meta.Types (ModuleName (..), ProjectMeta (..), SourceFile (..))
 -- 後端組裝
 --------------------------------------------------------------------------------
 
--- | hiedb 後端:@bLevel = DeclLevel@,探測面來自 F003 的 'probeHiedb',
--- 執行面先 'ensureIndex' 再 'readIndexFacts'。
+-- | hiedb 後端(F006 起的__過渡期轉接器__,#7 two-layer-contract 連同 @Backend@
+-- 一起拆掉):沒有執行檔可探測,@bProbe@ 恆 @Available@;執行面串
+-- 'ensureHie' → 'ensureIndex' → 'readIndexFacts',建置 / 版本 / 索引失敗走
+-- @bRun@ 的失敗通道('HiedbFactsError')。
 hiedbBackend :: Backend
 hiedbBackend = Backend
   { bName  = hiedbName
   , bLevel = DeclLevel
-  , bProbe = probeHiedb
+  , bProbe = \_ _ -> pure Available
   , bRun   = runHiedb
   }
 
@@ -99,10 +103,23 @@ hiedbBackend = Backend
 -- @DeclLevel@,對外謊報函式級成功——比失敗更糟。
 runHiedb :: ExtractOptions -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 runHiedb opts pm = do
-  ready <- ensureIndex opts pm
-  case ready of
-    Left reason -> throwIO (HiedbFactsError reason)
-    Right h     -> readIndexFacts h pm
+  layout <- either (throwIO . HiedbFactsError . renderFailure) pure =<< ensureHie opts pm
+  h      <- either (throwIO . HiedbFactsError . renderFailure) pure =<< ensureIndex opts layout
+  readIndexFacts h pm
+
+-- | 過渡期的失敗文字(正式的 CLI 渲染屬 export-query #5 cli-zero-setup)。
+-- @BuildFailed@ 只取 @bfDetail@ 首行:cabal 的輸出已由 build-driver 即時轉發到
+-- stderr,尾段再塞進報告只會讓兩次執行的摘要不相等(規則 8 決定性)。
+renderFailure :: ExtractFailure -> Text
+renderFailure f = case f of
+  BuildFailed c d      -> T.pack "build failed (" <> c <> T.pack "): " <> firstLine d
+  VersionMismatch h k  -> T.pack "hie/ghc version mismatch: .hie files were produced by GHC "
+                            <> h <> T.pack ", but this build of knot uses GHC " <> k
+                            <> T.pack "; install a matching knot with: cabal install knot-hs -w ghc-" <> h
+  IndexFailed d        -> T.pack "hiedb index failed: " <> d
+  NoSources            -> T.pack "no Haskell sources to extract"
+ where
+  firstLine = T.takeWhile (\c -> c /= '\r' && c /= '\n')
 
 -- | 索引就緒失敗的例外通道;'displayException' 即 'ensureIndex' 的 @Left@ 原文
 -- (含 @\"hiedb index failed: \"@ 等 F003 的穩定前綴)。

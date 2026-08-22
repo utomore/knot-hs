@@ -85,9 +85,10 @@ prepareKnotDir root = do
 -- 只有 'ProjectMeta' 裡有**納入**(@compExcluded = False@)的該類 component 時
 -- 才帶 @--enable-tests@ \/ @--enable-benchmarks@——帶與不帶是兩個組態,
 -- 切換會讓 cabal 重新設定,所以只在使用者改了 @--include-tests@ 時才會發生。
-cabalArgs :: FilePath -> ProjectMeta -> [String]
-cabalArgs buildDirAbs pm =
+cabalArgs :: FilePath -> FilePath -> ProjectMeta -> [String]
+cabalArgs rootAbs buildDirAbs pm =
   [ "build", "all"
+  , "--project-dir=" <> rootAbs
   , "--builddir=" <> buildDirAbs
   , "--ghc-options=-fwrite-ide-info"
   ]
@@ -231,7 +232,7 @@ ensureHie opts pm = do
     rootAbs <- makeAbsolute root
     prepareKnotDir root
     let buildDirAbs = rootAbs </> ".knot" </> "build"
-    outcome <- runCabalWith "cabal" rootAbs (cabalArgs buildDirAbs pm)
+    outcome <- runCabalWith "cabal" rootAbs (cabalArgs rootAbs buildDirAbs pm)
     case outcome of
       Left failure -> pure (Left failure)
       Right ()     -> Right <$> enumerateHie pm root rootAbs buildDirAbs

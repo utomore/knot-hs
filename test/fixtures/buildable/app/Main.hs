@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Demo.Core (greet)
+import Demo.App (run)
 
 main :: IO ()
-main = putStrLn (greet "knot")
+main = putStrLn run
