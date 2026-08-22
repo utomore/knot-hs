@@ -25,9 +25,16 @@ data GatedFacts = GatedFacts
 -- | 內部集合 = 事實流中所有 @FactModule@ 的 @fmModule@(D2:與節點來源同一
 -- 樣本,**不是** @pmSources@ 的 @sfModule@)。
 --
--- 組裝規則 3(產生碼過濾,C4)三條件任一成立即濾除該筆事實並計入
+-- 組裝規則 3(產生碼過濾,C4 + G-E003)五條件任一成立即濾除該筆事實並計入
 -- 'gfFiltered':(a) 事實指向的檔案不在 @pmSources@;(b) 行號 ≤ 0;
--- (c) @FactRef.frGenerated = True@。三條件**只適用 decl 層事實**
+-- (c) @FactRef.frGenerated = True@(引用__站點__是產生碼);
+-- (d) @FactDecl.fdGenerated = True@(宣告__本身__是產生碼);
+-- (e) @FactRef.frTargetGenerated = True@(引用__目標__是產生碼宣告)。
+--
+-- (d) 與 (e) 由 G-E003 補上,解掉「只擋 ref 不擋 decl」的不對稱:deriving
+-- 字典既不該成為節點((d)),指向它的引用也不該留下懸空目標((e))——後者
+-- 同時消掉 @unresolved reference target $f…@ 這一類警告,因為事實在
+-- edge-derive 看到它之前就已經不在了。五條件**只適用 decl 層事實**
 -- (@FactDecl@ / @FactRef@ / @FactInstance@);@FactModule@ / @FactImport@
 -- 一律不受影響(F002 假設 A1:濾掉 @FactModule@ 會讓 'gfInternal' 縮水、
 -- module 節點連帶消失)。
@@ -52,9 +59,10 @@ gateFacts pm facts = GatedFacts
   filteredOut :: Fact -> Bool
   filteredOut FactModule{} = False
   filteredOut FactImport{} = False
-  filteredOut FactDecl{fdFile = file, fdLine = ln} =
-    file `Set.notMember` srcSet || ln <= 0
-  filteredOut FactRef{frFile = file, frLine = ln, frGenerated = gen} =
+  filteredOut FactDecl{fdFile = file, fdLine = ln, fdGenerated = gen} =
     file `Set.notMember` srcSet || ln <= 0 || gen
+  filteredOut FactRef{ frFile = file, frLine = ln
+                     , frGenerated = gen, frTargetGenerated = tgtGen } =
+    file `Set.notMember` srcSet || ln <= 0 || gen || tgtGen
   filteredOut FactInstance{fiInstFile = file, fiInstLine = ln} =
     file `Set.notMember` srcSet || ln <= 0

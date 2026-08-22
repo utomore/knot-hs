@@ -83,12 +83,18 @@ data Fact
       , fiFile :: FilePath, fiLine :: Int }
   | FactDecl                            -- ^ 頂層宣告
       { fdName :: QualName, fdKind :: DeclKind
+      , fdGenerated :: Bool             -- ^ 宣告__本身__是產生碼(G-E003:hiedb
+                                        --   @defs@ 有列、@decls@ 無列 ⇒ 沒有原始碼
+                                        --   宣告 AST 節點 ⇒ deriving \/ TH 字典)
       , fdFile :: FilePath, fdLine :: Int }
   | FactRef                             -- ^ 名稱引用(calls / uses 邊的原料)
       { frFromModule :: ModuleName
       , frFromDecl   :: Maybe QualName  -- ^ 引用發生在哪個頂層宣告內,由後端解析
       , frTarget     :: QualName
-      , frGenerated  :: Bool            -- ^ deriving / TH 產生碼(hiedb @refs.is_generated@)
+      , frGenerated  :: Bool            -- ^ 引用__站點__是產生碼(hiedb @refs.is_generated@)
+      , frTargetGenerated :: Bool       -- ^ 引用__目標__是產生碼宣告(G-E003,判準同
+                                        --   'fdGenerated');目標 module 不在索引內
+                                        --   (外部套件)時恆 'False'
       , frFile :: FilePath, frLine :: Int }
   | FactInstance                        -- ^ implements 邊的兩端
       { fiClass    :: QualName          -- ^ class(TypeNs)

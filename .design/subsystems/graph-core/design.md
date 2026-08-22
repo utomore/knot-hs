@@ -115,7 +115,21 @@ id 只由 `QualName`(module、occ、namespace)、instance 標頭與(碰撞時的
 
    **`FactInstance` 目前無後端產出**(extraction C4:hiedb 0.8 的 schema 無 instance 表;見 system.md「`implements` 邊不在 S3」)。graph-core 仍**完整實作** instance 節點鑄造與 `RImplements` 推導並以手工事實流驗收——兩段都是純函數,ADR-002 預留的第三後端上線時零改動即生效;端到端輸出目前恆為 0 個 instance 節點與 0 條 `RImplements` 邊(批次澄清 C1 裁決)。
 
-3. **產生碼過濾**(**只適用 decl 層事實** `FactDecl` / `FactRef` / `FactInstance`;`FactModule` / `FactImport` 一律不受本規則影響——濾掉 `FactModule` 會讓 `gfInternal` 縮水、module 節點連帶消失,A1 裁決):三者任一成立即濾除該事實並計入 `gsFilteredGenerated`——(a) 事實指向的檔案不在 `pmSources`;(b) 行號 ≤ 0;(c) `FactRef.frGenerated = True`(批次澄清 C4 裁決)。(c) 直接採信 extraction 規則 4a 原樣轉載的 `refs.is_generated` 事實,**不做「異常 span」啟發式**(system.md 已據此改寫 S3 描述);實測 knot-hs 自身 846/7265 = 11.6% 的 ref 屬此類。deriving 產生的引用不對應任何人寫的程式碼行,留著會在 decl 間製造非人為的邊並污染 hub 排名
+3. **產生碼過濾**(**只適用 decl 層事實** `FactDecl` / `FactRef` / `FactInstance`;`FactModule` / `FactImport` 一律不受本規則影響——濾掉 `FactModule` 會讓 `gfInternal` 縮水、module 節點連帶消失,A1 裁決):五者任一成立即濾除該事實並計入 `gsFilteredGenerated`——
+
+   | 條件 | 內容 | 來源 |
+   |---|---|---|
+   | (a) | 事實指向的檔案不在 `pmSources` | 批次澄清 C4 |
+   | (b) | 行號 ≤ 0 | 批次澄清 C4 |
+   | (c) | `FactRef.frGenerated = True`(引用**站點**是產生碼) | 批次澄清 C4 |
+   | (d) | `FactDecl.fdGenerated = True`(宣告**本身**是產生碼) | G-E003 |
+   | (e) | `FactRef.frTargetGenerated = True`(引用**目標**是產生碼宣告) | G-E003 |
+
+   五者全部直接採信 extraction 規則 4a 標註的事實,**不做「異常 span」啟發式、不做名字前綴猜測**(system.md 已據此改寫 S3 描述)。deriving 產生的宣告與引用不對應任何人寫的程式碼行,留著會在 decl 間製造非人為的邊並污染 hub 排名。
+
+   **(d)(e) 必須成對**(G-E003 的核心):只擋 (c) 會讓 deriving 字典**自己**成為節點——2026-08-22 實測 knot-hs 自身 623 個 decl 節點中有 106 個(17%)是 deriving 字典,把 hub 排名的分母灌水;而只加 (d) 不加 (e),指向那些字典的引用會變成懸空目標並刷出一批 `unresolved reference target` 警告。(e) 同時讓兩種 hiedb 索引建法(走目錄 vs 逐檔清單,`defs` 相差 8 列)產出**完全相同**的圖。
+
+   實測(knot-hs 自身,2026-08-22):(c) 846 筆、(d) 106 筆、(e) 254 筆,合計 `gsFilteredGenerated = 1206`;圖由 654 節點 / 2267 邊收斂為 548 / 1948,`unresolved reference target $…` 警告由 19 則歸零
 4. **自環丟棄**:source 與 target 相同的邊(遞迴呼叫、module 自引)不產出,不計警告
 4a. **消歧組的 import 目標**:`FactImport` 的目標 module 屬 D1 消歧組時,無從判定指向組內哪個節點 → 丟棄該邊並發 `GraphWarning`,**不**計入 `gsDroppedExternal`(它不是外部目標;F001 假設 A4 裁決)
 4b. **內部性以 module 為判準**:decl / instance 事實所屬的 module 不在 `gfInternal` 時,不建節點、不產邊,且**不**計入 `gsDroppedExternal`(同 4a 的理由:那不是「指向外部套件」,是事實流內部不一致),改彙整為 `GraphWarning`(F002 假設 A4 裁決)
@@ -232,7 +246,7 @@ data EdgeStats = EdgeStats
 - **負責模組**:fact-gate、node-mint、edge-derive(`RContains` 一列;所有邊一律由 edge-derive 產出,以「內部模組劃分」表為準)
 - **實作的 Level 2 介面**:`mintDeclId`、`mintInstanceId`;`NodeKind` 的 `DeclNode`/`InstanceNode`;鑄造規則表全表(含 `#t`、`#i:` 後綴);組裝規則 2 的 `FactDecl`/`FactInstance` 節點與 `RContains` 列、規則 3(產生碼過濾)、規則 6(`moduleOnly` 忽略 decl 層)
 - **資料流管線段落**:從 `FactDecl`/`FactInstance` 事實進,經 fact-gate 過濾與 node-mint 鑄造,出 decl/instance 節點與 `RContains` 邊
-- **驗收標準**:同名型別與值鑄出不同 id(`Demo.Core.Foo#t` vs `Demo.Core.Foo`);instance 節點 id 含渲染標頭且穩定;指向 `pmSources` 外檔案或行號 ≤ 0 的事實被濾除且 `gsFilteredGenerated` 計數;每個 decl 節點有一條來自所屬 module 的 `RContains`;`moduleOnly = True` 時 decl 節點與 `RContains` 完全不出現
+- **驗收標準**:同名型別與值鑄出不同 id(`Demo.Core.Foo#t` vs `Demo.Core.Foo`);instance 節點 id 含渲染標頭且穩定;指向 `pmSources` 外檔案或行號 ≤ 0 的事實被濾除且 `gsFilteredGenerated` 計數;`fdGenerated` / `frTargetGenerated` 為真的事實同樣被濾除且只計一次(G-E003 的 (d)(e));每個 decl 節點有一條來自所屬 module 的 `RContains`;`moduleOnly = True` 時 decl 節點與 `RContains` 完全不出現
 - **明確不做**:不推導 calls/uses/implements(decl-edges 的事);不改 module 層行為;不嘗試為外部名稱建節點
 
 ### decl-edges
