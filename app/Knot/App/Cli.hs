@@ -165,7 +165,7 @@ extractParser = ExtractCmd
             <> help "override the index location (default: <PATH>/.knot/hiedb.sqlite)"))
   <*> switch
         (long "strict"
-          <> help "exit 1 when anything was skipped")
+          <> help "exit 1 when there is any warning")
   <*> optional
         (option summaryReader
           (long "summary" <> metavar "meta|facts|graph"

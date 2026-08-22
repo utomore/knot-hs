@@ -162,21 +162,38 @@ best-effort:單一檔案讀不過(壞 `.hie`、版本不合、解析失敗)印�
 
 見上方「需求」。knot 與目標專案必須同版 GHC。
 
-### 2. 同名 module 的 `.hie` 互相覆蓋(G-B001)
+### 2. 同名 module 的 `.hie` 會互相覆蓋(**已處理**,但要知道它的存在)
 
-**這是目前最該注意的一項。** GHC 的 `-hiedir` 依 **module 名**決定輸出路徑,不含
-component。當 `executable` 與 `test-suite` 都有 `Main` 時,兩者都寫 `.hie/Main.hie`,
-後編譯的**覆蓋**先編譯的;knot 只能靠 module 名把 `.hie` 對回原始檔,同名時必然對錯。
+GHC 的 `-hiedir` 依 **module 名**決定輸出路徑,不含 component。當 `executable` 與
+`test-suite` 都有 `Main` 時,兩者都寫 `.hie/Main.hie`,**後編譯的覆蓋先編譯的**
+(誰贏取決於建置順序,不穩定)。
 
-實測(knot 掃自己):19 行的 `app/Main.hs` 被掛上 **302 個節點**、行號到 L3789,而那些
-其實是 `test/Main.hs` 的宣告。
+**knot 現在會偵測並明確丟棄**(G-B001):被覆蓋掉的那份 `.hie` 對映回一個不在納入
+範圍內的原始檔時,整批跳過並印警告,而不是猜一個檔案掛上去:
 
-- **影響**:decl 層的 `source_file` 與行號不可信、節點數被灌水、hub 排名失真
-- **不影響**:module 層(`imports` 邊來自 import-scan,不讀 `.hie`),依賴矩陣與
-  循環依賴偵測仍可信
-- **迴避法**:產 `.hie` 時**不要**加 `--enable-tests`;或用 `--module-only`
+```
+extract: .hie\Main.hie: cannot map indexed module Main back to pmSources;
+         skipping its decls and refs
+```
 
-細節與修復方向見 `.design/bugfixes/G-B001-hie-component-collision.md`。
+- **結果**:那個 module 的 decl 層資料**缺席**(不會錯歸)。修復前是 19 行的
+  `app/Main.hs` 被掛上 302 個節點、行號到 L3789
+- **要完整的 decl 層資料**:讓兩個 component 的 `.hie` 落在不同目錄,或產 `.hie` 時
+  不加 `--enable-tests`(這樣 `Main.hie` 就是 executable 的)
+
+細節見 `.design/bugfixes/G-B001-hie-component-collision.md`。
+
+### 2b. 不要用 `hiedb index <目錄>` 建索引
+
+knot 一律**逐檔**把 `hieFiles` 傳給 hiedb,這是**正確性需求**,不只是為了排除幽靈檔。
+
+實測(G-B002):同一份 `.hie`、同一個 `(hieFile, occ)` 主鍵,兩種呼叫形式寫出不同的
+`defs.sl`——`Knot.Export.Types.rootDir` 逐檔清單給 **19**(正確,該檔 38 行),
+走目錄給 **4492**(那是 `test/Main.hs` 的行號)。走目錄索引時,其他 `.hie` 對同名記錄
+欄位的**使用**會覆蓋掉真正的宣告位置。
+
+若你自己準備 hiedb 索引再用 `--db` 指給 knot,請用逐檔形式。
+細節見 `.design/bugfixes/G-B002-hiedb-dir-index-defs-pollution.md`。
 
 ### 3. `implements` 邊尚未實作
 
@@ -186,11 +203,17 @@ exports / imports / typenames / typerefs),class/instance 關係沒有直接的�
 
 ### 4. `hs-source-dirs` 取預設值 `.` 的 component 會認領整個 repo
 
-Cabal 的 `hs-source-dirs` 預設值是 `.`。若某個 component 省略了這欄,knot 會忠實地
-把 repo 內**全部** `.hs` 判給它並標為納入——包含 test fixture、範例碼、腳本。這忠實
-實作了 Cabal 語意,但對「根目錄擺 library」的專案會灌水整張圖。
+Cabal 的 `hs-source-dirs` 預設值是 `.`。knot 判斷「哪個檔屬於哪個 component」**只看
+目錄前綴**,不看 component 宣告的 `exposed-modules` / `other-modules` / `main-is`。
+所以某個 component 省略這欄時,repo 內**全部** `.hs` 都會被判給它並標為納入——包含
+test fixture、範例碼、腳本。再加上「只要任一 owner 未排除即納入」的判定規則,
+test-suite 的排除也抵銷不掉。
 
 **迴避法**:在目標專案的 `.cabal` 明寫 `hs-source-dirs`。
+
+已立案為 `.design/subsystems/project-meta/enhancements/E001-component-module-list-ownership.md`
+——正解是改看 component 的 module 清單,但那是 project-meta 的 Level 2 契約變更,
+會改變每個被掃專案的納入結果,需要獨立的 scope 討論。
 
 ### 5. 驗證覆蓋面
 

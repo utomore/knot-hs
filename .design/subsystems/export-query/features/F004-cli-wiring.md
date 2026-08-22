@@ -567,7 +567,7 @@ executable 內部匯出,不進 library `exposed-modules`,因此**不擴大 libra
   即視為有跳檔**;`erReports` 中 `brUsed == False` 的**降級**不算(否則沒裝 hiedb 的環境
   在 `--backend auto` 下永遠 exit 1,與 ADR-002「降級而非失敗」直接衝突)
   → 影響:若裁定要更精確的跳檔計數,上游三個子系統的警告 DTO 需要新增「是否為跳檔」的標記
-  (**契約變更**,本 feature 不擅自為之)
+  (**契約變更**,本 feature 不擅自為之)  → **已消解(2026-08-22)**:`system.md` 的 Level 1 用語已改為「任何**警告**改為 exit 1」,與本假設採取的實作對齊;CLI 的 help 字串同步改為 `exit 1 when there is any warning`。不再需要「跳檔標記」的契約變更
 - A3: `knot query` 讀哪一份 `codegraph.json`,契約未定(design.md 的四條對映沒有路徑參數)
   → 採取:**新增 `--graph FILE`,預設 `codegraph.json`(相對於目前工作目錄)**。理由:`--output`
   可以把匯出改道,查詢面必須有辦法指回去;system.md 明文「內部旗標細節屬 Level 2/3 自主權」
