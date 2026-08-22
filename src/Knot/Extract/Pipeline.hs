@@ -10,9 +10,11 @@
 -- 那一層的每個概念(後端選擇、能力等級、後端報告)在 ADR-006 之後都沒有
 -- 對應物,整個模組連同型別一起拆掉。
 --
--- 本模組只認識 'Knot.Extract.Types' 與 'Knot.Meta.Types',不 import 任何一站的
--- 模組;四站由 'Knot.Extract.extract' 裝進 'Stages' 交進來,四站模組也不
--- import 本模組——沒有環。
+-- 本模組只認識 'Knot.Extract.Types' 與 'Knot.Meta.Types',不呼叫任何一站的
+-- 函數;四站由 'Knot.Extract.extract' 裝進 'Stages' 交進來,四站模組也不
+-- import 本模組——沒有環。唯一的例外是向 "Knot.Extract.BuildDriver" 取
+-- 'HieLayout' 這個__型別__(G-E006:它是模組間介面型別,定義住在產生者那裡,
+-- 不在契約模組),純型別相依、不是呼叫相依。
 --
 -- __不在管線層包 @try@__:四站的契約都是「不拋例外」(import-scan 逐檔 @try@、
 -- build-driver 收斂 @IOException@、hie-index \/ hie-facts 收斂 @SomeException@);
@@ -28,13 +30,13 @@ import Data.List (sort)
 import qualified Data.Text as T
 import Data.Text (Text)
 
+import Knot.Extract.BuildDriver (HieLayout)
 import Knot.Extract.Types
   ( ExtractFailure (..)
   , ExtractOptions
   , ExtractResult (..)
   , ExtractWarning (..)
   , Fact (..)
-  , HieLayout
   )
 import Knot.Meta.Types (ProjectMeta (..), SourceFile (..))
 
@@ -50,6 +52,9 @@ data Stages h = Stages
     -- ^ 站 3 hie-index:索引就緒;失敗 = 'VersionMismatch' \/ 'IndexFailed'
   , stFacts :: h -> ProjectMeta -> IO ([Fact], [ExtractWarning])
     -- ^ 站 4 hie-facts:decl 層事實(警告已含 hie-index 的 @ihNotes@,本站不重複加)
+  , stInstances :: ExtractOptions -> HieLayout -> ProjectMeta -> IO ([Fact], [ExtractWarning])
+    -- ^ 站 5 hie-instances(F008):'FactInstance';單檔失敗已在站內轉警告,不會失敗。
+    -- 只在站 4 的 decl 層成立後才跑,零筆不影響 @Right@(規則 3 的判準不看它)
   }
 
 -- | 全有全無的管線。
@@ -73,13 +78,14 @@ runPipeline st opts pm
             Left f -> pure (Left f)
             Right h -> do
               (declFacts, factWarns) <- stFacts st h pm             -- 4.
-              pure $
-                if any isDecl declFacts
-                  then Right ExtractResult
-                    { erFacts    = sort (moduleFacts <> declFacts)  -- 規則 10:全序,不受站序影響
-                    , erWarnings = scanWarns <> factWarns           -- 站序固定:import-scan 在前
+              if any isDecl declFacts
+                then do
+                  (instFacts, instWarns) <- stInstances st opts layout pm   -- 5.(F008)
+                  pure $ Right ExtractResult
+                    { erFacts    = sort (moduleFacts <> declFacts <> instFacts)  -- 規則 10:全序,不受站序影響
+                    , erWarnings = scanWarns <> factWarns <> instWarns         -- 站序固定:import-scan 在前
                     }
-                  else Left (IndexFailed (noDeclDetail factWarns))  -- 規則 3 的 decl 層判準
+                else pure (Left (IndexFailed (noDeclDetail factWarns)))  -- 規則 3 的 decl 層判準,不看站 5
  where
   isDecl FactDecl{} = True
   isDecl _          = False

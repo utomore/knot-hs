@@ -24,8 +24,6 @@ module Knot.Extract.Types
   , DeclKind (..)
     -- * 回報
   , ExtractWarning (..)
-    -- * .hie 佈局(ADR-006;build-driver → hie-index 的載體)
-  , HieLayout (..)
     -- * 共用詞彙型別(re-export 自 project-meta,見 ADR-005)
   , ModuleName (..)
   , ComponentRef (..)
@@ -35,7 +33,7 @@ import Data.Text (Text)
 
 import Knot.Meta.Types (ComponentRef (..), ModuleName (..))
 
--- | 抽取選項。@rootDir@ 是 @sfPath@ 與 'HieLayout' 內各 repo 相對路徑的錨點,
+-- | 抽取選項。@rootDir@ 是 @sfPath@ 與 @.knot\/@ 內各 repo 相對路徑的錨點,
 -- 也是 @.knot\/@ 快取(builddir、@hiedb.sqlite@)的所在(抽取規則 7)。
 -- 使用者需要知道的只有這一個欄位——@knot extract .@ 就是全部(ADR-006)。
 data ExtractOptions = ExtractOptions
@@ -124,10 +122,3 @@ data ExtractFailure
   | NoSources                                                   -- ^ 納入範圍內零個原始檔
   deriving (Eq, Show)
 
--- | build-driver 的產物:@.knot/build@ 下各 component 輸出目錄裡的 @.hie@。
--- 路徑 repo 相對、正斜線,依碼位序;每筆附其 component(由 cabal 佈局路徑推得)。
-data HieLayout = HieLayout
-  { hlRoot  :: FilePath                       -- ^ @\<root\>\/.knot\/build@
-  , hlFiles :: [(ComponentRef, FilePath)]
-  }
-  deriving (Eq, Show)

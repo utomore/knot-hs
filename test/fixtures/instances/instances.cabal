@@ -1,0 +1,16 @@
+cabal-version:      3.4
+name:               instances
+version:            0.1.0.0
+build-type:         Simple
+
+-- F008 fixture:涵蓋七種明寫 instance 形式(單參、單 context、雙 context、括號型、
+-- 多參數 class、外部 class、空 body)+ 一個跨行標頭 + 跨 module 的 instance,以及
+-- deriving 的三種形式(子句、standalone、anyclass)——後者不得產生 FactInstance。
+-- 只依賴 base,保證建得起來;cabal.project 讓 cabal 停在這裡。
+
+library
+    hs-source-dirs:   src
+    exposed-modules:  Inst.Core
+                      Inst.Extra
+    build-depends:    base
+    default-language: GHC2024

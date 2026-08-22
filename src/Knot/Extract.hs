@@ -7,6 +7,7 @@ module Knot.Extract
 
 import Knot.Extract.BuildDriver (ensureHie)
 import Knot.Extract.HieIndex (IndexHandle, ensureIndex)
+import Knot.Extract.HieInstances (readInstanceFacts)
 import Knot.Extract.HiedbFacts (readIndexFacts)
 import Knot.Extract.ImportScan (scanImports)
 import Knot.Extract.Pipeline (Stages (..), runPipeline)
@@ -19,11 +20,12 @@ import Knot.Meta.Types (ProjectMeta)
 extract :: ExtractOptions -> ProjectMeta -> IO (Either ExtractFailure ExtractResult)
 extract = runPipeline realStages
 
--- | 真實四站。屬 fact-pipeline 的內部接線,不匯出。
+-- | 真實五站(F008 起第五站 hie-instances)。屬 fact-pipeline 的內部接線,不匯出。
 realStages :: Stages IndexHandle
 realStages = Stages
-  { stScan  = scanImports
-  , stBuild = ensureHie
-  , stIndex = ensureIndex
-  , stFacts = readIndexFacts
+  { stScan      = scanImports
+  , stBuild     = ensureHie
+  , stIndex     = ensureIndex
+  , stFacts     = readIndexFacts
+  , stInstances = readInstanceFacts
   }

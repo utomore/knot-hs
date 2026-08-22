@@ -5,7 +5,7 @@ title: graph-core
 description: 圖 IR 子系統:決定性節點 id 鑄造、兩層節點組裝與邊推導
 status: active
 created: 2026-08-20
-updated: 2026-08-22
+updated: 2026-08-23
 parent: system
 related-adr: []
 code-paths: [src/Knot/Graph, src/Knot/Graph.hs]
@@ -31,7 +31,7 @@ buildGraph :: BuildOptions -> ProjectMeta -> ExtractResult -> CodeGraph
 
 ```haskell
 data BuildOptions = BuildOptions
-  { moduleOnly :: Bool          -- 對應 CLI --module-only:只出 module 節點與 imports 邊
+  { moduleOnly :: Bool          -- library 呼叫者用:True 只出 module 節點與 imports 邊(規則 6);CLI 自 S5 起恆填 False(ADR-006、G-E006)
   }
 
 data CodeGraph = CodeGraph
@@ -115,7 +115,7 @@ id 只由 `QualName`(module、occ、namespace)、instance 標頭與(碰撞時的
 
    **namespace → relation 是 term/type 二分**(批次澄清 C2 裁決):值層面的名字(函式、資料建構子、記錄欄位選擇器)一律 `RCalls`,`RUses` 專留給型別層面。`NameSpace` 的四個值全部有歸屬,不留靜默落空的縫;extraction 的 `z:`(型別變數)在其契約已裁決不產出,不會流到這裡。
 
-   **`FactInstance` 目前無後端產出**(extraction C4:hiedb 0.8 的 schema 無 instance 表;見 system.md「`implements` 邊不在 S3」)。graph-core 仍**完整實作** instance 節點鑄造與 `RImplements` 推導並以手工事實流驗收——兩段都是純函數,ADR-002 預留的第三後端上線時零改動即生效;端到端輸出目前恆為 0 個 instance 節點與 0 條 `RImplements` 邊(批次澄清 C1 裁決)。
+   **`FactInstance` 的來源是 extraction 階段四的 hie-instances**(`extraction/F008`,2026-08-23 立案,ADR-007;在此之前無後端產出——hiedb 0.8 的 schema 無 instance 表)。graph-core 仍**完整實作** instance 節點鑄造與 `RImplements` 推導並以手工事實流驗收——兩段都是純函數,ADR-002 預留的第三後端上線時零改動即生效;端到端輸出目前恆為 0 個 instance 節點與 0 條 `RImplements` 邊(批次澄清 C1 裁決)。
 
 3. **產生碼過濾**(**只適用 decl 層事實** `FactDecl` / `FactRef` / `FactInstance`;`FactModule` / `FactImport` 一律不受本規則影響——濾掉 `FactModule` 會讓 `gfInternal` 縮水、module 節點連帶消失,A1 裁決):五者任一成立即濾除該事實並計入 `gsFilteredGenerated`——
 

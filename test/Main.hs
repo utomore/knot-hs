@@ -102,7 +102,8 @@ import Knot.Export.Types
 import qualified Knot.Export.Types as ET
 import Knot.Extract (extract)
 import Knot.Extract.BuildDriver
-  ( cabalArgs
+  ( HieLayout (..)
+  , cabalArgs
   , componentRefOf
   , ensureHie
   , enumerateHie
@@ -112,6 +113,9 @@ import Knot.Extract.BuildDriver
   , prepareKnotDir
   , runCabalWith
   )
+-- G-E006:HieLayout 是 build-driver → hie-index 的模組間介面型別,定義住在
+-- build-driver,不在契約模組 Knot.Extract.Types。
+import qualified Knot.Extract.BuildDriver as BD
 import Knot.Extract.HieIndex
   ( IndexHandle
   , IndexStats (..)
@@ -144,13 +148,13 @@ import Knot.Extract.ImportScan
   , scanSource
   , stripCommentLines
   )
+import Knot.Extract.HieInstances (normaliseHead, readInstanceFacts)
 import Knot.Extract.Pipeline (Stages (..), runPipeline)
 import Knot.Extract.Types
   ( DeclKind (..)
   , ExtractOptions (..)
   , ExtractResult (..)
   , ExtractWarning (..)
-  , HieLayout (..)
   , Fact (..)
   , NameSpace (..)
   , QualName (..)
@@ -278,6 +282,7 @@ tests = testGroup "knot-hs"
   , extractionF005Tests
   , extractionF006Tests
   , extractionF007Tests
+  , extractionF008Tests
   , graphCoreF001Tests
   , graphCoreF002Tests
   , graphCoreF003Tests
@@ -290,6 +295,7 @@ tests = testGroup "knot-hs"
   , globalE001Tests
   , globalE004Tests
   , globalB002Tests
+  , globalE006Tests
   ]
 
 f001Tests :: TestTree
@@ -854,9 +860,10 @@ testIncludedScope = testCase "test_included_scope" $ do
   cref <- newIORef Nothing
   let capturing = Stages
         { stScan  = \_ pmIn -> writeIORef cref (Just pmIn) >> pure ([], [])
-        , stBuild = \_ _ -> pure (Right (XT.HieLayout ".knot/build" []))
+        , stBuild = \_ _ -> pure (Right (BD.HieLayout ".knot/build" []))
         , stIndex = \_ _ -> pure (Right ())
         , stFacts = \() _ -> pure ([], [])
+        , stInstances = \_ _ _ -> pure ([], [])
         }
   _ <- runPipeline capturing (extOpts compsFixture) pm
   seen <- readIORef cref
@@ -1265,7 +1272,7 @@ hiedbOpts :: FilePath -> ExtractOptions
 hiedbOpts = extOpts
 
 -- | ensureHie → ensureIndex 兩步到位,回 (ProjectMeta, HieLayout, IndexHandle)。
-indexScratch :: FilePath -> IO (ProjectMeta, XT.HieLayout, IndexHandle)
+indexScratch :: FilePath -> IO (ProjectMeta, BD.HieLayout, IndexHandle)
 indexScratch root = do
   pm <- loadProjectMeta (defOpts root)
   layout <- expectRight =<< ensureHie (hiedbOpts root) pm
@@ -1338,28 +1345,28 @@ testGhcVersionFilter = testCase "test_ghc_version_filter" $ do
   ghcVersionOfPath (hieUnderGhc "9.14.1") @?= Just (T.pack "9.14.1")
   ghcVersionOfPath "dist/ghc-lib-parser-9.14.1/x.hie" @?= Nothing
   ghcVersionOfPath "src/Foo.hie" @?= Nothing
-  let mixed = XT.HieLayout
-        { XT.hlRoot  = ".knot/build"
-        , XT.hlFiles = [ (buildableLib, hieUnderGhc own)
+  let mixed = BD.HieLayout
+        { BD.hlRoot  = ".knot/build"
+        , BD.hlFiles = [ (buildableLib, hieUnderGhc own)
                        , (buildableLib, hieUnderGhc "9.12.2")
                        , (buildableLib, hieUnderGhc "9.10.1") ] }
       (matching, others) = partitionByGhc ownGhcVersion mixed
   map snd matching @?= [hieUnderGhc own]
   others @?= map T.pack ["9.10.1", "9.12.2"]
   -- 只含別版 → VersionMismatch,兩個版本字串都填
-  r <- ensureIndex (hiedbOpts buildableFixture) mixed { XT.hlFiles = [(buildableLib, hieUnderGhc "9.12.2")] }
+  r <- ensureIndex (hiedbOpts buildableFixture) mixed { BD.hlFiles = [(buildableLib, hieUnderGhc "9.12.2")] }
   case r of
     Left (XT.VersionMismatch h k) -> do
       h @?= T.pack "9.12.2"
       k @?= ownGhcVersion
     other -> assertFailure ("expected VersionMismatch, got " <> either show (const "Right") other)
   -- 空 layout → IndexFailed(建置成功卻沒產物是異常,不是版本問題)
-  r0 <- ensureIndex (hiedbOpts buildableFixture) mixed { XT.hlFiles = [] }
+  r0 <- ensureIndex (hiedbOpts buildableFixture) mixed { BD.hlFiles = [] }
   case r0 of
     Left (XT.IndexFailed d) -> assertBool ("should mention .hie: " <> T.unpack d) (hasText ".hie" d)
     other -> assertFailure ("expected IndexFailed, got " <> either show (const "Right") other)
   -- 沒有版本段 → IndexFailed 指明佈局異常
-  r1 <- ensureIndex (hiedbOpts buildableFixture) mixed { XT.hlFiles = [(buildableLib, "weird/Foo.hie")] }
+  r1 <- ensureIndex (hiedbOpts buildableFixture) mixed { BD.hlFiles = [(buildableLib, "weird/Foo.hie")] }
   case r1 of
     Left (XT.IndexFailed d) -> assertBool ("should mention ghc-<version>: " <> T.unpack d) (hasText "ghc-<version>" d)
     other -> assertFailure ("expected IndexFailed, got " <> either show (const "Right") other)
@@ -1401,8 +1408,8 @@ testEnsureIndexFailures = testCase "test_ensure_index_failures" $ do
   removePathForcibly blocked
   createDirectoryIfMissing True blocked
   writeUtf8 (blocked </> ".knot") "not a directory\n"
-  let layout1 = XT.HieLayout { XT.hlRoot = ".knot/build"
-                             , XT.hlFiles = [(buildableLib, hieUnderGhc (T.unpack ownGhcVersion))] }
+  let layout1 = BD.HieLayout { BD.hlRoot = ".knot/build"
+                             , BD.hlFiles = [(buildableLib, hieUnderGhc (T.unpack ownGhcVersion))] }
   ra <- ensureIndex (hiedbOpts blocked) layout1
   case ra of
     Left (XT.IndexFailed d) -> assertBool ("should name .knot: " <> T.unpack d) (hasText ".knot" d)
@@ -1416,7 +1423,7 @@ testEnsureIndexFailures = testCase "test_ensure_index_failures" $ do
     createDirectoryIfMissing True (takeDirectory (root </> bad))
     BS.writeFile (root </> bad) BS.empty
     h <- expectRight =<< ensureIndex (hiedbOpts root)
-           layout { XT.hlFiles = XT.hlFiles layout <> [(buildableLib, bad)] }
+           layout { BD.hlFiles = BD.hlFiles layout <> [(buildableLib, bad)] }
     case ihNotes h of
       [w] -> assertBool ("warning must name the file: " <> T.unpack (ewMessage w))
                (hasText "Bad.hie" (ewMessage w))
@@ -1463,9 +1470,10 @@ includedMeta = emptyMeta
 fakeStages :: IORef [String] -> Stages ()
 fakeStages calls = Stages
   { stScan  = \_ _ -> logCall "scan"  >> pure (factsA, [scanWarn])
-  , stBuild = \_ _ -> logCall "build" >> pure (Right (XT.HieLayout ".knot/build" []))
+  , stBuild = \_ _ -> logCall "build" >> pure (Right (BD.HieLayout ".knot/build" []))
   , stIndex = \_ _ -> logCall "index" >> pure (Right ())
   , stFacts = \() _ -> logCall "facts" >> pure (factsB, [factWarn])
+  , stInstances = \_ _ _ -> pure ([], [])   -- F008 第五站:假站不記錄、不產事實(既有呼叫序斷言不變)
   }
  where
   logCall s = modifyIORef' calls (++ [s])
@@ -1485,8 +1493,9 @@ testPipelineModuleSurface = testCase "test_pipeline_module_surface" $ do
     (T.pack "Knot.Extract.Pipeline" `elem` exposed)
   assertBool "knot-internal no longer lists Knot.Extract.Backend"
     (T.pack "Knot.Extract.Backend" `notElem` exposed)
-  -- 一進一出,計數與 test_cabal_contract_surface 一致(26 / 17 已含 project-meta/F004 的一出)
-  length exposed @?= 26
+  -- 一進一出,計數與 test_cabal_contract_surface 一致(26 已含 project-meta/F004 的一出;
+  -- extraction/F008 加 HieInstances → 27)
+  length exposed @?= 27
   -- 搬家後的常數與可注入管線都在「非契約面」區段(G-E004 T4 的改寫)
   forM_ [ ("src/Knot/Extract/ImportScan.hs", "importScanName")
         , ("src/Knot/Extract/HieIndex.hs",   "hiedbName")
@@ -5337,16 +5346,16 @@ testCabalContractSurface = testCase "test_cabal_contract_surface" $ do
       private    = [m | m <- exposed, m `notElem` contractModules]
   -- 公開面恰為契約模組(排序後逐字比對,順序不影響判定)
   sort reexported @?= sort contractModules
-  -- 內部 library 收全部 26 個模組
+  -- 內部 library 收全部 27 個模組
   -- (F005 加 BuildDriver;F006 HiedbDriver → HieIndex、F007 Backend → Pipeline 各一進一出;
-  --  project-meta/F004 去 HieLocate 一出:27 → 26)
-  length exposed @?= 26
+  --  project-meta/F004 去 HieLocate 一出:27 → 26;extraction/F008 加 HieInstances 一進:26 → 27)
+  length exposed @?= 27
   -- 每個被 reexport 的模組都真的存在於內部 library
   assertBool ("reexported modules missing from knot-internal: "
                <> show [m | m <- reexported, m `notElem` exposed])
     (all (`elem` exposed) reexported)
-  -- 17 個內部模組一個都不得出現在公開面
-  length private @?= 17
+  -- 18 個內部模組一個都不得出現在公開面(F008 的 HieInstances 是第 18 個)
+  length private @?= 18
   assertBool ("internal modules leaked into the public surface: "
                <> show [m | m <- private, m `elem` reexported])
     (not (any (`elem` reexported) private))
@@ -5745,9 +5754,9 @@ testBuildDriverTypesConstruct = testCase "test_build_driver_types_construct" $ d
   XT.NoSources @?= XT.NoSources
   -- ComponentRef 由 Knot.Extract.Types 取得(ADR-005 附帶義務),型別與 project-meta 的同一個
   let cref = XT.ComponentRef (T.pack "p", T.pack "exe:a")
-      hl   = XT.HieLayout { XT.hlRoot = ".knot/build", XT.hlFiles = [(cref, ".knot/build/a.hie")] }
-  XT.hlRoot hl @?= ".knot/build"
-  map fst (XT.hlFiles hl) @?= [ComponentRef (T.pack "p", T.pack "exe:a")]
+      hl   = BD.HieLayout { BD.hlRoot = ".knot/build", BD.hlFiles = [(cref, ".knot/build/a.hie")] }
+  BD.hlRoot hl @?= ".knot/build"
+  map fst (BD.hlFiles hl) @?= [ComponentRef (T.pack "p", T.pack "exe:a")]
   hl @?= hl
 
 -- F005 T2:.knot/ 準備冪等;既有 .gitignore 不覆寫
@@ -6053,3 +6062,243 @@ testE001SelfScanDotDir = testCase "test_e001_self_scan_dot_dir" $ do
   -- src/ 的每個檔仍由 knot-internal 認領(它的 hs-source-dirs 沒動)
   forM_ [ sf | sf <- srcs, "src/" `isPrefixOf` sfPath sf ] $ \sf ->
     assertBool ("owned: " <> sfPath sf) (ref "knot-hs" "lib:knot-internal" `elem` sfOwners sf)
+
+--------------------------------------------------------------------------------
+-- G-E006 S5 殘留清理
+--------------------------------------------------------------------------------
+
+globalE006Tests :: TestTree
+globalE006Tests = testGroup "global/G-E006 s5-residue-cleanup"
+  [ testE006ModuleOnlyNotCli       -- T1
+  , testE006HieLayoutNotContract   -- T2
+  , testE006RoadmapRowsAnnotated   -- T3
+  ]
+
+-- G-E006 T1:moduleOnly 的現行描述不再指向已廢旗標 --module-only,
+-- Graph.hs 的規則 6 註解不再說「尚無 decl 事實」
+testE006ModuleOnlyNotCli :: TestTree
+testE006ModuleOnlyNotCli = testCase "test_e006_module_only_not_cli" $ do
+  forM_ [ "src/Knot/Graph/Types.hs", "src/Knot/Graph.hs"
+        , ".design/subsystems/graph-core/design.md" ] $ \p -> do
+    s <- readUtf8 p
+    assertBool (p <> " must not describe moduleOnly as the CLI flag --module-only")
+      (not (hasText "--module-only" s))
+  g <- readUtf8 "src/Knot/Graph.hs"
+  assertBool "Graph.hs rule-6 comment must not claim there are no decl facts yet"
+    (not (hasText "尚無 decl 事實" g))
+
+-- G-E006 T2:HieLayout 不再從契約模組匯出;定義與匯出住在 build-driver
+testE006HieLayoutNotContract :: TestTree
+testE006HieLayoutNotContract = testCase "test_e006_hie_layout_not_contract" $ do
+  tys <- exportGroups "src/Knot/Extract/Types.hs"
+  groupOf tys "HieLayout" @?= Nothing
+  typesSrc <- readUtf8 "src/Knot/Extract/Types.hs"
+  assertBool "Knot.Extract.Types must not mention HieLayout at all"
+    (not (hasText "HieLayout" typesSrc))
+  bd <- exportGroups "src/Knot/Extract/BuildDriver.hs"
+  assertBool ("Knot.Extract.BuildDriver must export HieLayout; exports: " <> show (map fst bd))
+    (groupOf bd "HieLayout" /= Nothing)
+  -- 行為回歸:HieLayout 的建構與 Eq 不變(F005 T1 的同一組斷言,改由 BD 取得)
+  let cref = ComponentRef (T.pack "p", T.pack "exe:a")
+      hl   = BD.HieLayout { BD.hlRoot = ".knot/build", BD.hlFiles = [(cref, ".knot/build/a.hie")] }
+  BD.hlRoot hl @?= ".knot/build"
+  hl @?= BD.HieLayout ".knot/build" [(cref, ".knot/build/a.hie")]
+
+-- G-E006 T3:extraction 功能規劃階段一、二的四列都帶 S5 標註;scan-status 仍算得出 extraction 進度
+testE006RoadmapRowsAnnotated :: TestTree
+testE006RoadmapRowsAnnotated = testCase "test_e006_roadmap_rows_annotated" $ do
+  d <- readUtf8 ".design/subsystems/extraction/design.md"
+  let rows = [ ln | ln <- T.lines d, T.pack "| " `T.isPrefixOf` ln
+             , any (\n -> (T.pack ("| " <> n <> " | ") `T.isPrefixOf` ln)) ["1", "2", "3", "4"] ]
+  length rows @?= 4
+  forM_ rows $ \ln ->
+    assertBool ("roadmap row must carry an S5 annotation: " <> T.unpack (T.take 40 ln))
+      (T.pack "S5" `T.isInfixOf` ln)
+  -- doc 欄仍指向 F001–F004(表結構沒被標註破壞)
+  forM_ (zip rows ["F001", "F002", "F003", "F004"]) $ \(ln, fid) ->
+    assertBool ("doc column intact for " <> fid) (T.pack ("| " <> fid <> " |") `T.isInfixOf` ln)
+
+--------------------------------------------------------------------------------
+-- extraction/F008 hie-instances
+--------------------------------------------------------------------------------
+
+extractionF008Tests :: TestTree
+extractionF008Tests = testGroup "extraction/F008 hie-instances"
+  [ testInstancesStageWiring      -- T1
+  , testInstancesReadBestEffort   -- T2
+  , testInstancesHeadText         -- T3
+  , testInstancesClassResolution  -- T4
+  , testInstancesEndToEnd         -- T5
+  ]
+
+-- | F008 fixture:七種明寫 instance 形式 + 跨行標頭 + 跨 module instance + 三種 deriving。
+instancesFixture :: FilePath
+instancesFixture = "test/fixtures/instances"
+
+-- | 只取 FactInstance 的欄位(head, class, file, line),依事實全序。
+instanceFactsOf :: ExtractResult -> [(Text, QualName, FilePath, Int)]
+instanceFactsOf er =
+  [ (hd, cls, f, ln)
+  | FactInstance { fiClass = cls, fiInstHead = hd, fiInstFile = f, fiInstLine = ln } <- erFacts er ]
+
+-- | ghc package 的模組前綴(base 也有 GHC.* 模組——GHC.IO.Handle、GHC.Generics——
+-- 那些不在 ADR-007 的禁令內;禁的是 .hie 讀取器所在的 ghc package)。
+ghcPackagePrefixes :: [String]
+ghcPackagePrefixes =
+  [ "GHC.Iface.", "GHC.Types.Name", "GHC.Types.SrcLoc", "GHC.Unit.", "GHC.Data."
+  , "GHC.Driver.", "GHC.Utils.", "GHC.Hs", "GHC.Core", "GHC.Tc.", "Language.Haskell.Syntax" ]
+
+-- F008 T1:第五站接線——事實併入全序、警告排在 hie-facts 之後、decl 層零筆時不叫第五站;
+-- src/ 內只有 HieInstances.hs import ghc package 的模組(ADR-007)
+testInstancesStageWiring :: TestTree
+testInstancesStageWiring = testCase "test_instances_stage_wiring" $ do
+  calls <- newIORef ([] :: [String])
+  let decl = FactDecl { fdName = QualName (mn "A.Early") (T.pack "f") ValueNs, fdKind = ValueDecl
+                      , fdGenerated = False, fdFile = "src/A/Early.hs", fdLine = 3 }
+      inst = FactInstance { fiClass = QualName (mn "A.Early") (T.pack "C") TypeNs
+                          , fiInstHead = T.pack "C Int", fiInstFile = "src/A/Early.hs", fiInstLine = 9 }
+      modF = FactModule { fmFile = "src/A/Early.hs", fmModule = mn "A.Early" }
+      w s  = ExtractWarning (T.pack s) (T.pack s)
+      st   = Stages
+        { stScan      = \_ _ -> pure ([modF], [w "scan"])
+        , stBuild     = \_ _ -> pure (Right (BD.HieLayout ".knot/build" []))
+        , stIndex     = \_ _ -> pure (Right ())
+        , stFacts     = \() _ -> pure ([decl], [w "facts"])
+        , stInstances = \_ _ _ -> modifyIORef' calls ("instances" :) >> pure ([inst], [w "instances"])
+        }
+  r <- runPipeline st (extOpts ".") includedMeta
+  er <- expectRight r
+  assertBool "FactInstance is merged into erFacts" (inst `elem` erFacts er)
+  erFacts er @?= sort [modF, decl, inst]
+  map ewSource (erWarnings er) @?= map T.pack ["scan", "facts", "instances"]
+  -- decl 層零筆 → Left,且第五站不被呼叫(規則 3 的判準不看 instance)
+  writeIORef calls []
+  rNo <- runPipeline st { stFacts = \() _ -> pure ([], []) } (extOpts ".") includedMeta
+  case rNo of
+    Left (XT.IndexFailed _) -> pure ()
+    other -> assertFailure ("expected IndexFailed, got " <> show (fmap erFacts other))
+  readIORef calls >>= (@?= [])
+  -- ADR-007 邊界:src/ 下只有 HieInstances.hs 可以 import ghc package 的模組
+  srcs <- listFilesRec "src"
+  forM_ [ p | p <- srcs, takeExtension p == ".hs", takeFileName p /= "HieInstances.hs" ] $ \p -> do
+    s <- readUtf8 p
+    let offenders = [ ln | ln <- T.lines s, T.pack "import " `T.isPrefixOf` T.stripStart ln
+                    , any (\pre -> T.pack pre `T.isInfixOf` ln) ghcPackagePrefixes ]
+    assertBool (p <> " must not import ghc-package modules: " <> show offenders) (null offenders)
+  hi <- readUtf8 "src/Knot/Extract/HieInstances.hs"
+  assertBool "HieInstances.hs is the one that reads .hie" (hasText "GHC.Iface.Ext.Binary" hi)
+
+-- F008 T2:單檔 best-effort——讀不到的 .hie 一則警告、其餘照常;全部 pmSources 排除時
+-- 每個 .hie 一則 cannot map、零事實;兩種情況都不失敗
+testInstancesReadBestEffort :: TestTree
+testInstancesReadBestEffort = testCase "test_instances_read_best_effort" $
+  withBuildableScratch "f008-best-effort" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    layout <- expectRight =<< ensureHie (extOpts root) pm
+    let matching = fst (partitionByGhc ownGhcVersion layout)
+    cref <- case matching of
+      ((c, _) : _) -> pure c
+      []           -> assertFailure "fixture sanity: built .hie files present"
+    (fs0, ws0) <- readInstanceFacts (extOpts root) layout pm
+    fs0 @?= []                     -- buildable 沒有明寫 instance
+    ws0 @?= []
+    -- (a) 清單多一個不存在的 .hie(路徑帶 ghc-<own> 段才會進相符清單)
+    let bogus = ".knot/build/ghc-" <> T.unpack ownGhcVersion <> "/Missing.hie"
+        layoutA = layout { BD.hlFiles = BD.hlFiles layout <> [(cref, bogus)] }
+    (fsA, wsA) <- readInstanceFacts (extOpts root) layoutA pm
+    fsA @?= []
+    case wsA of
+      [wa] -> do
+        ewSource wa @?= T.pack bogus
+        assertBool "message names the failure" (T.pack "cannot read .hie" `T.isPrefixOf` ewMessage wa)
+      _ -> assertFailure ("expected exactly one warning, got " <> show wsA)
+    -- (b) pmSources 全部排除 → 每個相符 .hie 一則 cannot map、零事實
+    let pmOff = pm { pmSources = [ sf { sfIncluded = False } | sf <- pmSources pm ] }
+    (fsB, wsB) <- readInstanceFacts (extOpts root) layout pmOff
+    fsB @?= []
+    length wsB @?= length matching
+    forM_ wsB $ \wb ->
+      assertBool ("cannot-map warning: " <> T.unpack (ewMessage wb))
+        (T.pack "cannot map indexed module" `T.isPrefixOf` ewMessage wb
+          && T.pack "skipping its instances" `T.isSuffixOf` ewMessage wb)
+
+-- F008 T3:標頭原文——七種形式逐字相同、跨行標頭收斂為單行、fiInstLine = 標頭起始行、
+-- deriving 三形式零筆
+testInstancesHeadText :: TestTree
+testInstancesHeadText = testCase "test_instances_head_text" $
+  withFixtureScratch instancesFixture "f008-heads" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    er <- expectRight =<< extract (extOpts root) pm
+    erWarnings er @?= []
+    -- erFacts 是 Fact 的全序(class 先於標頭),不是行序;這裡依行號排回原始碼順序比對
+    let core = sortOn snd [ (hd, ln) | (hd, _, f, ln) <- instanceFactsOf er, f == "src/Inst/Core.hs" ]
+    core @?=
+      [ (T.pack "Renderable Sprite", 21)
+      , (T.pack "Renderable a => Renderable (Wrapper a)", 24)
+      , (T.pack "(Show a, Renderable a) => Renderable [a]", 27)
+      , (T.pack "Renderable (Maybe a)", 30)
+      , (T.pack "Convert Sprite Int", 33)
+      , (T.pack "Show Sprite", 36)
+      , (T.pack "Renderable Tag", 39)
+      , (T.pack "Renderable Bool", 42)          -- 原始碼跨三行,標頭自第 42 行起
+      ]
+    [ (hd, ln) | (hd, _, f, ln) <- instanceFactsOf er, f == "src/Inst/Extra.hs" ]
+      @?= [ (T.pack "Renderable Blob", 7) ]
+    length (instanceFactsOf er) @?= 9
+    forM_ (instanceFactsOf er) $ \(hd, _, _, _) ->
+      assertBool ("deriving must not appear: " <> T.unpack hd)
+        (not (T.pack "Eq Sprite" `T.isInfixOf` hd) && not (T.pack "Renderable Int" `T.isInfixOf` hd))
+    normaliseHead (T.pack "  Renderable\n    Bool \t x ") @?= T.pack "Renderable Bool x"
+
+-- F008 T4:class 解析——本地 class 指向 Inst.Core、外部 Show 指向 GHC 的 module、
+-- 括號型與 context 型仍解到最左 class、qnSpace 一律 TypeNs
+testInstancesClassResolution :: TestTree
+testInstancesClassResolution = testCase "test_instances_class_resolution" $
+  withFixtureScratch instancesFixture "f008-classes" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    er <- expectRight =<< extract (extOpts root) pm
+    let byHead = [ (hd, cls) | (hd, cls, _, _) <- instanceFactsOf er ]
+        classOf hd = lookup (T.pack hd) byHead
+        local occ = Just (QualName (mn "Inst.Core") (T.pack occ) TypeNs)
+    classOf "Renderable Sprite"                           @?= local "Renderable"
+    classOf "Renderable a => Renderable (Wrapper a)"      @?= local "Renderable"
+    classOf "(Show a, Renderable a) => Renderable [a]"    @?= local "Renderable"
+    classOf "Renderable (Maybe a)"                        @?= local "Renderable"   -- 不是 Maybe
+    classOf "Convert Sprite Int"                          @?= local "Convert"
+    classOf "Renderable Blob"                             @?= local "Renderable"   -- 跨 module 仍指定義處
+    case classOf "Show Sprite" of
+      Just q -> do
+        qnOcc q @?= T.pack "Show"
+        qnSpace q @?= TypeNs
+        let ModuleName m = qnModule q
+        assertBool ("external class module: " <> T.unpack m) (T.pack "GHC." `T.isPrefixOf` m)
+      Nothing -> assertFailure "Show Sprite instance missing"
+    forM_ byHead $ \(_, q) -> qnSpace q @?= TypeNs
+
+-- F008 T5:端到端——instance 節點與 implements 邊(外部 class 無邊)、兩次相同、
+-- knot-hs 自掃 FactInstance ≥ 3 且 0 警告
+testInstancesEndToEnd :: TestTree
+testInstancesEndToEnd = testCase "test_instances_end_to_end" $ do
+  withFixtureScratch instancesFixture "f008-e2e" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    er1 <- expectRight =<< extract (extOpts root) pm
+    er2 <- expectRight =<< extract (extOpts root) pm
+    erFacts er2 @?= erFacts er1
+    let g = buildGraph defBuildOpts pm er1
+        instNodes = [ t | n <- cgNodes g, gnKind n == InstanceNode, NodeId t <- [gnId n] ]
+        impl = [ (s, t) | e <- cgEdges g, geRelation e == RImplements
+                        , NodeId s <- [geSource e], NodeId t <- [geTarget e] ]
+    length instNodes @?= 9
+    assertBool "cross-module instance node" (T.pack "Inst.Extra#i:Renderable Blob" `elem` instNodes)
+    assertBool "multi-line head normalised in id" (T.pack "Inst.Core#i:Renderable Bool" `elem` instNodes)
+    length impl @?= 8                                          -- 9 − Show Sprite(外部 class)
+    sort (nubOrd (map snd impl)) @?= map T.pack ["Inst.Core.Convert#t", "Inst.Core.Renderable#t"]
+    assertBool "external class yields no implements edge"
+      (T.pack "Inst.Core#i:Show Sprite" `notElem` map fst impl)
+    cgWarnings g @?= []
+  -- 自掃
+  pmSelf <- loadProjectMeta (defOpts ".")
+  erSelf <- expectRight =<< extract (extOpts ".") pmSelf
+  assertBool ("self-scan instances >= 3, got " <> show (length (instanceFactsOf erSelf)))
+    (length (instanceFactsOf erSelf) >= 3)
+  [ w | w <- erWarnings erSelf, T.pack "instance" `T.isInfixOf` ewMessage w ] @?= []
