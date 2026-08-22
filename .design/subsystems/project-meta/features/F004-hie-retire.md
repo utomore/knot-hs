@@ -3,7 +3,7 @@ id: F004
 type: feature
 title: hie-retire
 description: 移除 hie-locate 模組與 pmHie / HieInfo / hieDirOverride,project-meta 不再碰 .hie
-status: open
+status: done
 created: 2026-08-22
 updated: 2026-08-22
 depends-on: [F001, G-E001]
@@ -123,11 +123,11 @@ ProjectMeta.pmHie
 
 ## TodoList
 
-- [ ] T1: `Knot.Meta.Types`——刪 `HieInfo` / `HieDirSource` 與匯出、`MetaOptions` 去 `hieDirOverride`、`ProjectMeta` 去 `pmHie`;`Knot.Extract.Types:37` haddock 去 `hieFiles` 一詞  `dep: -`
-- [ ] T2: 刪 `src/Knot/Meta/HieLocate.hs`、`knot-hs.cabal` 去一列;`Knot.Meta.loadProjectMeta` 去 hie-locate 一站  `dep: T1`
-- [ ] T3: `cabal build knot-hs:knot-internal` 通過(`src/` 零殘留引用)  `dep: T2`
-- [ ] T4: 測試搬遷——刪 `f003Tests` 與輔助、刪兩個 fixture 目錄、刪 G-E001 T3、改寫 `defOpts` / `emptyMeta` / 六處記錄字面量 / 兩處 `pmHie` 斷言 / G-B002 的 `pmHie` 前置;守門計數 26 / 17  `dep: T3`
-- [ ] T5: 共同閘門後收尾——F003 文檔 `status: closed`;閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` exit 0、`cabal test` 全綠(與 extraction/F007、export-query/F005 同批執行)  `dep: T4`
+- [x] T1: `Knot.Meta.Types`——刪 `HieInfo` / `HieDirSource` 與匯出、`MetaOptions` 去 `hieDirOverride`、`ProjectMeta` 去 `pmHie`;`Knot.Extract.Types:37` haddock 去 `hieFiles` 一詞  `dep: -`
+- [x] T2: 刪 `src/Knot/Meta/HieLocate.hs`、`knot-hs.cabal` 去一列;`Knot.Meta.loadProjectMeta` 去 hie-locate 一站  `dep: T1`
+- [x] T3: `cabal build knot-hs:knot-internal` 通過(`src/` 零殘留引用)  `dep: T2`
+- [x] T4: 測試搬遷——刪 `f003Tests` 與輔助、刪兩個 fixture 目錄、刪 G-E001 T3、改寫 `defOpts` / `emptyMeta` / 六處記錄字面量 / 兩處 `pmHie` 斷言 / G-B002 的 `pmHie` 前置;守門計數 26 / 17  `dep: T3`
+- [x] T5: 共同閘門後收尾——F003 文檔 `status: closed`;閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` exit 0、`cabal test` 全綠(與 extraction/F007、export-query/F005 同批執行)  `dep: T4`
 
 ## 1-to-1 測試對照表
 
@@ -141,4 +141,14 @@ ProjectMeta.pmHie
 
 ## 實作備註
 
-(撰寫時留空)
+### 落地(2026-08-22)
+
+純減法如文檔所列,無偏差:`Knot.Meta.HieLocate` 刪檔、`knot-hs.cabal` 去一列(27 → 26)、`Knot.Meta.Types` 去兩型別兩欄位、`loadProjectMeta` 縮為三站(警告序 discovery → cabal-model → source-index)。`Knot.Extract.Types:37` 的 haddock 由 extraction/F007 改寫時一併去掉 `hieFiles`(誰先到誰改)。`moduleNameFromPathExt` 保留。
+
+測試:新群組 `F004 hie-retire`(`test_meta_types_shape` / `test_hie_locate_removed` / `test_no_hie_residue`),`f003Tests` 七條與 `hie-conv` / `hie-dist` 兩個 fixture 目錄刪除,G-E001 的 `test_module_suffix_rule_agrees` 刪除,`test_cabal_contract_surface` 計數 26 / 17。`test_no_hie_residue` 首跑紅一次——它 grep 的字串本身寫在測試裡就是殘留,改以片段拼接(`concat ["pm", "Hie"]`)後綠;F001 / F002 群組全綠。
+
+G-B002 的 `test_decl_line_within_file` 不再以 `pmHie` 做前置,也不再用 `--db` 改道暫存索引:S5 後 knot-hs 自己建置、索引進 `.knot/`,`extract` 回 `Right` 即續行(實測 495 個帶行號節點全部落在檔案範圍內)。
+
+### 閘門(T5,2026-08-22)
+
+三件套共同執行:`cabal clean && cabal build all --enable-tests --ghc-options=-Werror` exit 0;`cabal test` **139 / 139 綠**(184 s)。細節記在 export-query/F005 的實作備註。F003 文檔 `status` 改 `closed`。

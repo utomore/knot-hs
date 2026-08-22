@@ -5,25 +5,26 @@
 -- 本 module 不重複定義,但**代為 re-export**:契約的四個 DTO 欄位都是這個型別,
 -- 消費端不該為了替收到的值命名而再開一個 import 繞回源頭(G-E004、ADR-005)。
 --
+-- S5(ADR-006、F007)起的形狀:沒有後端選擇、沒有能力等級、沒有後端報告。
+-- 'extract' 回 @Either ExtractFailure ExtractResult@——兩層都成立才有事實流,
+-- 任一層整體拿不到就是 'ExtractFailure',不存在部分成功。
+--
 -- deriving 說明:全部 DTO 有 'Eq' / 'Show';'Fact' 與其成員
--- ('QualName' / 'NameSpace' / 'DeclKind')與 'CapabilityLevel' 另有 'Ord',
--- 支撐抽取規則 8(決定性)的全序排序(F001 假設 A3)。
+-- ('QualName' / 'NameSpace' / 'DeclKind')另有 'Ord',支撐抽取規則 10
+-- (決定性)的全序排序(F001 假設 A3)。
 module Knot.Extract.Types
   ( -- * 對外契約
     ExtractOptions (..)
-  , BackendChoice (..)
   , ExtractResult (..)
-  , CapabilityLevel (..)
+  , ExtractFailure (..)
     -- * 事實流
   , QualName (..)
   , NameSpace (..)
   , Fact (..)
   , DeclKind (..)
     -- * 回報
-  , BackendReport (..)
   , ExtractWarning (..)
-    -- * 整體失敗與 .hie 佈局(ADR-006;F005 定義,#6 / #7 接續使用)
-  , ExtractFailure (..)
+    -- * .hie 佈局(ADR-006;build-driver → hie-index 的載體)
   , HieLayout (..)
     -- * 共用詞彙型別(re-export 自 project-meta,見 ADR-005)
   , ModuleName (..)
@@ -34,31 +35,20 @@ import Data.Text (Text)
 
 import Knot.Meta.Types (ComponentRef (..), ModuleName (..))
 
--- | 抽取選項。@rootDir@ 是 @sfPath@ / @hieFiles@ 等 repo 相對路徑的錨點
--- (階段一閘門裁決後的契約變更;後端要開檔就得有這個 root,
--- 抽取規則 6 的 @\<root\>\/.knot\/hiedb.sqlite@ 亦以此為準)。
+-- | 抽取選項。@rootDir@ 是 @sfPath@ 與 'HieLayout' 內各 repo 相對路徑的錨點,
+-- 也是 @.knot\/@ 快取(builddir、@hiedb.sqlite@)的所在(抽取規則 7)。
+-- 使用者需要知道的只有這一個欄位——@knot extract .@ 就是全部(ADR-006)。
 data ExtractOptions = ExtractOptions
-  { rootDir       :: FilePath          -- ^ 專案根目錄
-  , backendChoice :: BackendChoice     -- ^ 對應 CLI --backend
-  , hiedbExe      :: Maybe FilePath    -- ^ 覆寫 hiedb 執行檔(預設查 PATH)
-  , dbPath        :: Maybe FilePath    -- ^ 覆寫索引位置(預設 <root>/.knot/hiedb.sqlite)
+  { rootDir :: FilePath                -- ^ 專案根目錄
   }
   deriving (Eq, Show)
 
-data BackendChoice = Auto | ImportsOnly | HiedbOnly
-  deriving (Eq, Show)
-
+-- | 兩層都成立時的結果:事實流(全序排序)與各站的單檔警告(站序固定)。
 data ExtractResult = ExtractResult
   { erFacts    :: [Fact]
-  , erLevel    :: CapabilityLevel      -- ^ 實際達到的能力等級
-  , erReports  :: [BackendReport]      -- ^ 各後端:用了/沒用 + 原因
   , erWarnings :: [ExtractWarning]     -- ^ best-effort 蒐集,呼叫端印 stderr
   }
   deriving (Eq, Show)
-
--- | 'Ord' 的建構子序即能力高低:@ModuleLevel < DeclLevel@。
-data CapabilityLevel = ModuleLevel | DeclLevel
-  deriving (Eq, Ord, Show)
 
 -- | graph-core 鑄造決定性節點 id 的原料(Module + OccName + namespace)。
 data QualName = QualName
@@ -74,7 +64,7 @@ data QualName = QualName
 --
 -- hiedb 另有 @\"z:\"@(型別變數,見其 @HieDb/Types.hs@ 的 @toNsChar@):
 -- 刻意不涵蓋。型別變數是簽名內的區域名字、不是架構實體,鑄成圖節點無意義。
--- 後端遇到時跳過該列,並依前綴彙整成一則警告(不逐列刷警告)。
+-- hie-facts 遇到時跳過該列,並依前綴彙整成一則警告(不逐列刷警告)。
 data NameSpace
   = ValueNs        -- ^ hiedb @\"v:\"@ 一般值(函式、變數)
   | DataConNs      -- ^ hiedb @\"c:\"@ 資料建構子
@@ -96,7 +86,7 @@ data Fact
       , fdFile :: FilePath, fdLine :: Int }
   | FactRef                             -- ^ 名稱引用(calls / uses 邊的原料)
       { frFromModule :: ModuleName
-      , frFromDecl   :: Maybe QualName  -- ^ 引用發生在哪個頂層宣告內,由後端解析
+      , frFromDecl   :: Maybe QualName  -- ^ 引用發生在哪個頂層宣告內,由 hie-facts 解析
       , frTarget     :: QualName
       , frGenerated  :: Bool            -- ^ 引用__站點__是產生碼(hiedb @refs.is_generated@)
       , frTargetGenerated :: Bool       -- ^ 引用__目標__是產生碼宣告(G-E003,判準同
@@ -114,14 +104,9 @@ data DeclKind
   | TypeSynDecl | PatSynDecl | FamilyDecl
   deriving (Eq, Ord, Show)
 
-data BackendReport = BackendReport
-  { brBackend :: Text                   -- ^ "import-scan" | "hiedb"
-  , brUsed    :: Bool
-  , brDetail  :: Text                   -- ^ 未用時的降級原因;用了時為空字串
-  }
-  deriving (Eq, Show)
-
--- | 帶來源(檔案路徑或後端名)的警告(委派決策 D1,比照 @MetaWarning@ 模式)。
+-- | 帶來源(檔案路徑或站名)的警告(委派決策 D1,比照 @MetaWarning@ 模式)。
+-- @ewSource@ 的值域是契約:單檔警告填 repo 相對路徑,站級警告填
+-- @\"import-scan\"@ \/ @\"hiedb\"@。
 data ExtractWarning = ExtractWarning
   { ewSource  :: Text
   , ewMessage :: Text
@@ -129,9 +114,9 @@ data ExtractWarning = ExtractWarning
   deriving (Eq, Show)
 
 -- | 整體失敗(ADR-006):兩層任一層拿不到。呼叫端 exit 1、不寫檔,與 @--strict@
--- 無關。F005 一次定義四個建構子(sum type 不能分次加):'BuildFailed' 由
--- build-driver 產生,'VersionMismatch' \/ 'IndexFailed' 由 hie-index(#6),
--- 'NoSources' 由 fact-pipeline(#7)。
+-- 無關。'BuildFailed' 由 build-driver 產生,'VersionMismatch' 由 hie-index,
+-- 'IndexFailed' 由 hie-index(索引檔層級)或 fact-pipeline(索引讀不出任何
+-- 頂層宣告,規則 3 的 decl 層判準),'NoSources' 由 fact-pipeline。
 data ExtractFailure
   = BuildFailed     { bfComponent :: Text, bfDetail :: Text }  -- ^ cabal 回報的失敗單元(解析不到為 @all@)與輸出尾段
   | VersionMismatch { vmHie :: Text, vmKnot :: Text }          -- ^ .hie 的 GHC 版本 ≠ knot 的(ADR-001)

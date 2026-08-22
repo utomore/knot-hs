@@ -29,6 +29,8 @@ module Knot.Extract.HieIndex
   , ihStats
   , ihNotes
   , IndexStats (..)
+    -- * 站名常數(非契約面:@ewSource@ 的值域是契約,具名常數本身不是)
+  , hiedbName
     -- * 內部純函數(僅為 1-to-1 測試而匯出,非 Level 2 契約面)
   , ownGhcVersion
   , ghcVersionOfPath
@@ -64,7 +66,6 @@ import HieDb
   , withHieDb
   )
 
-import Knot.Extract.Backend (hiedbName)
 import Knot.Extract.Types
   ( ExtractFailure (..)
   , ExtractOptions (..)
@@ -76,6 +77,11 @@ import Knot.Meta.Types (ComponentRef)
 --------------------------------------------------------------------------------
 -- 公開型別
 --------------------------------------------------------------------------------
+
+-- | hiedb 兩站(hie-index、hie-facts)共用的契約名(即 @ewSource@ 的值域之一)。
+-- F007 自 @Knot.Extract.Backend@ 搬來;hie-facts 本來就 import 本模組。
+hiedbName :: Text
+hiedbName = T.pack "hiedb"
 
 -- | 「已就緒索引」的不透明參照(Level 2 契約:內容屬 Level 3)。
 -- 只能由 'ensureIndex' 取得,欄位一律經存取子讀取——建構子不匯出。

@@ -16,13 +16,12 @@ module Knot.App.Summary
   , renderGraphSummary
   ) where
 
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 
 import Knot.Extract.Types
-  ( BackendReport (..)
-  , ExtractResult (..)
+  ( ExtractResult (..)
   , ExtractWarning (..)
   , Fact (..)
   )
@@ -97,40 +96,44 @@ renderMetaSummary pm = T.unlines
   tshow :: Show a => a -> Text
   tshow = T.pack . show
 
--- | 事實摘要:能力等級、後端報告、事實/警告筆數 + 逐筆 module/import 行,
--- 供唯讀驗收比對。輸出順序完全依 'ExtractResult' 內清單順序(決定性)。
+-- | 事實摘要:事實筆數依五個建構子分計、警告筆數,逐筆__只印 module 層__
+-- (M \/ I 行)與警告行,供唯讀驗收對帳。輸出順序完全依 'ExtractResult'
+-- 內清單順序(決定性)。
+--
+-- S5 起沒有 @level:@ \/ @backends:@ 行(ADR-006 後沒有對應概念);decl 層
+-- 只進計數——knot-hs 自身 decls 673 + refs 8210,逐筆印會淹掉對帳用的
+-- module 層。@instances@ 分計現在恆 0(hie-facts 不產 'FactInstance'),仍印:
+-- 它是契約建構子,日後補上 @implements@ 邊時摘要不用改。
 renderFactSummary :: ExtractResult -> Text
 renderFactSummary er = T.unlines
-  (levelLine : backendLines <> countLines <> map factLine facts <> map warnLine warnings)
+  (countLines <> mapMaybe factLine facts <> map warnLine warnings)
  where
   facts    = erFacts er
   warnings = erWarnings er
-  nModules = length [() | FactModule{} <- facts]
-  nImports = length [() | FactImport{} <- facts]
-  levelLine = T.pack "level: " <> tshow (erLevel er)
-  backendLines =
-    (T.pack "backends: " <> tshow (length (erReports er)))
-      : map backendLine (erReports er)
-  backendLine br = T.concat
-    [ T.pack "  ", brBackend br
-    , T.pack " used=", tshow (brUsed br)
-    , if T.null (brDetail br) then T.empty else T.pack " (" <> brDetail br <> T.pack ")"
-    ]
+  nModules   = length [() | FactModule{}   <- facts]
+  nImports   = length [() | FactImport{}   <- facts]
+  nDecls     = length [() | FactDecl{}     <- facts]
+  nRefs      = length [() | FactRef{}      <- facts]
+  nInstances = length [() | FactInstance{} <- facts]
   countLines =
     [ T.concat
         [ T.pack "facts: ", tshow (length facts), T.pack " total, "
         , tshow nModules, T.pack " modules, "
-        , tshow nImports, T.pack " imports"
+        , tshow nImports, T.pack " imports, "
+        , tshow nDecls, T.pack " decls, "
+        , tshow nRefs, T.pack " refs, "
+        , tshow nInstances, T.pack " instances"
         ]
     , T.pack "warnings: " <> tshow (length warnings)
     ]
-  factLine f@FactModule{} = T.concat
-    [ T.pack "  M ", T.pack (fmFile f), T.pack "  [", unMod (fmModule f), T.pack "]" ]
-  factLine f@FactImport{} = T.concat
-    [ T.pack "  I ", T.pack (fiFile f), T.pack ":", tshow (fiLine f)
-    , T.pack "  ", unMod (fiFrom f), T.pack " -> ", unMod (fiTo f)
-    ]
-  factLine f = T.pack "  ? " <> tshow f
+  -- 位置 pattern 而非選擇器:Fact 是 sum type,選擇器是部分函式(G-E002)
+  factLine (FactModule file m) = Just (T.concat
+    [ T.pack "  M ", T.pack file, T.pack "  [", unMod m, T.pack "]" ])
+  factLine (FactImport from to file line) = Just (T.concat
+    [ T.pack "  I ", T.pack file, T.pack ":", tshow line
+    , T.pack "  ", unMod from, T.pack " -> ", unMod to
+    ])
+  factLine _ = Nothing
   warnLine w = T.concat [T.pack "  ! ", ewSource w, T.pack ": ", ewMessage w]
   unMod (ModuleName m) = m
   tshow :: Show a => a -> Text

@@ -9,7 +9,6 @@ import System.FilePath (normalise, takeDirectory, (</>))
 
 import Knot.Meta.CabalModel (resolvePackage)
 import Knot.Meta.Discovery (findCabalFiles)
-import Knot.Meta.HieLocate (locateHie)
 import Knot.Meta.SourceIndex (indexSources)
 import Knot.Meta.Types
   ( ComponentKind (..)
@@ -23,9 +22,9 @@ import Knot.Meta.Types
 -- 'resolvePackage'(失敗者降級為警告、略過該套件),結果在此錨定為
 -- repo 相對(@pkgCabalFile@、@compSourceDirs@;F002 假設 A1)並套用
 -- @compExcluded@ 的 kind × includeTests 判定,再交給 'indexSources'
--- 做歸類;管線尾端由 'locateHie' 填 @pmHie@(F003 hie-discovery)。
--- 警告順序:discovery → cabal-model → source-index → hie-locate
--- (判定規則 7)。
+-- 做歸類。管線三站到此為止——S5(F004 hie-retire)起 project-meta 不碰
+-- @.hie@,它由 extraction 自建於 @.knot\/@(ADR-006)。
+-- 警告順序:discovery → cabal-model → source-index(判定規則 7)。
 loadProjectMeta :: MetaOptions -> IO ProjectMeta
 loadProjectMeta opts = do
   (cabalRels, discoveryWarnings) <- findCabalFiles (root opts)
@@ -34,12 +33,10 @@ loadProjectMeta opts = do
       cabalWarnings = [w | (_, Left w) <- paired]     -- 序 = cabalRels 序(決定性)
       pkgs          = [anchor rel pm | (rel, Right pm) <- paired]
   (sources, indexWarnings) <- indexSources opts pkgs
-  (hie, hieWarnings) <- locateHie opts sources
   pure ProjectMeta
     { pmPackages = pkgs
     , pmSources  = sources
-    , pmHie      = hie
-    , pmWarnings = discoveryWarnings ++ cabalWarnings ++ indexWarnings ++ hieWarnings
+    , pmWarnings = discoveryWarnings ++ cabalWarnings ++ indexWarnings
     }
  where
   -- root 錨定:resolvePackage 只回相對 .cabal 自身目錄的結果(假設 A1)

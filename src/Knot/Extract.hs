@@ -5,21 +5,25 @@ module Knot.Extract
   ( extract
   ) where
 
-import Knot.Extract.Backend (Backend, runBackends)
-import Knot.Extract.HiedbFacts (hiedbBackend)
-import Knot.Extract.ImportScan (importScanBackend)
-import Knot.Extract.Types (ExtractOptions, ExtractResult)
+import Knot.Extract.BuildDriver (ensureHie)
+import Knot.Extract.HieIndex (IndexHandle, ensureIndex)
+import Knot.Extract.HiedbFacts (readIndexFacts)
+import Knot.Extract.ImportScan (scanImports)
+import Knot.Extract.Pipeline (Stages (..), runPipeline)
+import Knot.Extract.Types (ExtractFailure, ExtractOptions, ExtractResult)
 import Knot.Meta.Types (ProjectMeta)
 
--- | 依 'ExtractOptions' 調度已註冊的後端,合成事實流與能力等級。
---
--- 階段二起註冊表為 import-scan(F002)+ hiedb(F004):hiedb 探測通過時
--- @erLevel@ 到得了 @DeclLevel@,探測不過則只降級 + 記報告,import-scan 的
--- 事實不受影響。'extract' 本身的行為不隨註冊表填實而改變。
-extract :: ExtractOptions -> ProjectMeta -> IO ExtractResult
-extract = runBackends registeredBackends
+-- | 固定四站、全有全無(ADR-006、F007):import-scan 的 module 層與
+-- hie-index + hie-facts 的 decl 層__都成立__才回 @Right@;任一層整體拿不到
+-- 回 @Left@,不產出部分事實流。沒有後端選擇、沒有降級。
+extract :: ExtractOptions -> ProjectMeta -> IO (Either ExtractFailure ExtractResult)
+extract = runPipeline realStages
 
--- | 後端註冊表;順序即報告與警告的固定序(規則 8)。
--- 屬 backend-select 內部狀態,不匯出。
-registeredBackends :: [Backend]
-registeredBackends = [importScanBackend, hiedbBackend]
+-- | 真實四站。屬 fact-pipeline 的內部接線,不匯出。
+realStages :: Stages IndexHandle
+realStages = Stages
+  { stScan  = scanImports
+  , stBuild = ensureHie
+  , stIndex = ensureIndex
+  , stFacts = readIndexFacts
+  }

@@ -3,9 +3,9 @@ id: F003
 type: feature
 title: hie-discovery
 description: 三層 .hie 目錄發現、檔案列舉與幽靈 .hie 過濾
-status: done
+status: closed
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-22
 depends-on: [F001]
 related-adr: [ADR-001, ADR-002]
 related-feature: []

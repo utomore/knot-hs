@@ -1,10 +1,10 @@
--- | project-meta(F001 scan-baseline、F002 cabal-components、F003 hie-discovery)、
--- extraction(F001 fact-contract、F002 import-scan)、graph-core(F001
--- module-graph)與 export-query(F001 json-export、F002 graph-load、
--- F003 query-commands、F004 cli-wiring)的 1-to-1 測試。
+-- | project-meta(F001 scan-baseline、F002 cabal-components、F004 hie-retire)、
+-- extraction(F001 fact-contract、F002 import-scan、F004 hiedb-facts、
+-- F005 build-driver、F006 hiedb-embed、F007 two-layer-contract)、graph-core
+-- (F001–F003)與 export-query(F001 json-export、F002 graph-load、
+-- F003 query-commands、F004 cli-wiring、F005 cli-zero-setup)的 1-to-1 測試。
 module Main (main) where
 
-import Control.Exception (throwIO)
 import Control.Monad (forM, forM_)
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as AK
@@ -81,12 +81,13 @@ import Knot.App.Cli
 import Knot.App.Report
   ( emitNotes
   , exportNoteLines
+  , extractFailureLines
   , extractNoteLines
   , graphNoteLines
   , metaNoteLines
   , queryNoteLines
   )
-import Knot.App.Run (runCommand, runExtractCmd, runQueryCmd)
+import Knot.App.Run (runCommand, runExtractCmd, runExtractCmdWith, runQueryCmd)
 import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummary)
 import Knot.Export (writeCodegraph)
 import Knot.Export.Commit (detectCommit)
@@ -100,13 +101,6 @@ import Knot.Export.Types
 -- → 匯出面的裸取值走 qualified(沿用 F001 假設 A7 留下的 'XT' 慣例)。
 import qualified Knot.Export.Types as ET
 import Knot.Extract (extract)
-import Knot.Extract.Backend
-  ( Backend (..)
-  , ProbeResult (..)
-  , hiedbName
-  , importScanName
-  , runBackends
-  )
 import Knot.Extract.BuildDriver
   ( cabalArgs
   , componentRefOf
@@ -123,6 +117,7 @@ import Knot.Extract.HieIndex
   , IndexStats (..)
   , ensureIndex
   , ghcVersionOfPath
+  , hiedbName
   , ihDbPath
   , ihNotes
   , ihRootDir
@@ -134,7 +129,6 @@ import Knot.Extract.HieIndex
 import Knot.Extract.HiedbFacts
   ( SourceDecls (..)
   , declKindOf
-  , hiedbBackend
   , isGeneratedName
   , parseOcc
   , pickFromDecl
@@ -144,16 +138,15 @@ import Knot.Extract.HiedbFacts
   )
 import Knot.Extract.ImportScan
   ( headerModuleOf
-  , importScanBackend
+  , importScanName
   , importsOf
+  , scanImports
   , scanSource
   , stripCommentLines
   )
+import Knot.Extract.Pipeline (Stages (..), runPipeline)
 import Knot.Extract.Types
-  ( BackendChoice (..)
-  , BackendReport (..)
-  , CapabilityLevel (..)
-  , DeclKind (..)
+  ( DeclKind (..)
   , ExtractOptions (..)
   , ExtractResult (..)
   , ExtractWarning (..)
@@ -192,14 +185,11 @@ import Knot.Graph.Types
 import Knot.Meta (loadProjectMeta)
 import Knot.Meta.CabalModel (resolvePackage)
 import Knot.Meta.Discovery (findCabalFiles)
-import Knot.Meta.HieLocate (locateHie, moduleNameFromHiePath)
 import Knot.Meta.SourceIndex (indexSources, moduleNameFromPath)
 import Knot.Meta.Types
   ( ComponentKind (..)
   , ComponentMeta (..)
   , ComponentRef (..)
-  , HieDirSource (..)
-  , HieInfo (..)
   , MetaOptions (..)
   , MetaWarning (..)
   , ModuleName (..)
@@ -239,12 +229,8 @@ brokenFixture  = "test/fixtures/broken"
 graphFixture :: FilePath
 graphFixture = "test/fixtures/graph"
 
-hieConvFixture, hieDistFixture :: FilePath
-hieConvFixture = "test/fixtures/hie-conv"
-hieDistFixture = "test/fixtures/hie-dist"
-
 defOpts :: FilePath -> MetaOptions
-defOpts r = MetaOptions { root = r, includeTests = False, hieDirOverride = Nothing }
+defOpts r = MetaOptions { root = r, includeTests = False }
 
 -- | proj fixture 的期望結果(sfPath 碼位序)。
 expectedProjPaths :: [FilePath]
@@ -280,11 +266,12 @@ main = defaultMain tests
 
 tests :: TestTree
 tests = testGroup "knot-hs"
-  [ f001Tests, f002Tests, f003Tests
+  [ f001Tests, f002Tests, f004Tests
   , extractionF001Tests, extractionF002Tests
   , extractionF004Tests
   , extractionF005Tests
   , extractionF006Tests
+  , extractionF007Tests
   , graphCoreF001Tests
   , graphCoreF002Tests
   , graphCoreF003Tests
@@ -292,6 +279,7 @@ tests = testGroup "knot-hs"
   , exportQueryF002Tests
   , exportQueryF003Tests
   , exportQueryF004Tests
+  , exportQueryF005Tests
   , globalE003Tests
   , globalE001Tests
   , globalE004Tests
@@ -336,12 +324,10 @@ testTypesConstruct = testCase "test_types_construct" $ do
   let pm = ProjectMeta
         { pmPackages = []
         , pmSources  = []
-        , pmHie      = Nothing
         , pmWarnings = []
         }
   pmPackages pm @?= []
   pmSources pm @?= []
-  pmHie pm @?= Nothing
   pmWarnings pm @?= []
 
 -- T3: 有 .cabal → 正斜線相對路徑;無 .cabal → 空清單 + 一則警告
@@ -408,7 +394,6 @@ testLoadProjectMeta = testCase "test_load_project_meta" $ do
   pm <- loadProjectMeta (defOpts projFixture)
   pmPackages pm @?=
     [ PackageMeta { pkgName = T.pack "proj", pkgCabalFile = "proj.cabal", pkgComponents = [] } ]
-  pmHie pm @?= Nothing
   map sfPath (pmSources pm) @?= expectedProjPaths
   pmWarnings pm @?= []
   pm2 <- loadProjectMeta (defOpts noCabalFixture)
@@ -424,7 +409,6 @@ testRenderSummary = testCase "test_render_summary" $ do
             [ SourceFile "src/Foo/Bar.hs" (Just (ModuleName (T.pack "Foo.Bar"))) [] True
             , SourceFile "test/Spec.hs" Nothing [] False
             ]
-        , pmHie = Nothing
         , pmWarnings = [MetaWarning "." (T.pack "no .cabal file found")]
         }
       out = renderMetaSummary pm
@@ -640,7 +624,6 @@ testRenderSummaryComponents = testCase "test_render_summary_components" $ do
             [ SourceFile "src/Demo.hs" (Just (ModuleName (T.pack "Demo")))
                 [ref "demo" "lib:demo"] True
             ]
-        , pmHie = Nothing
         , pmWarnings = []
         }
       out = renderMetaSummary pm
@@ -653,169 +636,91 @@ testRenderSummaryComponents = testCase "test_render_summary_components" $ do
   assertBool "package count line" (T.pack "packages: 1" `T.isInfixOf` out)
 
 --------------------------------------------------------------------------------
--- F003 hie-discovery
+-- F004 hie-retire(撤銷 F003 hie-discovery:project-meta 退出 .hie 的世界)
 --------------------------------------------------------------------------------
 
--- | hie-conv fixture 的 [SourceFile](幽靈判定母集來源)。
-hieConvSources :: IO [SourceFile]
-hieConvSources = fst <$> indexSources (defOpts hieConvFixture) []
-
--- | hie-conv fixture 的期望 .hie 清單(碼位序)。
-allHieConvPaths, validHieConvPaths :: [FilePath]
-allHieConvPaths =
-  [".hie/Deep/Mod.hie", ".hie/Foo.hie", ".hie/Gone.hie", ".hie/lowercase/util.hie"]
-validHieConvPaths =
-  [".hie/Deep/Mod.hie", ".hie/Foo.hie", ".hie/lowercase/util.hie"]
-
-hieDistFooHie :: FilePath
-hieDistFooHie =
-  "dist-newstyle/build/x86_64-windows/ghc-9.14.1/pkg-0.1/build/extra-compilation-artifacts/hie/Foo.hie"
-
-f003Tests :: TestTree
-f003Tests = testGroup "F003 hie-discovery"
-  [ testLocateNone          -- T1
-  , testHieEnumerate        -- T2
-  , testThreeTierSource     -- T3
-  , testHieModuleMap        -- T4
-  , testGhostFilter         -- T5
-  , testLocateDeterministic -- T6
-  , testLoadMetaHie         -- T7
+f004Tests :: TestTree
+f004Tests = testGroup "F004 hie-retire"
+  [ testMetaTypesShape       -- T1
+  , testHieLocateRemoved     -- T2
+  -- T3 = test_cabal_contract_surface 的計數改寫(G-E001 群組);knot-internal 可編由閘門證明
+  , testNoHieResidue         -- T4(F001 / F002 群組全綠是另一半)
+  -- T5 = 共同閘門(人工執行,記入實作備註)
   ]
 
--- F003 T1: 三層皆未命中 → (Nothing, []);骨架與未命中路徑成立
-testLocateNone :: TestTree
-testLocateNone = testCase "test_locate_none" $ do
-  (srcs, _) <- indexSources (defOpts noCabalFixture) []
-  r <- locateHie (defOpts noCabalFixture) srcs
-  r @?= (Nothing, [])
+-- F004 T1:兩個 DTO 的形狀——多一欄是 missing-fields、少一欄是 unknown-field 編譯錯誤
+testMetaTypesShape :: TestTree
+testMetaTypesShape = testCase "test_meta_types_shape" $ do
+  let mo = MetaOptions { root = ".", includeTests = False }
+      pm = ProjectMeta { pmPackages = [], pmSources = [], pmWarnings = [] }
+  root mo @?= "."
+  includeTests mo @?= False
+  mo @?= mo
+  assertBool "MetaOptions Show is non-empty" (not (null (show mo)))
+  pm @?= pm
+  assertBool "ProjectMeta Show is non-empty" (not (null (show pm)))
+  -- 匯出清單不含兩個廢除型別;全檔不含兩個廢除欄位
+  gs <- exportGroups "src/Knot/Meta/Types.hs"
+  forM_ (map concat [["Hie", "Info"], ["Hie", "DirSource"]]) $ \sym ->
+    assertBool (sym <> " must not be exported from Knot.Meta.Types")
+      (groupOf gs sym == Nothing)
+  metaTypes <- readUtf8 "src/Knot/Meta/Types.hs"
+  forM_ (map concat [["hieDir", "Override"], ["pm", "Hie"]]) $ \needle ->
+    assertBool ("Knot.Meta.Types must not mention " <> needle) (not (hasText needle metaTypes))
+  extractTypes <- readUtf8 "src/Knot/Extract/Types.hs"
+  assertBool "Knot.Extract.Types haddock must not mention hieFiles"
+    (not (hasText "hieFiles" extractTypes))
 
--- F003 T2: .hie/ 下全部 .hie 入列(含巢狀)、repo 相對正斜線、非 .hie 不入列
-testHieEnumerate :: TestTree
-testHieEnumerate = testCase "test_hie_enumerate" $ do
-  srcs <- hieConvSources
-  (mh, _) <- locateHie (defOpts hieConvFixture) srcs
-  case mh of
-    Nothing -> assertFailure "expected Just HieInfo"
-    Just h  -> do
-      let everything = hieFiles h ++ hieGhosts h
-      sort everything @?= allHieConvPaths
-      forM_ everything $ \p -> do
-        assertBool ("forward slashes only: " <> p) ((toEnum 92 :: Char) `notElem` p)
-        assertBool ("repo relative: " <> p) (".hie/" `isPrefixOf` p)
-      assertBool "non-.hie decoy not enumerated"
-        (".hie/readme.txt" `notElem` everything)
+-- F004 T2:hie-locate 模組不存在、cabal 不列、src/ 零殘留;F001 / F002 的既有斷言不變
+testHieLocateRemoved :: TestTree
+testHieLocateRemoved = testCase "test_hie_locate_removed" $ do
+  gone <- doesFileExist "src/Knot/Meta/HieLocate.hs"
+  assertBool "src/Knot/Meta/HieLocate.hs must be gone" (not gone)
+  cabalSrc <- readUtf8 "knot-hs.cabal"
+  assertBool "knot-hs.cabal must not list Knot.Meta.HieLocate"
+    (not (hasText "Knot.Meta.HieLocate" cabalSrc))
+  srcs <- filter ((== ".hs") . takeExtension) <$> listFilesRec "src"
+  forM_ srcs $ \p -> do
+    s <- readUtf8 p
+    forM_ (map concat [["locate", "Hie"], ["Hie", "Locate"], ["moduleNameFrom", "HiePath"]]) $ \needle ->
+      assertBool (p <> " must not contain " <> show needle) (not (hasText needle s))
+  -- 縮短後的管線:no-cabal / comps 的警告與檔案清單與 F001 / F002 既有斷言一致
+  pm <- loadProjectMeta (defOpts noCabalFixture)
+  map sfPath (pmSources pm) @?= ["src/Foo.hs"]
+  map mwPath (pmWarnings pm) @?= [noCabalFixture]
+  pmC <- loadProjectMeta (defOpts compsFixture)
+  pmWarnings pmC @?= []
+  assertBool "comps fixture still indexes its sources" (not (null (pmSources pmC)))
 
--- F003 T3: 三層發現順序與 hieSource 標記(四例)
-testThreeTierSource :: TestTree
-testThreeTierSource = testGroup "test_three_tier_source"
-  [ testCase "override adopts FromFlag" $ do
-      srcs <- hieConvSources
-      (mh, ws) <- locateHie ((defOpts hieConvFixture) { hieDirOverride = Just ".hie" }) srcs
-      fmap hieSource mh @?= Just FromFlag
-      fmap hieDir mh @?= Just ".hie"
-      length ws @?= 2   -- 僅幽靈 + 無法對映警告,無層級警告
-  , testCase "convention layer" $ do
-      srcs <- hieConvSources
-      (mh, _) <- locateHie (defOpts hieConvFixture) srcs
-      fmap hieSource mh @?= Just FromConvention
-      fmap hieDir mh @?= Just ".hie"
-  , testCase "dist-newstyle layer with common-ancestor hieDir" $ do
-      (srcs, _) <- indexSources (defOpts hieDistFixture) []
-      (mh, ws) <- locateHie (defOpts hieDistFixture) srcs
-      fmap hieSource mh @?= Just FromDistNewstyle
-      fmap hieDir mh @?= Just
-        "dist-newstyle/build/x86_64-windows/ghc-9.14.1/pkg-0.1/build/extra-compilation-artifacts/hie"
-      fmap hieFiles mh @?= Just [hieDistFooHie]
-      fmap hieGhosts mh @?= Just []
-      ws @?= []
-  , testCase "missing override yields Nothing plus warning, no fallback" $ do
-      srcs <- hieConvSources
-      (mh, ws) <- locateHie ((defOpts hieConvFixture) { hieDirOverride = Just "no-such-dir" }) srcs
-      mh @?= Nothing   -- hie-conv 有 .hie 慣例層,Nothing 證明未 fallback
-      case ws of
-        [w] -> do
-          mwPath w @?= "no-such-dir"
-          assertBool "message mentions not found"
-            (T.pack "not found" `T.isInfixOf` mwMessage w)
-        _ -> assertFailure ("expected exactly one warning, got: " <> show ws)
-  ]
-
--- F003 T4: 去 .hie 副檔名 + 大寫尾綴法例 + property(小寫前綴段不改變推導)
-testHieModuleMap :: TestTree
-testHieModuleMap = testGroup "test_hie_module_map"
-  [ testCase "examples" $ do
-      moduleNameFromHiePath "Foo.hie" @?= Just (ModuleName (T.pack "Foo"))
-      moduleNameFromHiePath "Deep/Mod.hie" @?= Just (ModuleName (T.pack "Deep.Mod"))
-      moduleNameFromHiePath "lowercase/util.hie" @?= Nothing
-      moduleNameFromHiePath hieDistFooHie @?= Just (ModuleName (T.pack "Foo"))
-  , testProperty "lowercase prefix segments do not change result" $ property $ do
-      prefix <- forAll (Gen.list (Range.linear 0 4) (Gen.string (Range.linear 1 8) Gen.lower))
-      let path = concatMap (<> "/") prefix <> "Deep/Mod.hie"
-      moduleNameFromHiePath path === Just (ModuleName (T.pack "Deep.Mod"))
-  ]
-
--- F003 T5: 幽靈入 hieGhosts + 警告不進 hieFiles;無法對映者留置 + 警告;
--- 有效檔無警告(恰兩則警告即證明)
-testGhostFilter :: TestTree
-testGhostFilter = testCase "test_ghost_filter" $ do
-  srcs <- hieConvSources
-  (mh, ws) <- locateHie (defOpts hieConvFixture) srcs
-  case mh of
-    Nothing -> assertFailure "expected Just HieInfo"
-    Just h  -> do
-      hieGhosts h @?= [".hie/Gone.hie"]
-      hieFiles h @?= validHieConvPaths
-      assertBool "ghost not in hieFiles" (".hie/Gone.hie" `notElem` hieFiles h)
-      case ws of
-        [wGhost, wUnmap] -> do
-          mwPath wGhost @?= ".hie/Gone.hie"
-          assertBool "ghost message mentions module"
-            (T.pack "Gone" `T.isInfixOf` mwMessage wGhost)
-          mwPath wUnmap @?= ".hie/lowercase/util.hie"
-        _ -> assertFailure ("expected exactly two warnings, got: " <> show ws)
-
--- F003 T6: 連續兩次結果完全相等;hieFiles 與 hieGhosts 各自嚴格遞增
-testLocateDeterministic :: TestTree
-testLocateDeterministic = testCase "test_locate_deterministic" $ do
-  srcs <- hieConvSources
-  r1 <- locateHie (defOpts hieConvFixture) srcs
-  r2 <- locateHie (defOpts hieConvFixture) srcs
-  r2 @?= r1
-  case fst r1 of
-    Nothing -> assertFailure "expected Just HieInfo"
-    Just h  -> do
-      let inc xs = and (zipWith (<) xs (drop 1 xs))
-      assertBool "hieFiles strictly increasing" (inc (hieFiles h))
-      assertBool "hieGhosts strictly increasing" (inc (hieGhosts h))
-
--- F003 T7: loadProjectMeta 接線——pmHie 填實、警告殿後;no-cabal 既有行為不變
-testLoadMetaHie :: TestTree
-testLoadMetaHie = testCase "test_load_meta_hie" $ do
-  pm <- loadProjectMeta (defOpts hieConvFixture)
-  fmap hieSource (pmHie pm) @?= Just FromConvention
-  fmap hieGhosts (pmHie pm) @?= Just [".hie/Gone.hie"]
-  fmap hieFiles (pmHie pm) @?= Just validHieConvPaths
-  case pmWarnings pm of
-    [wCabal, wGhost, wUnmap] -> do
-      mwPath wCabal @?= hieConvFixture        -- discovery 警告在前
-      mwPath wGhost @?= ".hie/Gone.hie"       -- hie-locate 警告殿後
-      mwPath wUnmap @?= ".hie/lowercase/util.hie"
-    ws -> assertFailure ("expected exactly three warnings, got: " <> show ws)
-  pm2 <- loadProjectMeta (defOpts noCabalFixture)
-  pmHie pm2 @?= Nothing
-  map mwPath (pmWarnings pm2) @?= [noCabalFixture]
+-- F004 T4:測試檔與 fixture 零殘留
+testNoHieResidue :: TestTree
+testNoHieResidue = testCase "test_no_hie_residue" $ do
+  self <- readUtf8 "test/Main.hs"
+  -- 字串以片段拼接,免得這條測試自己就是殘留
+  let needles = map concat
+        [ ["f003", "Tests"], ["locate", "Hie"], ["hieConv", "Fixture"], ["hieDist", "Fixture"]
+        , ["pm", "Hie"], ["hieDir", "Override"], ["Hie", "Info"] ]
+  forM_ needles $ \needle ->
+    assertBool ("test/Main.hs must not mention " <> show needle) (not (hasText needle self))
+  forM_ ["test/fixtures/hie-conv", "test/fixtures/hie-dist"] $ \d -> do
+    stale <- doesDirectoryExist d
+    assertBool (d <> " must be gone") (not stale)
 
 --------------------------------------------------------------------------------
 -- extraction/F001 fact-contract
 --------------------------------------------------------------------------------
 
-extOpts :: BackendChoice -> ExtractOptions
-extOpts c = ExtractOptions
-  { rootDir       = projFixture
-  , backendChoice = c
-  , hiedbExe      = Nothing
-  , dbPath        = Nothing
-  }
+-- | 指定 root 的 'ExtractOptions'(S5 起只剩這一個欄位)。
+extOpts :: FilePath -> ExtractOptions
+extOpts r = ExtractOptions { rootDir = r }
+
+-- | 只取 module 層的 'ExtractResult':直接走模組介面 'scanImports',不經
+-- 'extract'。F007 起 'extract' 兩層全有全無,不可建置的 fixture(graph / proj /
+-- comps / multi / no-cabal)只能從這裡拿事實;事實照舊全序排序。
+moduleLayer :: FilePath -> ProjectMeta -> IO ExtractResult
+moduleLayer root pm = do
+  (fs, ws) <- scanImports (extOpts root) pm
+  pure ExtractResult { erFacts = sort fs, erWarnings = ws }
 
 mn :: String -> ModuleName
 mn = ModuleName . T.pack
@@ -823,47 +728,7 @@ mn = ModuleName . T.pack
 qn :: String -> String -> NameSpace -> QualName
 qn m o s = QualName { qnModule = mn m, qnOcc = T.pack o, qnSpace = s }
 
--- | 假後端:探測通過,回固定事實與警告。
-fakeOk :: Text -> CapabilityLevel -> [Fact] -> [ExtractWarning] -> Backend
-fakeOk n lvl fs ws = Backend
-  { bName  = n
-  , bLevel = lvl
-  , bProbe = \_ _ -> pure Available
-  , bRun   = \_ _ -> pure (fs, ws)
-  }
-
--- | 假後端:探測失敗,原因指定。
-fakeUnavailable :: Text -> CapabilityLevel -> Text -> Backend
-fakeUnavailable n lvl reason =
-  (fakeOk n lvl [] []) { bProbe = \_ _ -> pure (Unavailable reason) }
-
--- | 假後端:探測通過但 bRun 抛例外。
-fakeRunBoom :: Text -> CapabilityLevel -> String -> Backend
-fakeRunBoom n lvl msg =
-  (fakeOk n lvl [] []) { bRun = \_ _ -> throwIO (userError msg) }
-
--- | 假後端:記錄自己被呼叫過哪些階段。
-tracingBackend :: IORef [Text] -> Text -> CapabilityLevel -> Backend
-tracingBackend tref n lvl = Backend
-  { bName  = n
-  , bLevel = lvl
-  , bProbe = \_ _ -> logCall (T.pack "probe") >> pure Available
-  , bRun   = \_ _ -> logCall (T.pack "run") >> pure ([], [])
-  }
- where
-  logCall stage = modifyIORef' tref (++ [n <> T.pack ":" <> stage])
-
--- | 假後端:捕獲實際收到的 ProjectMeta。
-capturingBackend :: IORef (Maybe ProjectMeta) -> Text -> Backend
-capturingBackend cref n =
-  (fakeOk n ModuleLevel [] []) { bRun = \_ pm -> writeIORef cref (Just pm) >> pure ([], []) }
-
-reportFor :: Text -> ExtractResult -> IO BackendReport
-reportFor n r = case find ((== n) . brBackend) (erReports r) of
-  Just br -> pure br
-  Nothing -> assertFailure ("no BackendReport for backend: " <> T.unpack n)
-
--- | 刻意亂序的事實樣本(兩組,分屬兩個假後端)。
+-- | 刻意亂序的事實樣本(兩組:module 層與 decl 層)。
 factsA, factsB :: [Fact]
 factsA =
   [ FactImport (mn "Z.Late") (mn "A.Early") "src/Z/Late.hs" 9
@@ -879,30 +744,35 @@ factsB =
   ]
 
 emptyMeta :: ProjectMeta
-emptyMeta = ProjectMeta [] [] Nothing []
+emptyMeta = ProjectMeta [] [] []
 
+-- | F007 起 F001 的調度引擎測試(T2 / T4 / T5 / T6 / T7:假後端、探測、選擇、
+-- 降級合成、註冊表)隨 @Knot.Extract.Backend@ 一併移除;它們測的機制在
+-- ADR-006 之後沒有對應物。全有全無的管線由 extractionF007Tests 的
+-- test_pipeline_all_or_nothing 承接。
 extractionF001Tests :: TestTree
 extractionF001Tests = testGroup "extraction/F001 fact-contract"
-  [ testExtractTypesConstruct     -- T1
-  , testBackendIfaceConstruct     -- T2
-  , testIncludedScope             -- T3
-  , testProbeAndSelect            -- T4
-  , testBestEffortRun             -- T5
-  , testFactSynthesis             -- T6
-  , testExtractEntryEmptyRegistry -- T7
+  [ testExtractTypesConstruct     -- T1(F007 T1 改寫)
+  , testIncludedScope             -- T3(F007 T3 改寫,G-B001 斷言沿用)
   ]
 
--- extraction T1: 建構每個 DTO(Fact 五個建構子全部)並驗證欄位取值
+-- extraction T1(F007 T1 改寫): 建構每個 DTO(Fact 五個建構子全部)並驗證欄位取值;
+-- 匯出清單不含任何廢除型別
 testExtractTypesConstruct :: TestTree
 testExtractTypesConstruct = testCase "test_extract_types_construct" $ do
-  let opts = extOpts Auto
-  XT.rootDir opts    @?= projFixture
-  backendChoice opts @?= Auto
-  hiedbExe opts      @?= Nothing
-  dbPath opts        @?= Nothing
-  ExtractOptions "." HiedbOnly (Just "hiedb.exe") (Just "db") @?=
-    ExtractOptions { rootDir = ".", backendChoice = HiedbOnly
-                   , hiedbExe = Just "hiedb.exe", dbPath = Just "db" }
+  let opts = ExtractOptions { rootDir = projFixture }
+  XT.rootDir opts @?= projFixture
+  opts @?= extOpts projFixture
+  assertBool "ExtractOptions Show is non-empty" (not (null (show opts)))
+  -- 匯出清單(與全檔)不含廢除型別(名字以片段拼接,免得本測試自己成為殘留)
+  gs <- exportGroups "src/Knot/Extract/Types.hs"
+  typesSrc <- readUtf8 "src/Knot/Extract/Types.hs"
+  let retired = map concat
+        [ ["Backend", "Choice"], ["Capability", "Level"], ["Backend", "Report"]
+        , ["Backend"], ["Probe", "Result"] ]
+  forM_ retired $ \sym -> do
+    assertBool (sym <> " must not be exported from Knot.Extract.Types") (groupOf gs sym == Nothing)
+    assertBool (sym <> " must not appear in Knot.Extract.Types") (not (hasText sym typesSrc))
   -- QualName.qnModule 確為 Knot.Meta.Types.ModuleName(以該型別的值直接建構即證明共用)
   let modName = ModuleName (T.pack "A.Early") :: ModuleName
       q = QualName { qnModule = modName, qnOcc = T.pack "helper", qnSpace = ValueNs }
@@ -946,198 +816,55 @@ testExtractTypesConstruct = testCase "test_extract_types_construct" $ do
   -- DeclKind 七個建構子皆可建構且互異
   length (sort [ValueDecl, DataDecl, ClassDecl, InstanceDecl, TypeSynDecl, PatSynDecl, FamilyDecl])
     @?= 7
-  -- 回報 DTO
-  let br = BackendReport { brBackend = importScanName, brUsed = True, brDetail = T.empty }
-      ew = ExtractWarning { ewSource = hiedbName, ewMessage = T.pack "oops" }
-      res = ExtractResult { erFacts = factsA, erLevel = DeclLevel
-                          , erReports = [br], erWarnings = [ew] }
-  brBackend br   @?= importScanName
-  brUsed br      @?= True
-  brDetail br    @?= T.empty
+  -- 回報 DTO 與結果 DTO(S5 形狀:只剩事實與警告)
+  let ew = ExtractWarning { ewSource = hiedbName, ewMessage = T.pack "oops" }
+      res = ExtractResult { erFacts = factsA, erWarnings = [ew] }
   ewSource ew    @?= hiedbName
   ewMessage ew   @?= T.pack "oops"
   erFacts res    @?= factsA
-  erLevel res    @?= DeclLevel
-  erReports res  @?= [br]
   erWarnings res @?= [ew]
-  -- CapabilityLevel 的 Ord:ModuleLevel < DeclLevel
-  assertBool "ModuleLevel < DeclLevel" (ModuleLevel < DeclLevel)
-
--- extraction T2: 假後端值的建構與呼叫;後端名常數等於契約字串
-testBackendIfaceConstruct :: TestTree
-testBackendIfaceConstruct = testCase "test_backend_iface_construct" $ do
+  res @?= res
+  assertBool "ExtractResult Show is non-empty" (not (null (show res)))
+  -- 站名常數仍等於契約字串(搬家後值不變)
   importScanName @?= T.pack "import-scan"
   hiedbName      @?= T.pack "hiedb"
-  let opts = extOpts Auto
-      ok   = fakeOk importScanName ModuleLevel factsA [ExtractWarning importScanName (T.pack "w")]
-      bad  = fakeUnavailable hiedbName DeclLevel (T.pack "hiedb not on PATH")
-  bName ok   @?= importScanName
-  bLevel ok  @?= ModuleLevel
-  bLevel bad @?= DeclLevel
-  pOk <- bProbe ok opts emptyMeta
-  pOk @?= Available
-  pBad <- bProbe bad opts emptyMeta
-  pBad @?= Unavailable (T.pack "hiedb not on PATH")
-  (fs, ws) <- bRun ok opts emptyMeta
-  fs @?= factsA
-  ws @?= [ExtractWarning importScanName (T.pack "w")]
-  (fs2, ws2) <- bRun bad opts emptyMeta
-  fs2 @?= []
-  ws2 @?= []
 
--- extraction T3: 規則 1——後端**只處理** sfIncluded = True 的檔;其餘欄位原樣
+-- extraction T3(F007 T3 改寫): 規則 1——import-scan **只處理** sfIncluded = True 的檔
 --
--- G-B001 起調度層不再預先窄化:契約原文是「只**處理** sfIncluded = True 的
+-- G-B001 起管線層不預先窄化:契約原文是「只**處理** sfIncluded = True 的
 -- 檔案」,不是「只收到」。預先窄化會抹掉「這份 .hie 屬於一個被排除的檔案」
 -- 這個事實,讓 hiedb-facts 的 hs_src 比對落空後誤退回 module 名猜測。
--- 因此本測試分兩半:後端收到完整清單、但產出的事實不得碰被排除的檔。
+-- 因此本測試分兩半:站收到完整清單、但產出的事實不得碰被排除的檔。
 testIncludedScope :: TestTree
 testIncludedScope = testCase "test_included_scope" $ do
   pm <- loadProjectMeta (defOpts compsFixture)
   let excluded = [sfPath sf | sf <- pmSources pm, not (sfIncluded sf)]
   assertBool "fixture must contain excluded files" (not (null excluded))
-  -- 前半:後端拿到的是完整清單(含被排除者),其餘欄位原樣
+  -- 前半:以可注入的 stScan 捕捉管線交給第一站的 ProjectMeta,必須與 loadProjectMeta 給的整份相等
   cref <- newIORef Nothing
-  _ <- runBackends [capturingBackend cref importScanName] (extOpts Auto) pm
+  let capturing = Stages
+        { stScan  = \_ pmIn -> writeIORef cref (Just pmIn) >> pure ([], [])
+        , stBuild = \_ _ -> pure (Right (XT.HieLayout ".knot/build" []))
+        , stIndex = \_ _ -> pure (Right ())
+        , stFacts = \() _ -> pure ([], [])
+        }
+  _ <- runPipeline capturing (extOpts compsFixture) pm
   seen <- readIORef cref
   case seen of
-    Nothing   -> assertFailure "backend never received a ProjectMeta"
-    Just pmIn -> do
-      map sfPath (pmSources pmIn) @?= map sfPath (pmSources pm)
-      pmPackages pmIn @?= pmPackages pm
-      pmHie pmIn      @?= pmHie pm
-      pmWarnings pmIn @?= pmWarnings pm
+    Nothing   -> assertFailure "import-scan never received a ProjectMeta"
+    Just pmIn -> pmIn @?= pm
   -- 後半:規則 1 本體——import-scan 產出的事實不得提及任何被排除的檔
-  (facts, _) <- bRun importScanBackend
-                  ((extOpts Auto) { XT.rootDir = compsFixture }) pm
+  (facts, _) <- scanImports (extOpts compsFixture) pm
   let touched = nubOrd ([f | FactModule{fmFile = f} <- facts]
                           <> [f | FactImport{fiFile = f} <- facts])
       leaked  = [p | p <- touched, p `elem` excluded]
   assertBool ("import-scan must not process excluded files, leaked: " <> show leaked)
     (null leaked)
   assertBool "import-scan should still process the included ones" (not (null touched))
+  let included = [sfPath sf | sf <- pmSources pm, sfIncluded sf]
+  sort touched @?= sort included
 
--- extraction T4: 選擇與探測(規則 3)
-testProbeAndSelect :: TestTree
-testProbeAndSelect = testGroup "test_probe_and_select"
-  [ testCase "auto: failing probe reported, other backend still runs" $ do
-      let reason = T.pack "hiedb not on PATH"
-          reg = [ fakeOk importScanName ModuleLevel factsA []
-                , fakeUnavailable hiedbName DeclLevel reason ]
-      r <- runBackends reg (extOpts Auto) emptyMeta
-      brHiedb <- reportFor hiedbName r
-      brUsed brHiedb   @?= False
-      brDetail brHiedb @?= reason
-      brImport <- reportFor importScanName r
-      brUsed brImport @?= True
-      erFacts r @?= sort factsA
-      erLevel r @?= ModuleLevel
-  , testCase "auto: probe exception treated as unavailable, no crash" $ do
-      let reg = [ fakeOk importScanName ModuleLevel factsA []
-                , (fakeOk hiedbName DeclLevel [] [])
-                    { bProbe = \_ _ -> throwIO (userError "probe-boom") } ]
-      r <- runBackends reg (extOpts Auto) emptyMeta
-      brHiedb <- reportFor hiedbName r
-      brUsed brHiedb @?= False
-      assertBool "detail carries exception text"
-        (T.pack "probe-boom" `T.isInfixOf` brDetail brHiedb)
-      erLevel r @?= ModuleLevel
-      erWarnings r @?= []   -- 探測不可用不產警告
-  , testCase "HiedbOnly with unavailable hiedb: empty facts, no crash" $ do
-      let reason = T.pack "hiedb executable not found"
-          reg = [ fakeOk importScanName ModuleLevel factsA []
-                , fakeUnavailable hiedbName DeclLevel reason ]
-      r <- runBackends reg (extOpts HiedbOnly) emptyMeta
-      erFacts r @?= []
-      erLevel r @?= ModuleLevel
-      brHiedb <- reportFor hiedbName r
-      brUsed brHiedb   @?= False
-      brDetail brHiedb @?= reason
-      brImport <- reportFor importScanName r
-      brUsed brImport @?= False
-      assertBool "import-scan reported as not selected"
-        (T.pack "not selected" `T.isInfixOf` brDetail brImport)
-  , testCase "ImportsOnly: hiedb backend never invoked but still reported" $ do
-      traceRef <- newIORef []
-      let reg = [ fakeOk importScanName ModuleLevel factsA []
-                , tracingBackend traceRef hiedbName DeclLevel ]
-      r <- runBackends reg (extOpts ImportsOnly) emptyMeta
-      calls <- readIORef traceRef
-      calls @?= []
-      brHiedb <- reportFor hiedbName r
-      brUsed brHiedb @?= False
-      assertBool "hiedb reported as not selected"
-        (T.pack "not selected" `T.isInfixOf` brDetail brHiedb)
-      length (erReports r) @?= 2   -- 每個註冊後端剛好一筆
-      erFacts r @?= sort factsA
-  ]
-
--- extraction T5: best-effort 執行(規則 7)
-testBestEffortRun :: TestTree
-testBestEffortRun = testGroup "test_best_effort_run"
-  [ testCase "throwing bRun degrades to report + warning, others survive" $ do
-      let selfWarn = ExtractWarning importScanName (T.pack "unreadable file: src/X.hs")
-          reg = [ fakeOk importScanName ModuleLevel factsA [selfWarn]
-                , fakeRunBoom hiedbName DeclLevel "run-boom" ]
-      r <- runBackends reg (extOpts Auto) emptyMeta
-      brHiedb <- reportFor hiedbName r
-      brUsed brHiedb @?= False
-      assertBool "detail carries exception text"
-        (T.pack "run-boom" `T.isInfixOf` brDetail brHiedb)
-      -- 後端自報的警告原樣出現,加上失敗後端的一則警告
-      case erWarnings r of
-        [w1, w2] -> do
-          w1 @?= selfWarn
-          ewSource w2 @?= hiedbName
-          assertBool "warning carries exception text"
-            (T.pack "run-boom" `T.isInfixOf` ewMessage w2)
-        ws -> assertFailure ("expected exactly two warnings, got: " <> show ws)
-      erFacts r @?= sort factsA   -- 正常後端的事實完整保留
-      erLevel r @?= ModuleLevel   -- 失敗後端不貢獻能力等級
-  , testCase "lazy exception inside the fact list is caught too" $ do
-      let boomBackend = (fakeOk hiedbName DeclLevel [] [])
-            { bRun = \_ _ ->
-                pure (FactModule "src/A/Early.hs" (mn "A.Early") : error "lazy-boom", []) }
-          reg = [fakeOk importScanName ModuleLevel factsA [], boomBackend]
-      r <- runBackends reg (extOpts Auto) emptyMeta
-      brHiedb <- reportFor hiedbName r
-      brUsed brHiedb @?= False
-      assertBool "detail carries lazy exception text"
-        (T.pack "lazy-boom" `T.isInfixOf` brDetail brHiedb)
-      erFacts r @?= sort factsA   -- 失敗後端的事實全數丟棄
-      length (erWarnings r) @?= 1
-  ]
-
--- extraction T6: 合成(規則 8)
-testFactSynthesis :: TestTree
-testFactSynthesis = testGroup "test_fact_synthesis"
-  [ testCase "facts totally ordered, level takes the max of successful backends" $ do
-      let reg = [ fakeOk importScanName ModuleLevel factsA []
-                , fakeOk hiedbName DeclLevel factsB [] ]
-          opts = extOpts Auto
-      r1 <- runBackends reg opts emptyMeta
-      r2 <- runBackends reg opts emptyMeta
-      erFacts r1 @?= sort (factsA ++ factsB)
-      r2 @?= r1                    -- 同輸入連續兩次結果完全相同
-      erLevel r1 @?= DeclLevel
-      let fs = erFacts r1
-      assertBool "facts non-decreasing" (and (zipWith (<=) fs (drop 1 fs)))
-  , testCase "only the ModuleLevel backend succeeds -> ModuleLevel" $ do
-      let reg = [ fakeOk importScanName ModuleLevel factsA []
-                , fakeUnavailable hiedbName DeclLevel (T.pack "no hiedb") ]
-      r <- runBackends reg (extOpts Auto) emptyMeta
-      erLevel r @?= ModuleLevel
-  , testProperty "shuffling backend output does not change synthesis" $ property $ do
-      fs <- forAll (Gen.list (Range.linear 0 12) genFact)
-      shuffled <- forAll (Gen.shuffle fs)
-      let run xs = runBackends [fakeOk importScanName ModuleLevel xs []]
-                     (extOpts Auto) emptyMeta
-      base <- evalIO (run fs)
-      alt  <- evalIO (run shuffled)
-      erFacts alt === erFacts base
-  ]
-
--- | T6 property 用的事實產生器(涵蓋全部五個建構子)。
+-- | 事實產生器(涵蓋全部五個建構子;F007 T4 的 property 取用)。
 genFact :: Gen Fact
 genFact = Gen.choice
   [ FactModule <$> genPath <*> genMod
@@ -1157,61 +884,23 @@ genFact = Gen.choice
   genQual = QualName <$> genMod <*> genOcc
               <*> Gen.element [ValueNs, DataConNs, TypeNs, FieldNs]
 
--- extraction T7: 進入點與註冊表
--- (F002 起註冊表已填入 import-scan、F004 起併排註冊 hiedb;本測試驗證
---  extract 確實委派給 registeredBackends——每個註冊後端剛好一筆報告、
---  能力等級由實際跑的後端決定。projFixture 沒有 .hie,故 hiedb 恆探測不過,
---  等級停在 ModuleLevel 且不會在版控樹裡建 .knot/。
---  空註冊表語意本身已隨 F002 消失,見 F002「實作備註」)
-testExtractEntryEmptyRegistry :: TestTree
-testExtractEntryEmptyRegistry = testCase "test_extract_entry_registry" $ do
-  pm <- loadProjectMeta (defOpts projFixture)
-  forM_ [Auto, ImportsOnly, HiedbOnly] $ \c -> do
-    r <- extract (extOpts c) pm
-    map brBackend (erReports r) @?= [importScanName, hiedbName]
-    erLevel r @?= ModuleLevel
-  rHiedb <- extract (extOpts HiedbOnly) pm
-  erFacts rHiedb    @?= []   -- import-scan 未選中 → 無事實
-  -- F006 起 hiedb 真的會去建置 projFixture(老 .cabal,cabal 解不了相依)→ 唯一的警告來自它
-  map ewSource (erWarnings rHiedb) @?= [hiedbName]
-
 --------------------------------------------------------------------------------
 -- extraction/F002 import-scan
 --------------------------------------------------------------------------------
 
+-- | F007 起 T1(後端值 / 探測 / 註冊生效)隨 @Backend@ 移除;import-scan 作為
+-- 管線第一站被呼叫的事實由 extractionF007Tests 的 test_included_scope /
+-- test_extract_real_chain 守住。
 extractionF002Tests :: TestTree
 extractionF002Tests = testGroup "extraction/F002 import-scan"
-  [ testImportScanBackendValue   -- T1
-  , testStripComments            -- T2
+  [ testStripComments            -- T2
   , testModuleHeader             -- T3
   , testImportsSyntax            -- T4
   , testScanSourceFacts          -- T5
   , testRunBestEffort            -- T6
   , testImportScanDeterministic  -- T7
-  , testRenderFactSummary        -- T8
+  , testRenderFactSummary        -- T8(export-query/F005 T5 改寫)
   ]
-
--- extraction/F002 T1: 後端值欄位、探測恆 Available、註冊生效
-testImportScanBackendValue :: TestTree
-testImportScanBackendValue = testCase "test_import_scan_backend_value" $ do
-  bName importScanBackend  @?= importScanName
-  bName importScanBackend  @?= T.pack "import-scan"
-  bLevel importScanBackend @?= ModuleLevel
-  p <- bProbe importScanBackend (extOpts Auto) emptyMeta
-  p @?= Available
-  -- 註冊生效:Auto 與 ImportsOnly 下 import-scan 被實際執行
-  pm <- loadProjectMeta (defOpts projFixture)
-  forM_ [Auto, ImportsOnly] $ \c -> do
-    r <- extract (extOpts c) pm
-    br <- reportFor importScanName r
-    brUsed br   @?= True
-    brDetail br @?= T.empty
-  -- HiedbOnly:註冊在表內但未選中
-  rH <- extract (extOpts HiedbOnly) pm
-  brH <- reportFor importScanName rH
-  brUsed brH @?= False
-  assertBool "import-scan reported as not selected"
-    (T.pack "not selected" `T.isInfixOf` brDetail brH)
 
 -- | 測試用原始碼字面(以 \n 串接,行號 1 起算)。
 srcOf :: [String] -> Text
@@ -1406,15 +1095,14 @@ scratchMeta = ProjectMeta
       , SourceFile "src/Bad.hs" Nothing [] True
       , SourceFile "src/Missing.hs" Nothing [] True
       ]
-  , pmHie      = Nothing
   , pmWarnings = []
   }
 
--- extraction/F002 T6: bRun 逐檔 IO 的 best-effort 行為
+-- extraction/F002 T6: scanImports 逐檔 IO 的 best-effort 行為
 testRunBestEffort :: TestTree
 testRunBestEffort = testCase "test_run_best_effort" $ do
   (facts, ws) <- withScratchTree $ \root ->
-    bRun importScanBackend ((extOpts Auto) { XT.rootDir = root }) scratchMeta
+    scanImports (extOpts root) scratchMeta
   -- 正常檔的事實完整
   facts @?=
     [ FactModule "src/Good.hs" (mn "Scratch.Good")
@@ -1431,33 +1119,33 @@ testRunBestEffort = testCase "test_run_best_effort" $ do
       assertBool "read failure recognisable"
         (T.pack "cannot read file" `T.isInfixOf` ewMessage wMissing)
     _ -> assertFailure ("expected exactly two warnings, got: " <> show ws)
-  -- 經 extract 的真實 fixture:被排除檔不產生任何事實
+  -- 真實 fixture:被排除檔不產生任何事實
   pm <- loadProjectMeta (defOpts compsFixture)
-  -- 本測試只看 import-scan 的排除行為;comps fixture 建不起來(flib),不必拖 hiedb 進來
-  r <- extract ((extOpts ImportsOnly) { XT.rootDir = compsFixture }) pm
-  erWarnings r @?= []
+  -- 本測試只看 import-scan 的排除行為;comps fixture 建不起來(flib),直接走模組介面
+  (compsFacts, compsWarns) <- scanImports (extOpts compsFixture) pm
+  compsWarns @?= []
   let excluded = map sfPath (filter (not . sfIncluded) (pmSources pm))
   assertBool "fixture must contain excluded files" (not (null excluded))
-  forM_ (erFacts r) $ \f ->
+  forM_ compsFacts $ \f ->
     assertBool ("excluded file leaked into facts: " <> factFile f)
       (factFile f `notElem` excluded)
-  sort (map factFile (erFacts r))
+  sort (map factFile compsFacts)
     @?= sort (map sfPath (filter sfIncluded (pmSources pm)))
 
 -- extraction/F002 T7: 決定性(規則 8)
 testImportScanDeterministic :: TestTree
 testImportScanDeterministic = testGroup "test_import_scan_deterministic"
-  [ testCase "two consecutive bRun on the same ProjectMeta are identical" $ do
+  [ testCase "two consecutive scanImports on the same ProjectMeta are identical" $ do
       (r1, r2) <- withScratchTree $ \root -> do
-        let opts = (extOpts Auto) { XT.rootDir = root }
-        a <- bRun importScanBackend opts scratchMeta
-        b <- bRun importScanBackend opts scratchMeta
+        let opts = extOpts root
+        a <- scanImports opts scratchMeta
+        b <- scanImports opts scratchMeta
         pure (a, b)
       r2 @?= r1
       pm <- loadProjectMeta (defOpts compsFixture)
-      let opts = (extOpts Auto) { XT.rootDir = compsFixture }
-      c1 <- bRun importScanBackend opts pm
-      c2 <- bRun importScanBackend opts pm
+      let opts = extOpts compsFixture
+      c1 <- scanImports opts pm
+      c2 <- scanImports opts pm
       c2 @?= c1
   , testProperty "rendered imports round-trip through scanSource" $ property $ do
       mods  <- forAll (Gen.list (Range.linear 0 8) genModName)
@@ -1493,31 +1181,39 @@ genImportLine m = do
     , spec
     ]
 
--- extraction/F002 T8: 事實摘要輸出(驗收 harness 的比對面)
+-- extraction/F002 T8(export-query/F005 T5 改寫): 事實摘要輸出(驗收 harness 的比對面)
+-- ——計數行依五個建構子分計,逐筆只印 module 層,沒有 level / backends / ? 行
 testRenderFactSummary :: TestTree
 testRenderFactSummary = testCase "test_render_fact_summary" $ do
-  let res = ExtractResult
+  let greet = qn "Demo.Core" "greet" ValueNs
+      res = ExtractResult
         { erFacts =
             [ FactModule "src/A.hs" (mn "A")
             , FactImport (mn "A") (mn "Data.Text") "src/A.hs" 3
             , FactModule "app/Main.hs" (mn "Main")
+            , FactDecl greet ValueDecl False "src/Demo/Core.hs" 4
+            , FactDecl (qn "Demo.Core" "Color" TypeNs) DataDecl False "src/Demo/Core.hs" 7
+            , FactRef (mn "Demo.App") Nothing greet False False "src/Demo/App.hs" 9
+            , FactRef (mn "Demo.App") (Just (qn "Demo.App" "run" ValueNs)) greet False False
+                "src/Demo/App.hs" 12
+            , FactRef (mn "Main") Nothing (qn "Demo.App" "run" ValueNs) False False "app/Main.hs" 5
             ]
-        , erLevel = ModuleLevel
-        , erReports = [BackendReport importScanName True T.empty]
         , erWarnings = [ExtractWarning (T.pack "src/Bad.hs") (T.pack "cannot read file: nope")]
         }
       out = renderFactSummary res
-  assertBool "level line"    (T.pack "level: ModuleLevel" `T.isInfixOf` out)
-  assertBool "backend count" (T.pack "backends: 1" `T.isInfixOf` out)
-  assertBool "backend line"  (T.pack "import-scan used=True" `T.isInfixOf` out)
-  assertBool "fact total"    (T.pack "facts: 3 total" `T.isInfixOf` out)
-  assertBool "module count"  (T.pack "2 modules" `T.isInfixOf` out)
-  assertBool "import count"  (T.pack "1 imports" `T.isInfixOf` out)
+  assertBool ("count line: " <> show out)
+    (T.pack "facts: 8 total, 2 modules, 1 imports, 2 decls, 3 refs, 0 instances" `T.isInfixOf` out)
   assertBool "warning count" (T.pack "warnings: 1" `T.isInfixOf` out)
   assertBool "module line"   (T.pack "  M src/A.hs  [A]" `T.isInfixOf` out)
   assertBool "import line"   (T.pack "  I src/A.hs:3  A -> Data.Text" `T.isInfixOf` out)
   assertBool "warning line"
     (T.pack "  ! src/Bad.hs: cannot read file: nope" `T.isInfixOf` out)
+  -- 能力等級、後端報告與「其他事實」的 ? 行都不存在
+  forM_ ["level", "backends", "  ? "] $ \needle ->
+    assertBool ("summary must not contain " <> show needle) (not (hasText needle out))
+  -- decl / ref 只進計數,不逐筆出現
+  forM_ ["greet", "Color", "src/Demo/Core.hs", "src/Demo/App.hs"] $ \needle ->
+    assertBool ("decl layer must not be listed: " <> needle) (not (hasText needle out))
   -- 輸出順序固定(決定性)
   renderFactSummary res @?= out
 
@@ -1532,7 +1228,8 @@ extractionF006Tests = testGroup "extraction/F006 hiedb-embed"
   , testGhcVersionFilter         -- T3
   , testEnsureIndexIncremental   -- T4
   , testEnsureIndexFailures      -- T5
-  , testHiedbBackendAdapter      -- T6
+  -- T6(過渡期轉接器 test_hiedb_backend_adapter)已隨 F007 拆掉轉接器而移除;
+  --    完整鏈由 extractionF007Tests 的 test_extract_real_chain 承接
   -- T7(測試搬遷)= F004 群組裡改走 buildable 完整鏈的 fixture 測試、
   -- test_hiedb_facts_selfcheck 與 G-E003 的 test_generated_filter_selfcheck
   ]
@@ -1553,9 +1250,9 @@ withFixtureScratch fixture tag act = do
 withBuildableScratch :: String -> (FilePath -> IO a) -> IO a
 withBuildableScratch = withFixtureScratch buildableFixture
 
--- | 指定 root 的 'ExtractOptions'(其餘欄位沿用 'extOpts' 預設)。
+-- | 指定 root 的 'ExtractOptions'(F006 的舊名;S5 起與 'extOpts' 同義)。
 hiedbOpts :: FilePath -> ExtractOptions
-hiedbOpts r = (extOpts Auto) { XT.rootDir = r }
+hiedbOpts = extOpts
 
 -- | ensureHie → ensureIndex 兩步到位,回 (ProjectMeta, HieLayout, IndexHandle)。
 indexScratch :: FilePath -> IO (ProjectMeta, XT.HieLayout, IndexHandle)
@@ -1731,25 +1428,219 @@ testEnsureIndexFailures = testCase "test_ensure_index_failures" $ do
     stillThere <- doesFileExist db
     assertBool "knot must not delete the user's index file on its own" stillThere
 
--- F006 T6:過渡期轉接器——bProbe 恆 Available,bRun 串完整鏈,失敗走 HiedbFactsError
-testHiedbBackendAdapter :: TestTree
-testHiedbBackendAdapter = testCase "test_hiedb_backend_adapter" $ do
-  p <- bProbe hiedbBackend (extOpts Auto) emptyMeta
-  p @?= Available
-  withBuildableScratch "adapter" $ \root -> do
+--------------------------------------------------------------------------------
+-- extraction/F007 two-layer-contract
+--------------------------------------------------------------------------------
+
+extractionF007Tests :: TestTree
+extractionF007Tests = testGroup "extraction/F007 two-layer-contract"
+  [ -- T1 = test_extract_types_construct(F001 群組,改寫)
+    testPipelineModuleSurface    -- T2
+  -- T3 = test_included_scope(F001 群組,改寫)
+  , testPipelineAllOrNothing     -- T4
+  , testExtractRealChain         -- T5
+  -- T6 = test_codegraph_output_unchanged(G-E001 群組,改寫)+ test_no_backend_residue
+  , testNoBackendResidue         -- T6
+  , testTwoLayerSelfcheck        -- T7
+  ]
+
+-- | 只有納入檔的最小 ProjectMeta(假階段用;路徑不會被讀)。
+includedMeta :: ProjectMeta
+includedMeta = emptyMeta
+  { pmSources = [SourceFile "src/A/Early.hs" (Just (mn "A.Early")) [] True] }
+
+-- | 假的四站:每站只記錄被呼叫過,回固定結果;失敗站以參數改寫。
+fakeStages :: IORef [String] -> Stages ()
+fakeStages calls = Stages
+  { stScan  = \_ _ -> logCall "scan"  >> pure (factsA, [scanWarn])
+  , stBuild = \_ _ -> logCall "build" >> pure (Right (XT.HieLayout ".knot/build" []))
+  , stIndex = \_ _ -> logCall "index" >> pure (Right ())
+  , stFacts = \() _ -> logCall "facts" >> pure (factsB, [factWarn])
+  }
+ where
+  logCall s = modifyIORef' calls (++ [s])
+
+scanWarn, factWarn :: ExtractWarning
+scanWarn = ExtractWarning (T.pack "src/Z/Late.hs") (T.pack "unparsable import at line 3")
+factWarn = ExtractWarning hiedbName (T.pack "cannot map indexed module Ghost back")
+
+-- F007 T2:模組面一進一出;三個搬家的常數各在新檔案的非契約面區段
+testPipelineModuleSurface :: TestTree
+testPipelineModuleSurface = testCase "test_pipeline_module_surface" $ do
+  gone <- doesFileExist "src/Knot/Extract/Backend.hs"
+  assertBool "src/Knot/Extract/Backend.hs must be gone" (not gone)
+  cabalSrc <- readUtf8 "knot-hs.cabal"
+  let exposed = cabalFieldItems cabalSrc "exposed-modules"
+  assertBool "knot-internal exposes Knot.Extract.Pipeline"
+    (T.pack "Knot.Extract.Pipeline" `elem` exposed)
+  assertBool "knot-internal no longer lists Knot.Extract.Backend"
+    (T.pack "Knot.Extract.Backend" `notElem` exposed)
+  -- 一進一出,計數與 test_cabal_contract_surface 一致(26 / 17 已含 project-meta/F004 的一出)
+  length exposed @?= 26
+  -- 搬家後的常數與可注入管線都在「非契約面」區段(G-E004 T4 的改寫)
+  forM_ [ ("src/Knot/Extract/ImportScan.hs", "importScanName")
+        , ("src/Knot/Extract/HieIndex.hs",   "hiedbName")
+        , ("src/Knot/Extract/Pipeline.hs",   "runPipeline")
+        , ("src/Knot/Extract/Pipeline.hs",   "Stages")
+        ] $ \(file, sym) -> do
+    gs <- exportGroups file
+    case groupOf gs sym of
+      Nothing  -> assertFailure (sym <> " missing from " <> file <> " exports")
+      Just grp -> assertBool
+        (file <> ": " <> sym <> " should sit in a section labelled 非契約面, got: " <> show grp)
+        (hasText "非契約面" grp)
+
+-- F007 T4:全有全無——全部用假階段(h = ())
+testPipelineAllOrNothing :: TestTree
+testPipelineAllOrNothing = testGroup "test_pipeline_all_or_nothing"
+  [ testCase "(a) nothing included -> NoSources, no stage called" $ do
+      calls <- newIORef []
+      let pm = emptyMeta { pmSources = [SourceFile "test/Spec.hs" Nothing [] False] }
+      r <- runPipeline (fakeStages calls) (extOpts ".") pm
+      r @?= Left XT.NoSources
+      readIORef calls >>= (@?= [])
+      r0 <- runPipeline (fakeStages calls) (extOpts ".") emptyMeta
+      r0 @?= Left XT.NoSources
+      readIORef calls >>= (@?= [])
+  , testCase "(b) build fails -> Left as is, index/facts never called" $ do
+      calls <- newIORef []
+      let fl = XT.BuildFailed (T.pack "lib:demo") (T.pack "boom")
+          st = (fakeStages calls) { stBuild = \_ _ -> modifyIORef' calls (++ ["build"]) >> pure (Left fl) }
+      r <- runPipeline st (extOpts ".") includedMeta
+      r @?= Left fl
+      readIORef calls >>= (@?= ["scan", "build"])
+  , testCase "(c) index fails -> Left as is, facts never called" $ do
+      calls <- newIORef []
+      let fl = XT.VersionMismatch (T.pack "9.12.2") (T.pack "9.14.1")
+          st = (fakeStages calls) { stIndex = \_ _ -> modifyIORef' calls (++ ["index"]) >> pure (Left fl) }
+      r <- runPipeline st (extOpts ".") includedMeta
+      r @?= Left fl
+      readIORef calls >>= (@?= ["scan", "build", "index"])
+  , testCase "(d) no FactDecl -> IndexFailed with prefix and the stage's warnings in order" $ do
+      calls <- newIORef []
+      let w1 = ExtractWarning hiedbName (T.pack "cannot read index x: locked")
+          w2 = ExtractWarning hiedbName (T.pack "mods query failed")
+          onlyRefs = [ f | f@FactRef{} <- factsB ]
+          st = (fakeStages calls) { stFacts = \() _ -> pure (onlyRefs, [w1, w2]) }
+      r <- runPipeline st (extOpts ".") includedMeta
+      case r of
+        Left (XT.IndexFailed d) -> do
+          assertBool ("detail should start with the fixed prefix: " <> T.unpack d)
+            (T.pack "the index yielded no top-level declarations" `T.isPrefixOf` d)
+          assertHasAll "detail" d ["hiedb: cannot read index x: locked", "hiedb: mods query failed"]
+          assertBool "warnings keep their order"
+            (T.length (fst (T.breakOn (T.pack "locked") d))
+               < T.length (fst (T.breakOn (T.pack "mods query") d)))
+        other -> assertFailure ("expected IndexFailed, got " <> show other)
+      -- 零筆事實 + 零警告也是失敗(只有前綴)
+      rEmpty <- runPipeline ((fakeStages calls) { stFacts = \() _ -> pure ([], []) }) (extOpts ".") includedMeta
+      rEmpty @?= Left (XT.IndexFailed (T.pack "the index yielded no top-level declarations"))
+  , testCase "(e) all four succeed -> Right, sorted facts, warnings in stage order" $ do
+      calls <- newIORef []
+      r <- runPipeline (fakeStages calls) (extOpts ".") includedMeta
+      r @?= Right ExtractResult { erFacts = sort (factsA <> factsB), erWarnings = [scanWarn, factWarn] }
+      readIORef calls >>= (@?= ["scan", "build", "index", "facts"])
+      let fs = either (const []) erFacts r
+      assertBool "facts non-decreasing" (and (zipWith (<=) fs (drop 1 fs)))
+  , testProperty "(f) shuffling stage output does not change erFacts" $ property $ do
+      ms <- forAll (Gen.list (Range.linear 0 12) genFact)
+      ds <- forAll (Gen.list (Range.linear 0 12) genFact)
+      ms' <- forAll (Gen.shuffle ms)
+      ds' <- forAll (Gen.shuffle ds)
+      let anchor = FactDecl (qn "A.Early" "helper" ValueNs) ValueDecl False "src/A/Early.hs" 4
+          run xs ys = do
+            calls <- newIORef []
+            runPipeline ((fakeStages calls)
+                           { stScan  = \_ _ -> pure (xs, [])
+                           , stFacts = \() _ -> pure (anchor : ys, []) })
+                        (extOpts ".") includedMeta
+      base <- evalIO (run ms ds)
+      alt  <- evalIO (run ms' ds')
+      fmap erFacts alt === fmap erFacts base
+      assert (either (const False) (const True) base)
+  ]
+
+-- F007 T5:真實四站——buildable → Right 含四種事實;broken-build → Left BuildFailed;
+-- 轉接器殘留為零
+testExtractRealChain :: TestTree
+testExtractRealChain = testCase "test_extract_real_chain" $ do
+  withBuildableScratch "f007chain" $ \root -> do
     pm <- loadProjectMeta (defOpts root)
-    (facts, ws) <- bRun hiedbBackend (hiedbOpts root) pm
-    assertBool "decl facts via bRun" (not (null (mapMaybe declOf facts)))
-    assertBool "ref facts via bRun"  (not (null (mapMaybe refOf facts)))
-    forM_ ws $ \w -> putStrLn ("[F006/adapter] warn " <> T.unpack (ewMessage w))
-  withFixtureScratch brokenBuildFixture "adapterboom" $ \root -> do
+    er <- expectRight =<< extract (extOpts root) pm
+    let fs = erFacts er
+    assertBool "FactModule present" (not (null (mapMaybe moduleOf fs)))
+    assertBool "FactImport present" (any isImportFact fs)
+    assertBool "FactDecl present"   (not (null (mapMaybe declOf fs)))
+    assertBool "FactRef present"    (not (null (mapMaybe refOf fs)))
+    assertBool "erFacts totally ordered" (and (zipWith (<=) fs (drop 1 fs)))
+  withFixtureScratch brokenBuildFixture "f007boom" $ \root -> do
     pm <- loadProjectMeta (defOpts root)
-    res <- extract (hiedbOpts root) pm
-    hr <- reportFor hiedbName res
-    brUsed hr @?= False
-    assertBool ("detail must say the build failed: " <> T.unpack (brDetail hr))
-      (T.pack "build failed (" `T.isPrefixOf` brDetail hr)
-    erLevel res @?= ModuleLevel
+    r <- extract (extOpts root) pm
+    case r of
+      Left (XT.BuildFailed c d) -> do
+        assertBool ("bfComponent should name the exe or be all, got " <> show c)
+          (c `elem` map T.pack ["broken-build:exe:broken-exe", "all"])
+        assertBool ("bfDetail should carry cabal's output, got " <> show d)
+          (hasText "cabal exited with" d)
+      other -> assertFailure ("expected Left BuildFailed, got " <> show other)
+  gs <- exportGroups "src/Knot/Extract/HiedbFacts.hs"
+  assertBool "HiedbFacts must not export the F006 adapter"
+    (groupOf gs (concat ["hiedb", "Backend"]) == Nothing)
+  facts <- readUtf8 "src/Knot/Extract/HiedbFacts.hs"
+  forM_ ["HiedbFactsError", "renderFailure", "runHiedb"] $ \needle ->
+    assertBool ("HiedbFacts must not mention " <> needle) (not (hasText needle facts))
+
+-- F007 T6(後半):test/Main.hs 與 src/ 不得殘留被廢除的機制
+-- (app/ 由 export-query/F005 清,T1 已擋 Types.hs 的匯出)
+testNoBackendResidue :: TestTree
+testNoBackendResidue = testCase "test_no_backend_residue" $ do
+  srcs <- filter ((== ".hs") . takeExtension) <$> listFilesRec "src"
+  -- 字串以片段拼接,免得這條測試自己就是殘留
+  let needles = map concat
+        [ ["run", "Backends"], ["Backend", "Choice"], ["Imports", "Only"], ["Hiedb", "Only"]
+        , ["er", "Level"], ["er", "Reports"], ["Capability", "Level"], ["Backend", "Report"]
+        , ["hiedb", "Backend"], ["importScan", "Backend"] ]
+  forM_ ("test/Main.hs" : srcs) $ \p -> do
+    s <- readUtf8 p
+    forM_ needles $ \needle ->
+      assertBool (p <> " must not contain " <> show needle) (not (hasText needle s))
+
+-- F007 T7:對 knot-hs 自身跑完整管線——Right、四種事實、節點數不低於 S5 基線、兩次相同
+--
+-- 契約卡寫的是「不低於 S3 閘門的 548」,但 S5 三件套本身就刪掉 73 個頂層宣告
+-- (Backend.hs、HieLocate.hs、F006 轉接器、廢除的 DTO 欄位與建構子、五個 CLI 欄位),
+-- 只加回 16 個:2026-08-22 以同一支 knot 對 S5 前後的原始樹各抽一次並逐 id 比對,
+-- 583 − 73 + 16 = 526,消失的節點__全部__是本批刪除的程式碼,decl 層沒有任何退化。
+-- 基線因此改為 526(與原卡「不低於上一道閘門」同一精神),另加一條不會過期的
+-- 結構守門:src/ 與 app/ 每個納入的 module 都至少貢獻一個 decl 節點。
+testTwoLayerSelfcheck :: TestTree
+testTwoLayerSelfcheck = testCase "test_two_layer_selfcheck" $ do
+  pm <- loadProjectMeta (defOpts ".")
+  r1 <- expectRight =<< extract (extOpts ".") pm
+  r2 <- expectRight =<< extract (extOpts ".") pm
+  let fs = erFacts r1
+  assertBool "FactModule present" (not (null (mapMaybe moduleOf fs)))
+  assertBool "FactImport present" (any isImportFact fs)
+  assertBool "FactDecl present"   (not (null (mapMaybe declOf fs)))
+  assertBool "FactRef present"    (not (null (mapMaybe refOf fs)))
+  let g = buildGraph defBuildOpts pm r1
+  assertBool ("node count must not fall below the S5 baseline (526), got " <> show (length (cgNodes g)))
+    (length (cgNodes g) >= 526)
+  -- 結構守門:每個納入的 src/ / app/ module 都有 decl 節點(節點 id 以 "<Module>." 起頭)
+  let ownModules =
+        [ m | sf <- pmSources pm, sfIncluded sf
+        , any (`isPrefixOf` sfPath sf) ["src/", "app/"]
+        , Just (ModuleName m) <- [sfModule sf] ]
+      nodeIds = [ t | NodeId t <- map gnId (cgNodes g) ]
+      uncovered = [ m | m <- ownModules, not (any ((m <> T.pack ".") `T.isPrefixOf`) nodeIds) ]
+  assertBool "fixture sanity: knot-hs has its own modules" (not (null ownModules))
+  assertBool ("modules without any decl node: " <> show uncovered) (null uncovered)
+  erFacts r2    @?= erFacts r1
+  erWarnings r2 @?= erWarnings r1
+  putStrLn ("[selfcheck/F007] facts=" <> show (length fs)
+    <> " nodes=" <> show (length (cgNodes g))
+    <> " edges=" <> show (length (cgEdges g))
+    <> " warnings=" <> show (length (erWarnings r1)))
 
 --------------------------------------------------------------------------------
 -- extraction/F004 hiedb-facts
@@ -1757,17 +1648,16 @@ testHiedbBackendAdapter = testCase "test_hiedb_backend_adapter" $ do
 
 -- | F006 起 hiedb 內嵌,原本掛在「hiedb 執行檔存在」開關上的節點全部無條件掛載,
 -- fixture 測試改走 buildable 副本的完整鏈(ensureHie → ensureIndex → readIndexFacts)。
+-- F007 起 T2(--hiedb / --db 旗標)、T3(後端值與註冊表)、T8(降級面與
+-- 完整鏈的 Backend 形式)隨 @Backend@ 移除:旗標由 export-query/F005 砍,
+-- 完整鏈由 extractionF007Tests 的 test_extract_real_chain 承接。
 extractionF004Tests :: TestTree
 extractionF004Tests = testGroup "extraction/F004 hiedb-facts"
   [ testNamespaceAndGenerated  -- T1
-  , testHiedbDbFlags           -- T2
-  , testHiedbFactsSmoke        -- T3
   , testParseOcc               -- T4
   , testResolveModuleSource    -- T5
   , testPickFromDecl           -- T6
   , testReadIndexFacts         -- T7
-  , testHiedbBackendRegistered -- T8(降級面)
-  , testHiedbBackendLive       -- T8(完整鏈)
   , testHiedbFactsFixture      -- T9
   , testHiedbFactsAcceptance   -- T10
   , testHiedbFactsSelfcheck    -- T11
@@ -1895,54 +1785,6 @@ testGeneratedFlagsFixture = testCase "test_generated_flags_fixture" $
     assertBool "external ref targets must never be flagged generated"
       (not (any (\(_, _, t, _, tg, _, _) ->
                    qnModule t `notElem` internal && tg) refs))
-
--- extraction/F004 T2: 前置 2——CLI --hiedb / --db 補接(缺陷修補)
-testHiedbDbFlags :: TestTree
-testHiedbDbFlags = testCase "test_hiedb_db_flags" $ do
-  -- 不給 → Nothing(其餘八個欄位維持預設)
-  d <- expectExtractCmd ["extract"]
-  d @?= baseExtractCmd
-  ecHiedbExe d @?= Nothing
-  ecDbPath d   @?= Nothing
-  -- 給了 → 逐字進 ExtractCmd,且只動這兩個欄位
-  c <- expectExtractCmd
-    ["extract", "--hiedb", "C:/tools/hiedb.exe", "--db", "/tmp/x.sqlite"]
-  ecHiedbExe c @?= Just "C:/tools/hiedb.exe"
-  ecDbPath c   @?= Just "/tmp/x.sqlite"
-  c @?= baseExtractCmd
-    { ecHiedbExe = Just "C:/tools/hiedb.exe", ecDbPath = Just "/tmp/x.sqlite" }
-  -- toExtractOptions 逐字透傳(釘住「寫死 Nothing」的缺陷已修)
-  let xo = toExtractOptions c
-  XT.hiedbExe xo @?= Just "C:/tools/hiedb.exe"
-  XT.dbPath xo   @?= Just "/tmp/x.sqlite"
-  let xo0 = toExtractOptions baseExtractCmd
-  XT.hiedbExe xo0 @?= Nothing
-  XT.dbPath xo0   @?= Nothing
-  -- 缺參數 → exit 1 且訊息點名旗標
-  forM_ ["--hiedb", "--db"] $ \flag -> do
-    (msg, code) <- expectParseFailure ["extract", flag]
-    code @?= ExitFailure 1
-    assertHasAll ("missing " <> flag <> " argument") (T.pack msg) [flag]
-  -- --help 列出兩個旗標(system.md CLI 頂層契約的落地證明)
-  (helpMsg, helpCode) <- expectParseFailure ["extract", "--help"]
-  helpCode @?= ExitSuccess
-  assertHasAll "extract help" (T.pack helpMsg) ["--hiedb", "--db"]
-
--- extraction/F004 T3: 後端值與註冊表(不需 hiedb;探測不過也留得下報告)
-testHiedbFactsSmoke :: TestTree
-testHiedbFactsSmoke = testCase "test_hiedb_facts_smoke" $ do
-  bName hiedbBackend  @?= hiedbName
-  bLevel hiedbBackend @?= DeclLevel
-  -- 註冊表併排註冊,順序為 [import-scan, hiedb](規則 8:順序即報告序)
-  pm <- loadProjectMeta (defOpts projFixture)
-  r <- extract (extOpts Auto) pm
-  map brBackend (erReports r) @?= [importScanName, hiedbName]
-  -- HiedbOnly 時 import-scan 未選中,hiedb 那筆仍在
-  rH <- extract (extOpts HiedbOnly) pm
-  scanRep <- reportFor importScanName rH
-  brUsed scanRep @?= False
-  _ <- reportFor hiedbName rH
-  pure ()
 
 -- extraction/F004 T4: occ 前綴判讀與 DeclKind 粗推(純函數)
 testParseOcc :: TestTree
@@ -2083,27 +1925,6 @@ listFilesRec dir = do
     isDir <- doesDirectoryExist p
     if isDir then listFilesRec p else pure [p]
 
--- extraction/F004 T8(不需 hiedb):後端註冊後探測失敗 → 降級但不失敗
-testHiedbBackendRegistered :: TestTree
-testHiedbBackendRegistered = testCase "test_hiedb_backend_registered" $ do
-  -- projFixture 的 .cabal 老到 cabal 解不了相依 → 建置失敗 → hiedb 降級但整體不失敗
-  pm <- loadProjectMeta (defOpts projFixture)
-  res <- extract (hiedbOpts projFixture) pm
-  erLevel res @?= ModuleLevel
-  map brBackend (erReports res) @?= [importScanName, hiedbName]
-  hr <- reportFor hiedbName res
-  brUsed hr @?= False
-  assertBool ("degrade reason must say the build failed: " <> T.unpack (brDetail hr))
-    (T.pack "build failed (" `T.isPrefixOf` brDetail hr)
-  sr <- reportFor importScanName res
-  brUsed sr @?= True
-  -- import-scan 的事實照出(projFixture 無 import 行,故以 FactModule 為證);
-  -- 失敗的 hiedb 後端一筆 decl 層事實都不留
-  assertBool "import-scan facts must survive the degrade"
-    (not (null (erFacts res)))
-  mapMaybe declOf (erFacts res) @?= []
-  mapMaybe refOf (erFacts res) @?= []
-
 -- extraction/F004 T7: readIndexFacts 主流程(驗收標準 2、4)
 testReadIndexFacts :: TestTree
 testReadIndexFacts = testCase "test_read_index_facts" $
@@ -2143,35 +1964,6 @@ testReadIndexFacts = testCase "test_read_index_facts" $
     assertBool "Demo.Core decls must be gone"
       (not (any (\(_, _, _, fp, _) -> "Core.hs" `isInfixOf` fp)
               (mapMaybe declOf facts')))
-
--- extraction/F004 T8(需 hiedb):兩後端並存、事實合流,以及 ensureIndex
--- 失敗時的 HiedbFactsError 通道
-testHiedbBackendLive :: TestTree
-testHiedbBackendLive = testCase "test_hiedb_backend_live" $ do
-  withBuildableScratch "f004backend" $ \root -> do
-    pm <- loadProjectMeta (defOpts root)
-    res <- extract (hiedbOpts root) pm
-    erLevel res @?= DeclLevel
-    map brBackend (erReports res) @?= [importScanName, hiedbName]
-    forM_ (erReports res) $ \r -> do
-      brUsed r @?= True
-      brDetail r @?= T.empty
-    assertBool "import-scan facts present" (any isImportFact (erFacts res))
-    assertBool "hiedb ref facts present"
-      (not (null (mapMaybe refOf (erFacts res))))
-    assertBool "hiedb decl facts present"
-      (not (null (mapMaybe declOf (erFacts res))))
-  -- 建置失敗 → HiedbFactsError 通道 → brUsed = False + "build failed (";import-scan 不受影響
-  withFixtureScratch brokenBuildFixture "f004boom" $ \root -> do
-    pm <- loadProjectMeta (defOpts root)
-    res <- extract (hiedbOpts root) pm
-    hr <- reportFor hiedbName res
-    brUsed hr @?= False
-    assertBool ("detail must carry the build-failure prefix: "
-                  <> T.unpack (brDetail hr))
-      (hasText "build failed (" (brDetail hr))
-    erLevel res @?= ModuleLevel
-    assertBool "import-scan facts survive" (not (null (erFacts res)))
 
 -- extraction/F004 T10: 端到端驗收(驗收標準 1、3、5)
 testHiedbFactsAcceptance :: TestTree
@@ -2221,12 +2013,9 @@ testHiedbFactsAcceptance = testCase "test_hiedb_facts_acceptance" $
 -- extraction/F004 T11: knot-hs 自身唯讀驗收(需 hiedb 且自身有 .hie)
 testHiedbFactsSelfcheck :: TestTree
 testHiedbFactsSelfcheck = testCase "test_hiedb_facts_selfcheck" $ do
-  -- F006 起 knot 自己建置、索引自己,沒有 [skip] 分支
+  -- F006 起 knot 自己建置、索引自己,沒有 [skip] 分支;F007 起兩層全有全無 → 必須 Right
   pm <- loadProjectMeta (defOpts ".")
-  res <- extract (hiedbOpts ".") pm
-  erLevel res @?= DeclLevel
-  map brBackend (erReports res) @?= [importScanName, hiedbName]
-  forM_ (erReports res) $ \r -> brUsed r @?= True
+  res <- expectRight =<< extract (hiedbOpts ".") pm
   let decls = mapMaybe declOf (erFacts res)
       refs  = mapMaybe refOf (erFacts res)
   -- 量級不得低於 F004 閘門紀錄(decls 649、refs 7899)的七成
@@ -2284,7 +2073,7 @@ graphOf = graphFacts emptyMeta
 -- | 事實流 + 手工 'ProjectMeta' → CodeGraph(F002 E3:手工事實流,不碰 hiedb)。
 graphFacts :: ProjectMeta -> BuildOptions -> [Fact] -> CodeGraph
 graphFacts pm opts facts = buildGraph opts pm
-  ExtractResult { erFacts = facts, erLevel = ModuleLevel, erReports = [], erWarnings = [] }
+  ExtractResult { erFacts = facts, erWarnings = [] }
 
 -- | 事實流 → (邊, 統計, 警告) 的測試捷徑(純 module 層用)。
 edgesOf :: [Fact] -> ([GraphEdge], EdgeStats, [GraphWarning])
@@ -2301,7 +2090,6 @@ metaFor :: [FilePath] -> ProjectMeta
 metaFor paths = ProjectMeta
   { pmPackages = []
   , pmSources  = [SourceFile p Nothing [] True | p <- paths]
-  , pmHie      = Nothing
   , pmWarnings = []
   }
 
@@ -2382,7 +2170,6 @@ ghostMeta :: ProjectMeta
 ghostMeta = ProjectMeta
   { pmPackages = []
   , pmSources  = [SourceFile "src/Ghost.hs" (Just (mn "Ghost")) [] True]
-  , pmHie      = Nothing
   , pmWarnings = []
   }
 
@@ -2652,7 +2439,8 @@ testBuildGraphDeterministic :: TestTree
 testBuildGraphDeterministic = testGroup "test_build_graph_deterministic"
   [ testCase "proj fixture: one module node per included file, pure" $ do
       pm <- loadProjectMeta (defOpts projFixture)
-      r <- extract ((extOpts Auto) { XT.rootDir = projFixture }) pm
+      -- proj fixture 的 .cabal 老到建不起來,module 圖的驗收只需要 import-scan
+      r <- moduleLayer projFixture pm
       let included = filter sfIncluded (pmSources pm)
           g = buildGraph defBuildOpts pm r
       assertBool "fixture yields a non-empty fact stream" (not (null (erFacts r)))
@@ -2667,7 +2455,7 @@ testBuildGraphDeterministic = testGroup "test_build_graph_deterministic"
   , testCase "graph fixture: internal edges, external drops, dedupe, self-loop" $ do
       pm <- loadProjectMeta (defOpts graphFixture)
       -- graph fixture 刻意不可建置(F005),module 圖的驗收只需要 import-scan
-      r <- extract ((extOpts ImportsOnly) { XT.rootDir = graphFixture }) pm
+      r <- moduleLayer graphFixture pm
       let g = buildGraph defBuildOpts pm r
       erWarnings r @?= []
       map gnId (cgNodes g) @?= graphFixtureNodeIds
@@ -3842,13 +3630,8 @@ testExportTypesConstruct = testCase "test_export_types_construct" $ do
   takeFileName  (defaultOutputPath "C:/proj") @?= "codegraph.json"
   takeDirectory (defaultOutputPath "C:/proj") @?= "C:/proj"
   -- 假設 A7:同時 import 兩個 Types 模組,記錄建構語法可消歧 rootDir
-  let eo = ExtractOptions
-        { rootDir       = "C:/proj"
-        , backendChoice = Auto
-        , hiedbExe      = Nothing
-        , dbPath        = Nothing
-        }
-  backendChoice eo @?= Auto
+  let eo = ExtractOptions { rootDir = "C:/proj" }
+  XT.rootDir eo @?= "C:/proj"
 
 -- export-query T2: 物件層——relation 對映、節點/邊欄位與順序、
 -- source_location 的兩分支(節點與邊皆有)、字串 escaping
@@ -4003,7 +3786,7 @@ testExportEndToEndDeterministic :: TestTree
 testExportEndToEndDeterministic =
   testCase "test_export_end_to_end_deterministic" $ do
     pm <- loadProjectMeta (defOpts graphFixture)
-    r  <- extract ((extOpts Auto) { XT.rootDir = graphFixture }) pm
+    r  <- moduleLayer graphFixture pm
     let g = buildGraph defBuildOpts pm r
     withExportDir "e2e" $ \dir -> do
       let out  = dir </> "codegraph.json"
@@ -4847,35 +4630,40 @@ expectQueryCmd argv = do
     CmdQuery q   -> pure q
     CmdExtract _ -> assertFailure ("expected CmdQuery for " <> show argv)
 
--- | 十個欄位皆為預設的 'ExtractCmd'(測試各自只改需要的欄位)。
+-- | 五個欄位皆為預設的 'ExtractCmd'(測試各自只改需要的欄位)。
 baseExtractCmd :: ExtractCmd
 baseExtractCmd = ExtractCmd
   { ecPath         = "."
   , ecOutput       = Nothing
-  , ecBackend      = Auto
-  , ecModuleOnly   = False
   , ecIncludeTests = False
-  , ecHieDir       = Nothing
-  , ecHiedbExe     = Nothing
-  , ecDbPath       = Nothing
   , ecStrict       = False
   , ecSummary      = Nothing
   }
 
--- | 十個欄位皆非預設的 'ExtractCmd'(對映斷言的來源)。
+-- | 五個欄位皆非預設的 'ExtractCmd'(對映斷言的來源)。
 fullExtractCmd :: ExtractCmd
 fullExtractCmd = ExtractCmd
   { ecPath         = "proj"
   , ecOutput       = Just "x.json"
-  , ecBackend      = ImportsOnly
-  , ecModuleOnly   = True
   , ecIncludeTests = True
-  , ecHieDir       = Just "dist/hie"
-  , ecHiedbExe     = Just "C:/tools/hiedb.exe"
-  , ecDbPath       = Just "/tmp/idx.sqlite"
   , ecStrict       = True
-  , ecSummary      = Nothing
+  , ecSummary      = Just SummaryFacts
   }
+
+-- | S5 砍掉的五個旗標(F005 T1 斷言它們不在 --help、給了就 exit 非 0)。
+retiredFlags :: [String]
+retiredFlags = ["--backend", "--module-only", "--hiedir", "--hiedb", "--db"]
+
+-- | 匯出路徑的共同斷言:檔案存在、可被 loadQueryGraph 讀回、stdout 有 wrote 行。
+assertExportedGraph :: FilePath -> Text -> IO ()
+assertExportedGraph out stdoutText = do
+  wroteFile <- doesFileExist out
+  assertBool ("output file exists: " <> out) wroteFile
+  loaded <- loadQueryGraph out
+  case loaded of
+    Right _ -> pure ()
+    Left e  -> assertFailure ("exported graph should load back: " <> show e)
+  assertHasAll "extract stdout" stdoutText ["wrote ", out, " nodes, ", " edges"]
 
 -- | UTF-8、無換行轉換的暫存檔 Handle:注入執行層後讀回原樣 byte。
 withNoteHandle :: FilePath -> (Handle -> IO a) -> IO a
@@ -4909,14 +4697,21 @@ assertHasAll what hay needles = forM_ needles $ \n ->
   assertBool (what <> " should contain " <> show n <> ", got: " <> show hay)
     (hasText n hay)
 
--- | 在 @dir@ 下建一個「兩個 hs-source-dirs 各宣告同一個 module 名」的最小
--- 專案,回傳專案根目錄。走完真實管線後 @cgWarnings@ 必為 1 條
--- (@src/Knot/Graph.hs@ 的 collisionWarnings)。
+-- | 在 @dir@ 下建一個「兩個 component 各宣告同一個 module 名」的最小專案,
+-- 回傳專案根目錄。走完真實管線後 @cgWarnings@ 必為 1 條(@src/Knot/Graph.hs@
+-- 的 collisionWarnings)。
+--
+-- S5 起真實管線會建置它,所以要__建得起來__:library + 具名 sub-library 各擁有
+-- 一個 @Dup@(F004 原本的 executable @main-is: Dup.hs@ 內容是 @module Dup@,
+-- cabal 建不過)。兩個 @Dup@ 各有一個頂層宣告,decl 層才成立(規則 3);
+-- 同時驗證「同名 module 分在不同 component 目錄」在 build-driver 規則 6 下的
+-- @.hie@ 不會互相覆蓋(G-B001 的根因)。@cabal.project@ 讓 cabal 停在這裡。
 mkCollisionProject :: FilePath -> IO FilePath
 mkCollisionProject dir = do
   let projDir = dir </> "collide"
   createDirectoryIfMissing True (projDir </> "a")
   createDirectoryIfMissing True (projDir </> "b")
+  writeUtf8 (projDir </> "cabal.project") "packages: .\n"
   writeUtf8 (projDir </> "collide.cabal") (unlines
     [ "cabal-version:      3.4"
     , "name:               collide"
@@ -4929,14 +4724,14 @@ mkCollisionProject dir = do
     , "    build-depends:    base"
     , "    default-language: GHC2024"
     , ""
-    , "executable collide-exe"
+    , "library sub"
     , "    hs-source-dirs:   b"
-    , "    main-is:          Dup.hs"
+    , "    exposed-modules:  Dup"
     , "    build-depends:    base"
     , "    default-language: GHC2024"
     ])
-  writeUtf8 (projDir </> "a" </> "Dup.hs") "module Dup where\n"
-  writeUtf8 (projDir </> "b" </> "Dup.hs") "module Dup where\n"
+  writeUtf8 (projDir </> "a" </> "Dup.hs") "module Dup where\n\nx :: Int\nx = 1\n"
+  writeUtf8 (projDir </> "b" </> "Dup.hs") "module Dup where\n\ny :: Int\ny = 2\n"
   pure projDir
 
 -- export-query/F004 T1: 頂層解析、--help、未知子命令與四個 CLI DTO
@@ -4969,27 +4764,28 @@ testCliToplevelParse = testCase "test_cli_toplevel_parse" $ do
   [SummaryMeta, SummaryFacts, SummaryGraph] @?= [SummaryMeta, SummaryFacts, SummaryGraph]
   assertBool "SummaryMeta /= SummaryGraph" (SummaryMeta /= SummaryGraph)
 
--- export-query/F004 T2: extract 的位置參數與七個旗標(驗收標準 1、3、5)
+-- export-query/F004 T2(F005 T1 改寫): extract 的位置參數與四個旗標;
+-- 五個舊旗標不在 --help、給了就 exit 非 0(驗收標準 1、2)
 testExtractFlagsParse :: TestTree
 testExtractFlagsParse = testCase "test_extract_flags_parse" $ do
   -- 全預設
   d <- expectExtractCmd ["extract"]
   d @?= baseExtractCmd
-  -- 全給定:十個欄位逐一等於預期值
+  -- 全給定:五個欄位逐一等於預期值
   full <- expectExtractCmd
-    [ "extract", "proj", "-o", "x.json", "--backend", "imports"
-    , "--module-only", "--include-tests", "--hiedir", "dist/hie"
-    , "--hiedb", "C:/tools/hiedb.exe", "--db", "/tmp/idx.sqlite", "--strict"
-    ]
+    [ "extract", "proj", "-o", "x.json", "--include-tests", "--strict", "--summary", "facts" ]
   full @?= fullExtractCmd
-  -- --backend 三個取值
-  forM_ [("auto", Auto), ("imports", ImportsOnly), ("hiedb", HiedbOnly)]
-    (\(s, v) -> do
-      c <- expectExtractCmd ["extract", "--backend", s]
-      ecBackend c @?= v)
-  (bm, bc) <- expectParseFailure ["extract", "--backend", "bogus"]
-  bc @?= ExitFailure 1
-  assertHasAll "backend error" (T.pack bm) ["auto", "imports", "hiedb", "bogus"]
+  -- --help 只列剩餘四個旗標
+  (helpMsg, helpCode) <- expectParseFailure ["extract", "--help"]
+  helpCode @?= ExitSuccess
+  assertHasAll "extract help" (T.pack helpMsg) ["--output", "--include-tests", "--strict", "--summary"]
+  forM_ retiredFlags $ \flag ->
+    assertBool ("--help must not list " <> flag) (not (hasText flag (T.pack helpMsg)))
+  -- 五個舊旗標:exit 非 0 且訊息點名該旗標
+  forM_ retiredFlags $ \flag -> do
+    (msg, code) <- expectParseFailure ["extract", flag]
+    assertBool (flag <> " must fail to parse") (code /= ExitSuccess)
+    assertHasAll ("retired flag " <> flag) (T.pack msg) [flag]
   -- --summary 三個取值(C6)
   forM_ [("meta", SummaryMeta), ("facts", SummaryFacts), ("graph", SummaryGraph)]
     (\(s, v) -> do
@@ -5005,38 +4801,25 @@ testExtractFlagsParse = testCase "test_extract_flags_parse" $ do
   (_, xc) <- expectParseFailure ["extract", "a", "b"]
   xc @?= ExitFailure 1
 
--- export-query/F004 T3: 旗標 → 四個 Options DTO 的純對映(驗收標準 1)
+-- export-query/F004 T3(F005 T2 改寫): 旗標 → 四個 Options DTO 的純對映
+-- (記錄語法逐欄建構:殘留欄位是編譯錯誤)
 testExtractOptionsMapping :: TestTree
 testExtractOptionsMapping = testCase "test_extract_options_mapping" $ do
   let mo = toMetaOptions fullExtractCmd
       xo = toExtractOptions fullExtractCmd
       bo = toBuildOptions fullExtractCmd
       eo = toExportOptions fullExtractCmd
-  root mo @?= "proj"
-  includeTests mo @?= True
-  hieDirOverride mo @?= Just "dist/hie"
-  XT.rootDir xo @?= "proj"
-  backendChoice xo @?= ImportsOnly
-  -- extraction/F004 前置 2:兩個旗標已補接,逐字透傳(不再寫死 Nothing)
-  hiedbExe xo @?= Just "C:/tools/hiedb.exe"
-  dbPath xo @?= Just "/tmp/idx.sqlite"
-  moduleOnly bo @?= True
+  mo @?= MetaOptions { root = "proj", includeTests = True }
+  xo @?= XT.ExtractOptions { XT.rootDir = "proj" }
+  -- --module-only 已廢:graph-core 的契約欄位固定 False
+  moduleOnly bo @?= False
+  moduleOnly (toBuildOptions baseExtractCmd) @?= False
   ET.rootDir eo @?= "proj"
   ET.outputPath eo @?= "x.json"
   ET.commitPolicy eo @?= AutoDetect -- 假設 A6:無對應旗標,固定 AutoDetect
   -- --output 未給時走 defaultOutputPath(釘住 F001 假設 A2 的分工)
   let noOut = fullExtractCmd { ecOutput = Nothing }
   ET.outputPath (toExportOptions noOut) @?= defaultOutputPath "proj"
-  -- G-E005:--module-only 且 --backend 停在預設 Auto → 收窄為 ImportsOnly。
-  -- hiedb 在 module-only 下不可能貢獻任何東西(抽取規則 2 + 組裝規則 6),
-  -- 跑它只是白花索引時間(實測 2500ms → 441ms,輸出逐 byte 相同)。
-  let autoMod = fullExtractCmd { ecBackend = Auto, ecModuleOnly = True }
-  backendChoice (toExtractOptions autoMod) @?= ImportsOnly
-  -- 沒有 --module-only 時不收窄
-  backendChoice (toExtractOptions (autoMod { ecModuleOnly = False })) @?= Auto
-  -- 使用者明確指定後端時尊重其選擇,不覆寫
-  backendChoice (toExtractOptions (autoMod { ecBackend = HiedbOnly })) @?= HiedbOnly
-  backendChoice (toExtractOptions (autoMod { ecBackend = ImportsOnly })) @?= ImportsOnly
   -- 三個 DTO 的路徑欄位同源
   [ root (toMetaOptions noOut)
     , XT.rootDir (toExtractOptions noOut)
@@ -5081,30 +4864,17 @@ testReportNoteLines = testCase "test_report_note_lines" $ do
     [l] -> assertHasAll "meta line" l ["meta:", "app/Main.hs", "no module header"]
     other -> assertFailure ("expected one meta line, got: " <> show other)
   metaNoteLines emptyMeta @?= []
-  -- 通道 2:erLevel / erReports / erWarnings
+  -- 通道 2(F005 T3 同步改寫):erWarnings → 純警告行,沒有 level 標頭
   let er1 = ExtractResult
         { erFacts    = []
-        , erLevel    = ModuleLevel
-        , erReports  =
-            [ BackendReport (T.pack "hiedb") False (T.pack "not registered")
-            , BackendReport (T.pack "import-scan") True T.empty
-            ]
         , erWarnings = [ExtractWarning (T.pack "src/A.hs") (T.pack "unreadable")]
         }
   case extractNoteLines er1 of
-    [lv, dg, wn] -> do
-      assertHasAll "level line" lv ["extract: level", "ModuleLevel"]
-      assertHasAll "degrade line" dg ["extract: backend", "hiedb", "not registered"]
+    [wn] -> do
       assertHasAll "warning line" wn ["extract:", "src/A.hs", "unreadable"]
-      assertBool ("a used backend must not produce a line: " <> show [lv, dg, wn])
-        (not (hasText "import-scan" (T.unlines [lv, dg, wn])))
-    other -> assertFailure ("expected three extract lines, got: " <> show other)
-  -- 只有 brUsed = True 的報告 → 零噪音行
-  extractNoteLines er1
-    { erReports  = [BackendReport (T.pack "import-scan") True T.empty]
-    , erWarnings = []
-    } @?= []
-  extractNoteLines (ExtractResult [] ModuleLevel [] []) @?= []
+      assertBool ("no level header: " <> show wn) (not (hasText "level" wn))
+    other -> assertFailure ("expected exactly one extract line, got: " <> show other)
+  extractNoteLines (ExtractResult [] []) @?= []
   -- 通道 3(硬性要求):cgWarnings
   let cg1 = (graphWith [] [])
         { cgWarnings =
@@ -5140,31 +4910,26 @@ testReportNoteLines = testCase "test_report_note_lines" $ do
       (\hO _ -> emitNotes hO [T.pack "alpha", T.pack "beta"])
     two @?= T.pack "alpha\nbeta\n")
 
--- export-query/F004 T6: runExtractCmd 的四站管線與五條 stderr 通道
--- (驗收標準 3、7、8、9)
+-- export-query/F004 T6(F005 T6 改寫): runExtractCmd 的四站管線與五條 stderr 通道
+-- (驗收標準 3、7、8、9);真實管線一律走 buildable 暫存副本
 testRunExtract :: TestTree
 testRunExtract = testCase "test_run_extract" $
-  withExportDir "f004-extract" $ \dir -> do
+  withExportDir "f004-extract" $ \dir -> withBuildableScratch "f004extract" $ \proj -> do
     -- (a) 真實 fixture 走完匯出路徑
     let out = dir </> "cg.json"
-        cmdA = baseExtractCmd { ecPath = graphFixture, ecOutput = Just out }
+        cmdA = baseExtractCmd { ecPath = proj, ecOutput = Just out }
     (codeA, outA, errA) <- withCaptured dir (\hO hE -> runExtractCmd hO hE cmdA)
     codeA @?= ExitSuccess
-    wroteFile <- doesFileExist out
-    assertBool ("output file exists: " <> out) wroteFile
-    loaded <- loadQueryGraph out
-    case loaded of
-      Right _ -> pure ()
-      Left e  -> assertFailure ("exported graph should load back: " <> show e)
-    assertHasAll "extract stdout" outA ["wrote ", out, " nodes, ", " edges"]
+    assertExportedGraph out outA
     assertHasAll "extract stderr" errA ["export:"]   -- 驗收標準 8:xrNotes
-    -- (b) 硬性要求的端到端:自建同名 module 碰撞專案 → cgWarnings 走 stderr
+    -- (b) 硬性要求的端到端:自建同名 module 碰撞專案(真的被 cabal 建置)→ cgWarnings 走 stderr
     projDir <- mkCollisionProject dir
     let cmdB = baseExtractCmd { ecPath = projDir }   -- --output 未給 → 預設路徑
     (codeB, outB, errB) <- withCaptured dir (\hO hE -> runExtractCmd hO hE cmdB)
     codeB @?= ExitSuccess
     assertHasAll "collision warning on stderr" errB
       ["graph:", "Dup", "disambiguated", "a/Dup.hs", "b/Dup.hs"]
+    length (filter (hasText "graph:") (T.lines errB)) @?= 1   -- cgWarnings 恰一條
     -- 預設輸出路徑 = <PATH>/codegraph.json(F001 假設 A2 的分工)
     defaultWrote <- doesFileExist (defaultOutputPath projDir)
     assertBool ("default output path was used: " <> defaultOutputPath projDir)
@@ -5176,12 +4941,12 @@ testRunExtract = testCase "test_run_extract" $
     codeS @?= ExitFailure 1
     assertHasAll "strict stderr" errS ["strict:", "graph:"]
     -- (c) 三個 --summary 模式逐字元等於既有 render 函式,且都不產出 codegraph.json
-    pm <- loadProjectMeta (defOpts graphFixture)
-    er <- extract ((extOpts Auto) { XT.rootDir = graphFixture }) pm
+    pm <- loadProjectMeta (defOpts proj)
+    er <- expectRight =<< extract (extOpts proj) pm
     let cg = buildGraph defBuildOpts pm er
         summaryOut = dir </> "summary-should-not-exist.json"
         summaryCmd m = baseExtractCmd
-          { ecPath = graphFixture, ecOutput = Just summaryOut, ecSummary = Just m }
+          { ecPath = proj, ecOutput = Just summaryOut, ecSummary = Just m }
     forM_ [ (SummaryMeta,  renderMetaSummary pm)
           , (SummaryFacts, renderFactSummary er)
           , (SummaryGraph, renderGraphSummary cg)
@@ -5196,18 +4961,18 @@ testRunExtract = testCase "test_run_extract" $
     let blocker = dir </> "blocker"
     writeUtf8 blocker "not a directory\n"
     (codeD, _, errD) <- withCaptured dir (\hO hE -> runExtractCmd hO hE
-      baseExtractCmd { ecPath = graphFixture, ecOutput = Just (blocker </> "x.json") })
+      baseExtractCmd { ecPath = proj, ecOutput = Just (blocker </> "x.json") })
     codeD @?= ExitFailure 1
     assertHasAll "export failure stderr" errD ["export:"]
 
--- export-query/F004 T7: runQueryCmd 的載入、通道 5、端點提示與 exit code
+-- export-query/F004 T7(F005 T6 改寫): runQueryCmd 的載入、通道 5、端點提示與 exit code
 -- (驗收標準 6、8)
 testRunQuery :: TestTree
 testRunQuery = testCase "test_run_query" $
-  withExportDir "f004-query" $ \dir -> do
+  withExportDir "f004-query" $ \dir -> withBuildableScratch "f004query" $ \proj -> do
     let out = dir </> "cg.json"
     (code0, _, _) <- withCaptured dir (\hO hE -> runExtractCmd hO hE
-      baseExtractCmd { ecPath = graphFixture, ecOutput = Just out })
+      baseExtractCmd { ecPath = proj, ecOutput = Just out })
     code0 @?= ExitSuccess
     loadedG <- loadQueryGraph out
     g <- case loadedG of
@@ -5294,10 +5059,10 @@ testRunQuery = testCase "test_run_query" $
 -- 「只剩 execParser / runCommand / exitWith」以人工複核。
 testRunCommandDispatch :: TestTree
 testRunCommandDispatch = testCase "test_run_command_dispatch" $
-  withExportDir "f004-dispatch" $ \dir -> do
+  withExportDir "f004-dispatch" $ \dir -> withBuildableScratch "f004dispatch" $ \proj -> do
     let out = dir </> "cg.json"
     -- execParserPure 解出的 Command 直接餵給 runCommand,走完一次 extract
-    ec <- expectParse ["extract", graphFixture, "-o", out]
+    ec <- expectParse ["extract", proj, "-o", out]
     (code1, out1, _) <- withCaptured dir (\hO hE -> runCommand hO hE ec)
     code1 @?= ExitSuccess
     wrote <- doesFileExist out
@@ -5319,6 +5084,135 @@ testRunCommandDispatch = testCase "test_run_command_dispatch" $
     (_, unknownCode) <- expectParseFailure ["nope"]
     unknownCode @?= ExitFailure 1
 
+--------------------------------------------------------------------------------
+-- export-query/F005 cli-zero-setup
+--------------------------------------------------------------------------------
+
+exportQueryF005Tests :: TestTree
+exportQueryF005Tests = testGroup "export-query/F005 cli-zero-setup"
+  [ -- T1 = test_extract_flags_parse、T2 = test_extract_options_mapping(F004 群組,改寫)
+    testExtractFailureLines        -- T3
+  , testRunExtractFailureChannel   -- T4
+  -- T5 = test_render_fact_summary(extraction/F002 群組,改寫)+ 下面這條
+  , testRenderMetaSummaryNoHie     -- T5
+  -- T6 = test_run_extract / test_run_query / test_run_command_dispatch(F004 群組,改寫)
+  , testZeroSetupEndToEnd          -- T7
+  -- T8 = 共同閘門(人工執行,記入實作備註)
+  ]
+
+-- F005 T3:四個建構子各自可辨識、全部以 extract: 起頭;VersionMismatch 含安裝指令
+testExtractFailureLines :: TestTree
+testExtractFailureLines = testCase "test_extract_failure_lines" $ do
+  let bf = XT.BuildFailed (T.pack "lib:x") (T.pack "line1\nline2")
+      vm = XT.VersionMismatch (T.pack "9.12.2") (T.pack "9.14.1")
+      ix = XT.IndexFailed (T.pack "schema version 9 does not match")
+      allFour = [bf, vm, ix, XT.NoSources]
+  forM_ allFour $ \f -> do
+    let ls = extractFailureLines f
+    assertBool ("non-empty for " <> show f) (not (null ls))
+    forM_ ls $ \l ->
+      assertBool ("every line starts with extract: " <> show l) (T.pack "extract: " `T.isPrefixOf` l)
+  case map (T.unlines . extractFailureLines) allFour of
+    [rBf, rVm, rIx, rNo] -> do
+      length (nubOrd [rBf, rVm, rIx, rNo]) @?= 4   -- 互不相同
+      assertHasAll "BuildFailed" rBf ["lib:x", "line1", "line2"]
+      assertHasAll "VersionMismatch" rVm ["cabal install knot-hs -w ghc-9.12.2", "9.14.1"]
+      assertHasAll "IndexFailed" rIx ["schema version 9 does not match"]
+      assertBool "NoSources is non-empty" (not (T.null rNo))
+    other -> assertFailure ("expected four renderings, got " <> show (length other))
+
+-- F005 T4:以假 extract 注入,驗 Left 通道——exit 1、不寫檔、在 --summary 分流與 --strict 之前
+testRunExtractFailureChannel :: TestTree
+testRunExtractFailureChannel = testCase "test_run_extract_failure_channel" $
+  withExportDir "f005-failure" $ \dir -> do
+    called <- newIORef (0 :: Int)
+    let out  = dir </> "cg.json"
+        boom = XT.BuildFailed (T.pack "lib:demo") (T.pack "boom")
+        failing f = \_ _ -> modifyIORef' called (+ 1) >> pure (Left f)
+        base = baseExtractCmd { ecPath = graphFixture, ecOutput = Just out }
+        run fn cmd = withCaptured dir (\hO hE -> runExtractCmdWith fn hO hE cmd)
+    -- (a) BuildFailed → exit 1、stderr 含 component 與 detail、不寫檔
+    (codeA, outA, errA) <- run (failing boom) base
+    codeA @?= ExitFailure 1
+    assertHasAll "failure stderr" errA ["extract: build failed for lib:demo", "boom"]
+    outA @?= T.empty
+    doesFileExist out >>= (@?= False)
+    -- (b) --strict 不影響:仍 exit 1,且沒有 strict: 行
+    (codeB, _, errB) <- run (failing boom) base { ecStrict = True }
+    codeB @?= ExitFailure 1
+    assertBool ("no strict line on a Left: " <> show errB) (not (hasText "strict:" errB))
+    -- (c) --summary facts / graph 都在 extract 之後:exit 1、stdout 空
+    forM_ [SummaryFacts, SummaryGraph] $ \m -> do
+      (codeC, outC, _) <- run (failing boom) base { ecSummary = Just m }
+      codeC @?= ExitFailure 1
+      outC @?= T.empty
+    -- (d) --summary meta 在 extract 之前收工:exit 0、假 extract 未被呼叫
+    writeIORef called 0
+    (codeD, outD, _) <- run (failing boom) base { ecSummary = Just SummaryMeta }
+    codeD @?= ExitSuccess
+    readIORef called >>= (@?= 0)
+    pm <- loadProjectMeta (defOpts graphFixture)
+    outD @?= renderMetaSummary pm
+    -- 另外三個建構子也各自到達 stderr
+    forM_ [ XT.VersionMismatch (T.pack "9.12.2") (T.pack "9.14.1")
+          , XT.IndexFailed (T.pack "locked"), XT.NoSources ] $ \f -> do
+      (code, _, err) <- run (failing f) base
+      code @?= ExitFailure 1
+      assertHasAll ("stderr for " <> show f) err (map T.unpack (extractFailureLines f))
+    -- (e) Right → 與注入真實 extract 的既有 test_run_extract 斷言一致
+    er <- moduleLayer graphFixture pm
+    (codeE, outE, errE) <- run (\_ _ -> pure (Right er)) base
+    codeE @?= ExitSuccess
+    assertExportedGraph out outE
+    assertHasAll "export notes" errE ["export:"]
+
+-- F005 T5(後半):--summary meta 不再有 .hie 段
+testRenderMetaSummaryNoHie :: TestTree
+testRenderMetaSummaryNoHie = testCase "test_render_meta_summary_no_hie" $ do
+  pm <- loadProjectMeta (defOpts compsFixture)
+  let out = renderMetaSummary pm
+  forM_ [".hie", "hie:", "hie-dir", "hiedir"] $ \needle ->
+    assertBool ("meta summary must not contain " <> show needle) (not (hasText needle out))
+  assertHasAll "meta summary still lists packages and sources" out ["packages: 1", "sources:"]
+  renderMetaSummary pm @?= out
+
+-- F005 T7:ADR-006 端對端——乾淨目標專案(無 .knot/、無 .hie)一個命令產出兩層圖
+testZeroSetupEndToEnd :: TestTree
+testZeroSetupEndToEnd = testCase "test_zero_setup_end_to_end" $
+  withBuildableScratch "zerosetup" $ \dir -> do
+    doesDirectoryExist (dir </> ".knot") >>= (@?= False)
+    fresh <- listFilesRec dir
+    assertBool "fresh copy must carry no .hie" (not (any ((== ".hie") . takeExtension) fresh))
+    cmd <- expectParse ["extract", dir]
+    (code, out, _) <- withCaptured dir (\hO hE -> runCommand hO hE cmd)
+    code @?= ExitSuccess
+    let json = dir </> "codegraph.json"
+    assertExportedGraph json out
+    -- 讀回 JSON:decl 節點帶 source_location、id 以 Demo.Core. 起頭;邊含 calls
+    bytes <- BS.readFile json
+    top <- case A.decodeStrict bytes of
+      Just (A.Object o) -> pure o
+      other -> assertFailure ("top level is not a JSON object: " <> show other)
+    let objs k = case AKM.lookup (AK.fromString k) top of
+          Just (A.Array v) -> [m | A.Object m <- toList v]
+          _                -> []
+        str k o = case AKM.lookup (AK.fromString k) o of
+          Just (A.String t) -> Just t
+          _                 -> Nothing
+        declNodes =
+          [ n | n <- objs "nodes", Just i <- [str "id" n]
+          , T.pack "Demo.Core." `T.isPrefixOf` i
+          , AKM.member (AK.fromString "source_location") n ]
+        callEdges = [ e | e <- objs "links", str "relation" e == Just (T.pack "calls") ]
+    assertBool "decl nodes under Demo.Core with source_location" (not (null declNodes))
+    assertBool "at least one calls edge" (not (null callEdges))
+    -- .knot/ 是唯一的副作用,且自帶 .gitignore
+    doesFileExist (dir </> ".knot" </> ".gitignore") >>= (@?= True)
+    -- 回歸:knot query 仍命中
+    qc <- expectParse ["query", "--graph", json, "find", "Demo"]
+    (codeQ, outQ, _) <- withCaptured dir (\hO hE -> runCommand hO hE qc)
+    codeQ @?= ExitSuccess
+    assertHasAll "query hit" outQ ["found", "Demo.Core"]
 
 --------------------------------------------------------------------------------
 -- G-E003 產生碼過濾的對稱化(跨 extraction + graph-core)
@@ -5336,9 +5230,8 @@ globalE003Tests = testGroup "global/G-E003 generated-decl-filter"
 testGeneratedFilterSelfcheck :: TestTree
 testGeneratedFilterSelfcheck = testCase "test_generated_filter_selfcheck" $ do
   pm <- loadProjectMeta (defOpts ".")
-  res <- extract (hiedbOpts ".") pm
-  -- F006 起 knot 自己建置自己,decl 層必須成立,不再有 [skip] 分支
-  erLevel res @?= DeclLevel
+  -- F006 起 knot 自己建置自己,decl 層必須成立,不再有 [skip] 分支;F007 起即 Right
+  res <- expectRight =<< extract (hiedbOpts ".") pm
   let g = buildGraph defBuildOpts pm res
       dollarNodes = [ t | NodeId t <- map gnId (cgNodes g)
                     , T.pack "$" `T.isInfixOf` t ]
@@ -5374,9 +5267,10 @@ testGeneratedFilterSelfcheck = testCase "test_generated_filter_selfcheck" $ do
 
 globalE001Tests :: TestTree
 globalE001Tests = testGroup "global/G-E001 internal-test-exports"
-  [ testCabalContractSurface       -- T1
+  [ testCabalContractSurface       -- T1(project-meta/F004 T3 計數改寫)
   , testDefaultOutputPathHome      -- T2
-  , testModuleSuffixRuleAgrees     -- T3
+  -- T3 test_module_suffix_rule_agrees 隨 project-meta/F004 移除:hie-locate 退場後
+  --    moduleNameFromPathExt 只剩 moduleNameFromPath 一個呼叫端,沒有第二條規則可比
   , testGraphStatsTopExternalText  -- T4
   , testDiscoveryCabalLessDir      -- T5
   , testDesignDocsMatchGraphStats  -- T6
@@ -5434,13 +5328,15 @@ testCabalContractSurface = testCase "test_cabal_contract_surface" $ do
   -- 公開面恰為契約模組(排序後逐字比對,順序不影響判定)
   sort reexported @?= sort contractModules
   -- 內部 library 收全部 26 個模組
-  length exposed @?= 27   -- F005 加 BuildDriver;F006 HiedbDriver → HieIndex 一進一出
+  -- (F005 加 BuildDriver;F006 HiedbDriver → HieIndex、F007 Backend → Pipeline 各一進一出;
+  --  project-meta/F004 去 HieLocate 一出:27 → 26)
+  length exposed @?= 26
   -- 每個被 reexport 的模組都真的存在於內部 library
   assertBool ("reexported modules missing from knot-internal: "
                <> show [m | m <- reexported, m `notElem` exposed])
     (all (`elem` exposed) reexported)
   -- 17 個內部模組一個都不得出現在公開面
-  length private @?= 18
+  length private @?= 17
   assertBool ("internal modules leaked into the public surface: "
                <> show [m | m <- private, m `elem` reexported])
     (not (any (`elem` reexported) private))
@@ -5462,28 +5358,6 @@ testDefaultOutputPathHome = testCase "test_default_output_path_home" $ do
     (not (any (hasText "defaultOutputPath ::") mentions))
   assertBool ("only qualified cross-references may remain: " <> show mentions)
     (all (hasText "Knot.App.Cli.defaultOutputPath") mentions)
-
--- | G-E001 T3:@.hs@ 與 @.hie@ 兩條尾綴規則等價(去重後只剩一份實作)。
-testModuleSuffixRuleAgrees :: TestTree
-testModuleSuffixRuleAgrees = testGroup "test_module_suffix_rule_agrees"
-  [ testCase "既有具體案例兩邊一致" $ do
-      moduleNameFromPath "src/Demo/Core.hs" @?= moduleNameFromHiePath "src/Demo/Core.hie"
-      moduleNameFromPath "Foo.hs"           @?= moduleNameFromHiePath "Foo.hie"
-      moduleNameFromPath "src/lowercase/util.hs"
-        @?= moduleNameFromHiePath "src/lowercase/util.hie"
-  , testProperty "隨機路徑上兩條規則恆等" $ property $ do
-      lower <- forAll (Gen.list (Range.linear 0 3)
-                        (Gen.string (Range.linear 1 6) Gen.lower))
-      upper <- forAll (Gen.list (Range.linear 1 3)
-                        ((:) <$> Gen.upper <*> Gen.string (Range.linear 0 5) Gen.alpha))
-      let base = concatMap (<> "/") lower <> intercalate "/" upper
-      moduleNameFromPath (base <> ".hs") === moduleNameFromHiePath (base <> ".hie")
-  , testProperty "末段非大寫時兩邊同為 Nothing" $ property $ do
-      seg <- forAll (Gen.string (Range.linear 1 6) Gen.lower)
-      let base = "src/" <> seg
-      moduleNameFromPath (base <> ".hs") === Nothing
-      moduleNameFromHiePath (base <> ".hie") === Nothing
-  ]
 
 -- | G-E001 T4:公開 DTO 不再透出上游型別,且行為零變更。
 testGraphStatsTopExternalText :: TestTree
@@ -5579,18 +5453,20 @@ testAppImportsWithinContract = testCase "test_app_imports_within_contract" $ do
 goldenFixtures :: [FilePath]
 goldenFixtures = ["comps", "graph", "multi", "no-cabal", "proj"]
 
--- | G-E001 全體回歸:四站管線的 byte 級輸出必須與變更前的黃金檔完全相同。
+-- | G-E001 全體回歸(F007 T6 改寫):module 層管線的 byte 級輸出必須與變更前的
+-- 黃金檔完全相同。
 --
 -- 黃金檔取自 G-E001 動工前的建置產出,釘住 Scope 的「不改任何演算法行為」。
--- 固定走 import-scan 後端(結果不隨 hiedb 是否安裝而變)、commit 傳
--- 'Nothing'(不跑 git,黃金檔才不隨 HEAD 漂移)。
+-- 五個黃金 fixture 全部不可建置(@graph@ 是刻意壞的),F007 起改走模組介面
+-- 'scanImports' + 'buildGraph'、不經 'extract';commit 傳 'Nothing'
+-- (不跑 git,黃金檔才不隨 HEAD 漂移)。
 testCodegraphOutputUnchanged :: TestTree
 testCodegraphOutputUnchanged = testCase "test_codegraph_output_unchanged" $
   forM_ goldenFixtures $ \name -> do
     let root   = "test/fixtures" </> name
         golden = "test/fixtures/golden" </> (name <> ".json")
     pm <- loadProjectMeta (defOpts root)
-    er <- extract ((extOpts ImportsOnly) { XT.rootDir = root }) pm
+    er <- moduleLayer root pm
     let g       = buildGraph defBuildOpts pm er
         encoded = BSL.toStrict (BB.toLazyByteString (encodeCodegraph Nothing g))
     expected <- BS.readFile golden
@@ -5610,7 +5486,7 @@ globalE004Tests = testGroup "global/G-E004 contract-surface-labels"
   [ testExtractionReexportsModuleName          -- T1
   , testGraphCoreNamesModuleNameViaExtraction  -- T2
   , testQueryTypesContractLabels               -- T3
-  , testBackendConstantLabels                  -- T4
+  -- T4 test_backend_constant_labels 由 extractionF007Tests 的 test_pipeline_module_surface 改寫承接
   , testDocsMatchContractLabels                -- T5
   , testContractLabelTable                     -- T6
   ]
@@ -5700,17 +5576,6 @@ testQueryTypesContractLabels = testCase "test_query_types_contract_labels" $ do
   assertBool "Knot.Query should still re-export NodeId with its constructor"
     (hasText "NodeId (..)" pub)
 
--- | G-E004 T4:'Knot.Extract.Backend' 的每個非契約小節都要標明契約狀態。
-testBackendConstantLabels :: TestTree
-testBackendConstantLabels = testCase "test_backend_constant_labels" $ do
-  gs <- exportGroups "src/Knot/Extract/Backend.hs"
-  forM_ ["importScanName", "hiedbName", "runBackends"] $ \sym ->
-    case groupOf gs sym of
-      Nothing  -> assertFailure (sym <> " missing from Knot.Extract.Backend exports")
-      Just grp -> assertBool
-        (sym <> " should sit in a section labelled 非契約面, got: " <> show grp)
-        (hasText "非契約面" grp)
-
 -- | G-E004 T5:架構文件與 feature 文檔已同步。
 testDocsMatchContractLabels :: TestTree
 testDocsMatchContractLabels = testCase "test_docs_match_contract_labels" $ do
@@ -5728,13 +5593,17 @@ testDocsMatchContractLabels = testCase "test_docs_match_contract_labels" $ do
 -- 依據是各子系統 @design.md@ 的「對外契約」與「模組間公開介面」兩節。
 contractLabelTable :: [(FilePath, String, Bool)]
 contractLabelTable =
-  -- 對帳 1:extraction 對外契約只有 extract;模組間公開介面只有
-  -- Backend / ProbeResult / ensureIndex / readIndexFacts
-  [ ("src/Knot/Extract/Backend.hs", "Backend",             False)
-  , ("src/Knot/Extract/Backend.hs", "ProbeResult",         False)
-  , ("src/Knot/Extract/Backend.hs", "importScanName",      True)
-  , ("src/Knot/Extract/Backend.hs", "hiedbName",           True)
-  , ("src/Knot/Extract/Backend.hs", "runBackends",         True)
+  -- 對帳 1(F007 起):extraction 對外契約只有 extract;模組間公開介面是
+  -- scanImports / ensureHie / ensureIndex / readIndexFacts;搬家後的兩個站名
+  -- 常數與可注入管線維持非契約面
+  [ ("src/Knot/Extract/ImportScan.hs",  "scanImports",      False)
+  , ("src/Knot/Extract/ImportScan.hs",  "importScanName",   True)
+  , ("src/Knot/Extract/BuildDriver.hs", "ensureHie",        False)
+  , ("src/Knot/Extract/HieIndex.hs",    "ensureIndex",      False)
+  , ("src/Knot/Extract/HieIndex.hs",    "hiedbName",        True)
+  , ("src/Knot/Extract/HiedbFacts.hs",  "readIndexFacts",   False)
+  , ("src/Knot/Extract/Pipeline.hs",    "Stages",           True)
+  , ("src/Knot/Extract/Pipeline.hs",    "runPipeline",      True)
   -- 對帳 2:graph-core 模組間公開介面只列 mint* 四項
   , ("src/Knot/Graph/NodeMint.hs",  "mintModuleId",        False)
   , ("src/Knot/Graph/NodeMint.hs",  "mintDeclId",          False)
@@ -5800,35 +5669,25 @@ globalB002Tests = testGroup "global/G-B002 hiedb-dir-index-defs-pollution"
 -- 同時是 G-B001 那類錯歸的通用防線:19 行的 @app\/Main.hs@ 掛上 L3789 的節點
 -- 會被這條直接擋下。
 --
--- 需要 hiedb 與自身的 @.hie@;缺任一就印明原因跳過(比照其他 selfcheck)。
+-- S5 起 knot-hs 自己建置、索引自己(.knot/),'extract' 回 @Right@ 即可續行;
+-- 沒有 [skip] 分支。
 testDeclLineWithinFile :: TestTree
 testDeclLineWithinFile = testCase "test_decl_line_within_file" $ do
   pm <- loadProjectMeta (defOpts ".")
-  case pmHie pm of
-    Just hie | not (null (hieFiles hie)) -> do
-      tmp <- getTemporaryDirectory
-      let db = tmp </> "knot-hs-gb002-self" </> "self.sqlite"
-      removePathForcibly (takeDirectory db)
-      res <- extract ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just db }) pm
-      if erLevel res /= DeclLevel
-        then putStrLn "[skip] test_decl_line_within_file: hiedb unavailable, no decl layer"
-        else do
-          let g = buildGraph defBuildOpts pm res
-              located = [ (gnId n, gnFile n, ln)
-                        | n <- cgNodes g, Just ln <- [gnLine n] ]
-          assertBool "self scan should produce located nodes" (not (null located))
-          overflow <- fmap concat $ forM located $ \(nodeId, file, ln) -> do
-            body <- readUtf8 file
-            let total = length (T.lines body)
-            pure [ (nodeId, file, ln, total) | ln > total ]
-          assertBool
-            ("nodes whose line exceeds their file's length: " <> show (take 8 overflow))
-            (null overflow)
-          putStrLn ("[selfcheck/G-B002] 檢查了 " <> show (length located)
-            <> " 個帶行號的節點,全部落在檔案範圍內")
-      removePathForcibly (takeDirectory db)
-    _ -> putStrLn
-      "[skip] test_decl_line_within_file: knot-hs itself has no .hie files"
+  res <- expectRight =<< extract (extOpts ".") pm
+  let g = buildGraph defBuildOpts pm res
+      located = [ (gnId n, gnFile n, ln)
+                | n <- cgNodes g, Just ln <- [gnLine n] ]
+  assertBool "self scan should produce located nodes" (not (null located))
+  overflow <- fmap concat $ forM located $ \(nodeId, file, ln) -> do
+    body <- readUtf8 file
+    let total = length (T.lines body)
+    pure [ (nodeId, file, ln, total) | ln > total ]
+  assertBool
+    ("nodes whose line exceeds their file's length: " <> show (take 8 overflow))
+    (null overflow)
+  putStrLn ("[selfcheck/G-B002] 檢查了 " <> show (length located)
+    <> " 個帶行號的節點,全部落在檔案範圍內")
 
 --------------------------------------------------------------------------------
 -- extraction/F005 build-driver
@@ -5915,7 +5774,7 @@ testCabalInvocation = testCase "test_cabal_invocation" $ do
   failedUnitOf [] @?= T.pack "all"
   -- (b) 真的編不過的 fixture → BuildFailed,指名單元(或 all),尾段含 cabal 的錯誤
   pm <- loadProjectMeta (defOpts brokenBuildFixture)
-  r <- ensureHie ((extOpts Auto) { XT.rootDir = brokenBuildFixture }) pm
+  r <- ensureHie (extOpts brokenBuildFixture) pm
   case r of
     Left (XT.BuildFailed c d) -> do
       assertBool ("bfComponent should name the exe or be all, got " <> show c)
@@ -5976,7 +5835,7 @@ testEnsureHiePipeline = testCase "test_ensure_hie_pipeline" $ do
   -- graph fixture 刻意不可建置(Demo.Core import Data.Text 卻沒列相依,是 import-scan
   -- 的測試材料,五份黃金檔釘著它的 import 行),故另備一個真的能建的 buildable fixture
   pm <- loadProjectMeta (defOpts buildableFixture)
-  r <- ensureHie ((extOpts Auto) { XT.rootDir = buildableFixture }) pm
+  r <- ensureHie (extOpts buildableFixture) pm
   case r of
     Right hl -> do
       hlRoot hl @?= "test/fixtures/buildable/.knot/build"
@@ -5993,7 +5852,7 @@ testEnsureHiePipeline = testCase "test_ensure_hie_pipeline" $ do
   -- 失敗案例用 repo 外的空暫存目錄:fixture 目錄沒有 cabal.project 時,cabal 會往上
   -- 找到 knot-hs 自己的 cabal.project 而建整個 knot-hs(實測踩到,卡了十分鐘)
   withExportDir "f005-empty" $ \dir -> do
-    r2 <- ensureHie ((extOpts Auto) { XT.rootDir = dir }) emptyMeta
+    r2 <- ensureHie (extOpts dir) emptyMeta
     case r2 of
       Left (XT.BuildFailed _ d) ->
         assertBool ("cabal should complain about the missing package, got " <> show d)
@@ -6012,9 +5871,9 @@ testBuildDriverSelfcheck = testCase "test_build_driver_selfcheck" $ do
   -- 不帶 --include-tests:test-suite 不建、t/ 下無 .hie、恰一份 Main.hie(exe)
   pm <- loadProjectMeta (defOpts ".")
   t0 <- getMonotonicTime
-  r1 <- ensureHie ((extOpts Auto) { XT.rootDir = "." }) pm
+  r1 <- ensureHie (extOpts ".") pm
   t1 <- getMonotonicTime
-  r2 <- ensureHie ((extOpts Auto) { XT.rootDir = "." }) pm
+  r2 <- ensureHie (extOpts ".") pm
   t2 <- getMonotonicTime
   hl <- either (\f -> assertFailure ("first ensureHie failed: " <> show f)) pure r1
   either (\f -> assertFailure ("second ensureHie failed: " <> show f)) (@?= hl) r2
@@ -6029,7 +5888,7 @@ testBuildDriverSelfcheck = testCase "test_build_driver_selfcheck" $ do
   assertBool ("second run should be far faster: " <> show (d1, d2)) (d2 < d1 / 2)
   -- 帶 --include-tests:兩份 Main.hie,各在自己 component 的目錄
   pmT <- loadProjectMeta ((defOpts ".") { includeTests = True })
-  rT <- ensureHie ((extOpts Auto) { XT.rootDir = "." }) pmT
+  rT <- ensureHie (extOpts ".") pmT
   hlT <- either (\f -> assertFailure ("ensureHie with tests failed: " <> show f)) pure rT
   let mainsT = [(c, p) | (ComponentRef (_, c), p) <- hlFiles hlT, takeFileName p == "Main.hie"]
   sort (map fst mainsT) @?= map T.pack ["exe:knot", "test:knot-test"]

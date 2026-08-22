@@ -3,7 +3,7 @@ id: F007
 type: feature
 title: two-layer-contract
 description: 契約收斂為 Either ExtractFailure,fact-pipeline 兩層全有全無,移除探測與降級
-status: open
+status: done
 created: 2026-08-22
 updated: 2026-08-22
 depends-on: [F001, F002, F004, F005, F006, project-meta/F001, graph-core/F001]
@@ -202,13 +202,13 @@ scanImports :: ExtractOptions -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 ## TodoList
 
-- [ ] T1: `Knot.Extract.Types` 收斂——`ExtractOptions` 只剩 `rootDir`、`ExtractResult` 只剩 `erFacts` / `erWarnings`;刪 `BackendChoice` / `CapabilityLevel` / `BackendReport` 及其匯出;haddock 同步(`ExtractFailure` 不再說「#7 接續」)  `dep: -`
-- [ ] T2: 新模組 `Knot.Extract.Pipeline`(`Stages h`、`runPipeline` 骨架)取代 `Knot.Extract.Backend`(檔案刪除、cabal 一進一出);`importScanName` 搬到 `ImportScan`、`hiedbName` 搬到 `HieIndex`  `dep: T1`
-- [ ] T3: `ImportScan.runImportScan` 改名匯出為 `scanImports`、刪 `importScanBackend`  `dep: T2`
-- [ ] T4: `runPipeline` 本體——`NoSources` 前置判定、`Left` 透傳、decl 層零 `FactDecl` → `IndexFailed`、`Right` 的全序排序與站序警告  `dep: T2`
-- [ ] T5: `extract = runPipeline realStages`;`HiedbFacts` 刪 `hiedbBackend` / `runHiedb` / `renderFailure` / `HiedbFactsError`;`cabal build knot-hs:knot-internal` 通過  `dep: T3, T4`
-- [ ] T6: 測試搬遷——刪除廢除機制的測試與假後端輔助、黃金檔測試與其餘 module 層呼叫點改走 `scanImports`、G-E004 對帳表改指新位置  `dep: T5`
-- [ ] T7: selfcheck——對 knot-hs 自身跑 `extract`:`Right`、四種事實皆有、節點數 ≥ 548、兩次相同  `dep: T5`
+- [x] T1: `Knot.Extract.Types` 收斂——`ExtractOptions` 只剩 `rootDir`、`ExtractResult` 只剩 `erFacts` / `erWarnings`;刪 `BackendChoice` / `CapabilityLevel` / `BackendReport` 及其匯出;haddock 同步(`ExtractFailure` 不再說「#7 接續」)  `dep: -`
+- [x] T2: 新模組 `Knot.Extract.Pipeline`(`Stages h`、`runPipeline` 骨架)取代 `Knot.Extract.Backend`(檔案刪除、cabal 一進一出);`importScanName` 搬到 `ImportScan`、`hiedbName` 搬到 `HieIndex`  `dep: T1`
+- [x] T3: `ImportScan.runImportScan` 改名匯出為 `scanImports`、刪 `importScanBackend`  `dep: T2`
+- [x] T4: `runPipeline` 本體——`NoSources` 前置判定、`Left` 透傳、decl 層零 `FactDecl` → `IndexFailed`、`Right` 的全序排序與站序警告  `dep: T2`
+- [x] T5: `extract = runPipeline realStages`;`HiedbFacts` 刪 `hiedbBackend` / `runHiedb` / `renderFailure` / `HiedbFactsError`;`cabal build knot-hs:knot-internal` 通過  `dep: T3, T4`
+- [x] T6: 測試搬遷——刪除廢除機制的測試與假後端輔助、黃金檔測試與其餘 module 層呼叫點改走 `scanImports`、G-E004 對帳表改指新位置  `dep: T5`
+- [x] T7: selfcheck——對 knot-hs 自身跑 `extract`:`Right`、四種事實皆有、節點數 ≥ 548(**實作時改為 ≥ 526 + 結構守門,見實作備註**)、兩次相同  `dep: T5`
 
 ## 1-to-1 測試對照表
 
@@ -224,4 +224,22 @@ scanImports :: ExtractOptions -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 ## 實作備註
 
-(撰寫時留空)
+### 偏差(2026-08-22 實作時發現,待開發者裁決)
+
+**驗收標準 5 / T7 的節點數門檻 548 → 526。** 契約卡寫「節點數不低於 S3 閘門的 548」,但本批(三件套)自己就刪掉 73 個頂層宣告:`Knot.Extract.Backend` 整個模組(21 個 id)、`Knot.Meta.HieLocate`(7 個)、`HiedbFacts` 的 F006 轉接器(5 個)、`Knot.Extract.Types` 廢除的三個型別與五個欄位(18 個)、`Knot.Meta.Types` 廢除的兩個型別與兩個欄位(12 個)、`Knot.App.Cli` 的五個欄位與 `backendReader`(6 個)、`runImportScan` / `registeredBackends` 等私有函數;只加回 16 個(`Pipeline` 模組 10 個、`scanImports` / `importScanName` / `hiedbName` / `extractFailureLines` / `runExtractCmdWith` / `realStages`)。
+
+驗證方式:以**同一支** S5 的 knot 對 S5 前(`git worktree` at `882bf75`)與 S5 後的原始樹各跑一次 `extract --summary graph`,逐 id 比對:583 − 73 + 16 = **526**,消失的 73 個 id **全部**是上列刪除的程式碼,沒有任何一個既有 module 的 decl 節點消失——decl 層零退化,門檻失效的原因是程式碼真的變少了。
+
+處置:`test_two_layer_selfcheck` 的門檻改為 **≥ 526**(與原卡「不低於上一道閘門」同一精神,基線換成 S5),另加一條不會過期的結構守門——`src/` 與 `app/` 每個納入的 module 都至少貢獻一個 decl 節點(id 以 `<Module>.` 起頭)。**這是對契約卡第 5 條的偏離**,建議回填契約卡把「548」改成「S5 基線 526」或改寫為結構守門的敘述;不同意就把門檻改回去(測試會以 526 失敗)。
+
+### 其他決定
+
+- **F001 T5 `test_best_effort_run` 一併刪除**:文檔的刪除清單沒點名它,但它測的是調度引擎的例外包裹(`runBackends` 把 `bRun` 的例外轉成報告),而本 feature 明文「不在管線層包 `try`」——機制與它的測試一起退場。同理 extraction/F004 的 `test_hiedb_facts_smoke`(後端值與註冊表)也刪除;F004 群組剩 T1 / T4–T7 / T9–T11 與 G-E003 兩條
+- **`test_codegraph_output_unchanged` 等 module 層呼叫點**統一走測試輔助 `moduleLayer :: FilePath -> ProjectMeta -> IO ExtractResult`(`scanImports` + `sort`,與舊 `runBackends` 的排序行為一致),五份黃金檔 byte 不變
+- **G-E004 對帳表**:`contractLabelTable` 的「對帳 1」改為 `scanImports` / `ensureHie` / `ensureIndex` / `readIndexFacts`(契約面)與 `importScanName` / `hiedbName` / `Stages` / `runPipeline`(非契約面);G-E004 文檔末尾補「S5 後續」一節指向新位置,`test_backend_constant_labels` 由 `test_pipeline_module_surface` 承接
+- `Knot.Graph` 與 `Knot.Meta.Types` 的 haddock 順手改掉 `erLevel` / `erReports` / `HieInfo` 字樣——純註解,為了讓 `test_no_backend_residue` 的全域 grep 成立
+- 守門計數:`knot-internal` 26 / 17(本 feature 一進一出不變,project-meta/F004 一出:27 → 26)
+
+### 測試結果(2026-08-22)
+
+首次完整跑:139 條中 137 綠、2 紅——`test_no_hie_residue`(測試自己的 grep 字串是殘留,改以片段拼接)與 `test_two_layer_selfcheck`(526 < 548,即上述偏差);修正後兩條單跑皆綠。共同閘門(`cabal clean && cabal build all --enable-tests --ghc-options=-Werror` + `cabal test`)的結果記在 export-query/F005 的實作備註。共同閘門(`cabal clean` 後 `-Werror` 全建 exit 0、`cabal test` 139 / 139 綠,184 s)通過。selfcheck 數字(對 knot-hs 自身,不含 test):facts 8,349(decls 602、refs 7,453)、nodes 526、edges 1,954、warnings 0,兩次 `extract` 逐欄相等。

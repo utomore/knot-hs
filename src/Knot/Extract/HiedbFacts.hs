@@ -1,11 +1,10 @@
 -- | hiedb-facts 模組:讀 hiedb 索引 SQLite(@mods@ \/ @defs@ \/ @decls@ \/
--- @refs@ 四張表)→ @FactDecl@ \/ @FactRef@ 事實流,並組裝 @Backend@ 的
--- hiedb 實例。
+-- @refs@ 四張表)→ @FactDecl@ \/ @FactRef@ 事實流——fact-pipeline 的第四站
+-- (F007 起;F006 的過渡期 @Backend@ 轉接器已隨 @Knot.Extract.Backend@ 拆掉)。
 --
 -- Level 2 契約:@.design/subsystems/extraction/design.md@「模組間公開介面」
--- 的 'readIndexFacts',以及 @Backend@ hiedb 實例的__執行面__ @bRun@
--- (經 'ensureIndex' 取得 'IndexHandle' 後呼叫 'readIndexFacts');落實抽取
--- 規則 4(fromDecl 由 span 包含 join 解析、取最內層)、4a(產生碼的三個面
+-- 的 'readIndexFacts'(管線把 'ensureIndex' 取得的 'IndexHandle' 交進來);
+-- 落實抽取規則 4(fromDecl 由 span 包含 join 解析、取最內層)、4a(產生碼的三個面
 -- 只標註不過濾:@frGenerated@ 原樣轉載 @refs.is_generated@,@fdGenerated@ 與
 -- @frTargetGenerated@ 由 @defs@ \\ @decls@ 判定,見 'qDeclOccs')、
 -- 7(best-effort:單查詢失敗 → 警告)、8(決定性)。
@@ -28,10 +27,8 @@
 -- * namespace 藏在 @occ@ 的字串前綴裡(@\"v:\"@ \/ @\"c:\"@ \/ @\"t:\"@ \/
 --   @\"z:\"@ \/ @\"f\<父型別\>:\"@,見上游 @HieDb/Types.hs@ 的 @toNsChar@)
 module Knot.Extract.HiedbFacts
-  ( -- * 後端
-    hiedbBackend
-    -- * Level 2 模組介面
-  , readIndexFacts
+  ( -- * Level 2 模組介面
+    readIndexFacts
     -- * 內部純函數(僅為 1-to-1 測試而匯出,非 Level 2 契約面)
   , parseOcc
   , declKindOf
@@ -42,12 +39,7 @@ module Knot.Extract.HiedbFacts
   , isGeneratedName
   ) where
 
-import Control.Exception
-  ( Exception (..)
-  , SomeException
-  , throwIO
-  , try
-  )
+import Control.Exception (SomeException, displayException, try)
 import Data.List (minimumBy, sort)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
@@ -64,72 +56,15 @@ import Database.SQLite.Simple
   )
 import Database.SQLite.Simple.FromRow (FromRow (..), field)
 
-import Knot.Extract.Backend (Backend (..), ProbeResult (..), hiedbName)
-import Knot.Extract.BuildDriver (ensureHie)
-import Knot.Extract.HieIndex (IndexHandle, ensureIndex, ihDbPath, ihNotes)
+import Knot.Extract.HieIndex (IndexHandle, hiedbName, ihDbPath, ihNotes)
 import Knot.Extract.Types
-  ( CapabilityLevel (..)
-  , DeclKind (..)
-  , ExtractFailure (..)
-  , ExtractOptions
+  ( DeclKind (..)
   , ExtractWarning (..)
   , Fact (..)
   , NameSpace (..)
   , QualName (..)
   )
 import Knot.Meta.Types (ModuleName (..), ProjectMeta (..), SourceFile (..))
-
---------------------------------------------------------------------------------
--- 後端組裝
---------------------------------------------------------------------------------
-
--- | hiedb 後端(F006 起的__過渡期轉接器__,#7 two-layer-contract 連同 @Backend@
--- 一起拆掉):沒有執行檔可探測,@bProbe@ 恆 @Available@;執行面串
--- 'ensureHie' → 'ensureIndex' → 'readIndexFacts',建置 / 版本 / 索引失敗走
--- @bRun@ 的失敗通道('HiedbFactsError')。
-hiedbBackend :: Backend
-hiedbBackend = Backend
-  { bName  = hiedbName
-  , bLevel = DeclLevel
-  , bProbe = \_ _ -> pure Available
-  , bRun   = runHiedb
-  }
-
--- | @bRun@ 沒有失敗通道(@IO ([Fact], [ExtractWarning])@),而 'ensureIndex'
--- 會回 @Left@(探測過了但 @hiedb index@ 炸掉)→ 以 'HiedbFactsError' 抛出,
--- 由 @Knot.Extract.Backend.runOne@ 轉成 @brUsed = False@ + 原文。
---
--- 不改成「回空事實 + 警告」:那會讓 @brUsed = True@、@erLevel@ 升到
--- @DeclLevel@,對外謊報函式級成功——比失敗更糟。
-runHiedb :: ExtractOptions -> ProjectMeta -> IO ([Fact], [ExtractWarning])
-runHiedb opts pm = do
-  layout <- either (throwIO . HiedbFactsError . renderFailure) pure =<< ensureHie opts pm
-  h      <- either (throwIO . HiedbFactsError . renderFailure) pure =<< ensureIndex opts layout
-  readIndexFacts h pm
-
--- | 過渡期的失敗文字(正式的 CLI 渲染屬 export-query #5 cli-zero-setup)。
--- @BuildFailed@ 只取 @bfDetail@ 首行:cabal 的輸出已由 build-driver 即時轉發到
--- stderr,尾段再塞進報告只會讓兩次執行的摘要不相等(規則 8 決定性)。
-renderFailure :: ExtractFailure -> Text
-renderFailure f = case f of
-  BuildFailed c d      -> T.pack "build failed (" <> c <> T.pack "): " <> firstLine d
-  VersionMismatch h k  -> T.pack "hie/ghc version mismatch: .hie files were produced by GHC "
-                            <> h <> T.pack ", but this build of knot uses GHC " <> k
-                            <> T.pack "; install a matching knot with: cabal install knot-hs -w ghc-" <> h
-  IndexFailed d        -> T.pack "hiedb index failed: " <> d
-  NoSources            -> T.pack "no Haskell sources to extract"
- where
-  firstLine = T.takeWhile (\c -> c /= '\r' && c /= '\n')
-
--- | 索引就緒失敗的例外通道;'displayException' 即 'ensureIndex' 的 @Left@ 原文
--- (含 @\"hiedb index failed: \"@ 等 F003 的穩定前綴)。
-newtype HiedbFactsError = HiedbFactsError Text
-
-instance Show HiedbFactsError where
-  show (HiedbFactsError t) = T.unpack t
-
-instance Exception HiedbFactsError where
-  displayException (HiedbFactsError t) = T.unpack t
 
 --------------------------------------------------------------------------------
 -- Level 2 模組介面

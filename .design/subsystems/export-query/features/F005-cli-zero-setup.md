@@ -3,7 +3,7 @@ id: F005
 type: feature
 title: cli-zero-setup
 description: knot extract 砍五個旗標,接上整體失敗 exit 1 通道,--summary 收斂
-status: open
+status: done
 created: 2026-08-22
 updated: 2026-08-22
 depends-on: [F001, F002, F004, extraction/F001, extraction/F005, extraction/F007, project-meta/F001, project-meta/F004, graph-core/F001]
@@ -217,14 +217,14 @@ runExtractCmdWith
 
 ## TodoList
 
-- [ ] T1: `Knot.App.Cli`——`ExtractCmd` 砍五欄、`extractParser` 砍五段、刪 `backendReader` 與 `BackendChoice` import  `dep: -`
-- [ ] T2: 四個對映同步上游新形狀(`toMetaOptions` 無 `hieDirOverride`、`toExtractOptions` 只填 `rootDir`、`toBuildOptions` 固定 `False`)  `dep: T1`
-- [ ] T3: `Knot.App.Report`——`extractNoteLines` 改純警告行;新增 `extractFailureLines` 四分支(`VersionMismatch` 含安裝指令)  `dep: -`
-- [ ] T4: `Knot.App.Run`——`runExtractCmdWith` 注入 `extract`,`Left` 短路(exit 1、不寫檔、在 `--summary` 分流與 `--strict` 之前);`runExtractCmd = runExtractCmdWith extract`  `dep: T2, T3`
-- [ ] T5: `Knot.App.Summary.renderFactSummary` 改版(計數行全建構子、逐筆只印 M / I、刪 level / backends / `?` 行)  `dep: -`
-- [ ] T6: 測試搬遷——F004 的 `test_extract_flags_parse` / `test_extract_options_mapping` / `test_report_note_lines` / `test_render_fact_summary` 改寫;`baseExtractCmd` / `fullExtractCmd` 去五欄;`mkCollisionProject` 改為可建置(library + sub-library);真實管線測試改走 `buildable` 暫存副本  `dep: T4, T5`
-- [ ] T7: 端對端——乾淨 `buildable` 副本 `runCommand ["extract", dir]` 一次跑完,輸出含 decl 節點與 `calls` 邊;`knot query` 四子命令回歸  `dep: T6`
-- [ ] T8: 三件套共同閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` exit 0、`cabal test` 全綠(含 extraction/F007、project-meta/F004 的 1-to-1 測試與五份黃金檔)  `dep: T7`
+- [x] T1: `Knot.App.Cli`——`ExtractCmd` 砍五欄、`extractParser` 砍五段、刪 `backendReader` 與 `BackendChoice` import  `dep: -`
+- [x] T2: 四個對映同步上游新形狀(`toMetaOptions` 無 `hieDirOverride`、`toExtractOptions` 只填 `rootDir`、`toBuildOptions` 固定 `False`)  `dep: T1`
+- [x] T3: `Knot.App.Report`——`extractNoteLines` 改純警告行;新增 `extractFailureLines` 四分支(`VersionMismatch` 含安裝指令)  `dep: -`
+- [x] T4: `Knot.App.Run`——`runExtractCmdWith` 注入 `extract`,`Left` 短路(exit 1、不寫檔、在 `--summary` 分流與 `--strict` 之前);`runExtractCmd = runExtractCmdWith extract`  `dep: T2, T3`
+- [x] T5: `Knot.App.Summary.renderFactSummary` 改版(計數行全建構子、逐筆只印 M / I、刪 level / backends / `?` 行)  `dep: -`
+- [x] T6: 測試搬遷——F004 的 `test_extract_flags_parse` / `test_extract_options_mapping` / `test_report_note_lines` / `test_render_fact_summary` 改寫;`baseExtractCmd` / `fullExtractCmd` 去五欄;`mkCollisionProject` 改為可建置(library + sub-library);真實管線測試改走 `buildable` 暫存副本  `dep: T4, T5`
+- [x] T7: 端對端——乾淨 `buildable` 副本 `runCommand ["extract", dir]` 一次跑完,輸出含 decl 節點與 `calls` 邊;`knot query` 四子命令回歸  `dep: T6`
+- [x] T8: 三件套共同閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` exit 0、`cabal test` 全綠(含 extraction/F007、project-meta/F004 的 1-to-1 測試與五份黃金檔)  `dep: T7`
 
 ## 1-to-1 測試對照表
 
@@ -241,4 +241,25 @@ runExtractCmdWith
 
 ## 實作備註
 
-(撰寫時留空)
+### 落地(2026-08-22)
+
+`app/` 四個模組照「實作方式」落地,無介面偏差:`ExtractCmd` 五欄、`extractParser` 四段、`backendReader` 刪除;`toBuildOptions` 固定 `moduleOnly = False`;`extractNoteLines` 純警告行、`extractFailureLines` 四分支;`runExtractCmdWith` 注入 `extract`、`Left` 短路在 `--summary facts` / `graph` 分流與 `--strict` 之前;`renderFactSummary` 計數行五建構子分計、逐筆只印 M / I。`renderMetaSummary` 現況本就不印 `.hie`,以 `test_render_meta_summary_no_hie` 釘住。
+
+測試搬遷依文檔:`mkCollisionProject` 改為 library + `library sub`(各一個 `Dup`,各帶一個頂層宣告——decl 層零宣告會被規則 3 判 `IndexFailed`,這點文檔沒寫到)+ `cabal.project`,真的被 cabal 建置成功且 `cgWarnings` 恰一條;`test_run_extract` / `test_run_query` / `test_run_command_dispatch` 的真實管線段全部改走 `buildable` 暫存副本;`test_run_extract_failure_channel` 以假 `extract` 驗五種情況;`test_zero_setup_end_to_end` 對全新副本(斷言起始無 `.knot/`、無 `.hie`)跑 `runCommand ["extract", dir]`,讀回 JSON 含 `Demo.Core.` 起頭且帶 `source_location` 的節點與 `relation = "calls"` 的邊,`.knot/.gitignore` 存在,`query find Demo` 仍命中。
+
+整套測試時間:184 s(F006 基準 204 s;真實管線改走 buildable 副本後反而變快——graph fixture 原本每次都要等 cabal 失敗)。
+
+### 共同閘門(T8,2026-08-22)
+
+| 項目 | 結果 |
+|---|---|
+| `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` | exit 0,零警告 |
+| `cabal test` | **139 / 139 綠**(184 s);含 extraction/F007 7 條、project-meta/F004 3 條、本 feature 4 條、五份黃金檔 byte 不變 |
+| MagicFarmer(唯讀,`-o` 指向暫存) | `Right`:1,580 nodes、6,576 edges;`scan-graph.mjs` 解析成功,關係分布 calls 3,842 / contains 1,513 / uses 931 / imports 290 |
+| particle-magic(唯讀,`-o` 指向暫存) | `Right`:1,567 nodes、7,027 edges;`scan-graph.mjs` 解析成功,關係分布 calls 4,683 / contains 1,521 / uses 696 / imports 127 |
+
+兩個標的原本都沒有 `.knot/`,一個命令(`knot extract <path> -o <暫存>`)從零建置到兩層圖——ADR-006 的端對端在真實專案上成立;兩個標的內除了新建的 `.knot/`(自帶 `.gitignore`)沒有任何異動。`scan-graph.mjs` 回 exit 1 是它自己的可信度警告(從 knot-hs 目錄執行,圖的 commit 與當前 HEAD 不同、子系統 code-paths 覆蓋率低),不是解析失敗。
+
+### 偏差
+
+本 feature 無。三件套唯一的偏差在 extraction/F007(selfcheck 節點門檻 548 → 526,理由與逐 id 比對見其實作備註)。

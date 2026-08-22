@@ -8,10 +8,13 @@
 -- 這是「@cgWarnings@ 真的走到 stderr」這條硬性要求可被端到端測到的關鍵。
 --
 -- 錯誤策略在此交會:匯出面 best-effort(有警告仍 exit 0,@--strict@ 改 1)、
--- 查詢面 fail-fast('LoadError' 直接 exit 1),而__查無結果 exit 0__。
+-- extraction 的整體失敗 fail-fast(@Left ExtractFailure@ → exit 1、不寫檔,
+-- 與 @--strict@ 無關,ADR-006)、查詢面 fail-fast('LoadError' 直接 exit 1),
+-- 而__查無結果 exit 0__。
 module Knot.App.Run
   ( runCommand
   , runExtractCmd
+  , runExtractCmdWith
   , runQueryCmd
   ) where
 
@@ -35,6 +38,7 @@ import Knot.App.Cli
 import Knot.App.Report
   ( emitNotes
   , exportNoteLines
+  , extractFailureLines
   , extractNoteLines
   , graphNoteLines
   , metaNoteLines
@@ -44,7 +48,8 @@ import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummar
 import Knot.Export (writeCodegraph)
 import Knot.Export.Types (ExportReport (..))
 import Knot.Extract (extract)
-import Knot.Extract.Types (ExtractResult (..))
+import Knot.Extract.Types (ExtractFailure, ExtractResult (..))
+import qualified Knot.Extract.Types as XT
 import Knot.Graph (buildGraph)
 import Knot.Graph.Types (CodeGraph (..))
 import Knot.Meta (loadProjectMeta)
@@ -71,8 +76,21 @@ runCommand hOut hErr cmd = case cmd of
 --------------------------------------------------------------------------------
 
 -- | 四站管線;@--summary@ 三條路徑各在自己那一站收工。
+-- 'Main' 與既有呼叫端用的進入點:接上真實的 'extract'。
 runExtractCmd :: Handle -> Handle -> ExtractCmd -> IO ExitCode
-runExtractCmd hOut hErr cmd = do
+runExtractCmd = runExtractCmdWith extract
+
+-- | 四站管線,@extract@ 以參數注入——執行層對上游進入點多型,跟兩個
+-- 'Handle' 注入是同一個理由(端到端可測:測試給假的 @extract@,就能驗
+-- @Left@ 通道而不必造一個真的建不起來的專案)。
+--
+-- @Left ExtractFailure@ 的短路發生在 @--summary facts@ \/ @graph@ 分流與
+-- @--strict@ 判定__之前__:印訊息、exit 1、不寫檔、到此為止。
+-- @--summary meta@ 站在 @extract@ 之前收工,不受影響。
+runExtractCmdWith
+  :: (XT.ExtractOptions -> ProjectMeta -> IO (Either ExtractFailure ExtractResult))
+  -> Handle -> Handle -> ExtractCmd -> IO ExitCode
+runExtractCmdWith extractFn hOut hErr cmd = do
   pm <- loadProjectMeta (toMetaOptions cmd)
   emitNotes hErr (metaNoteLines pm)
   let nMeta = length (pmWarnings pm)
@@ -81,39 +99,42 @@ runExtractCmd hOut hErr cmd = do
       TIO.hPutStr hOut (renderMetaSummary pm)
       finish nMeta
     _ -> do
-      er <- extract (toExtractOptions cmd) pm
-      emitNotes hErr (extractNoteLines er)
-      let nExtract = nMeta + length (erWarnings er)
-      case ecSummary cmd of
-        Just SummaryFacts -> do
-          TIO.hPutStr hOut (renderFactSummary er)
-          finish nExtract
-        _ -> do
-          let cg = buildGraph (toBuildOptions cmd) pm er
-          -- ↓ 硬性要求的落點:cgWarnings 的唯一出口
-          emitNotes hErr (graphNoteLines cg)
-          let nGraph = nExtract + length (cgWarnings cg)
+      extracted <- extractFn (toExtractOptions cmd) pm
+      case extracted of
+        Left failure -> do
+          emitNotes hErr (extractFailureLines failure)
+          pure (ExitFailure 1)   -- 不看 --strict、不看 --summary、不寫檔
+        Right er -> do
+          emitNotes hErr (extractNoteLines er)
+          let nExtract = nMeta + length (erWarnings er)
           case ecSummary cmd of
-            Just SummaryGraph -> do
-              TIO.hPutStr hOut (renderGraphSummary cg)
-              finish nGraph
+            Just SummaryFacts -> do
+              TIO.hPutStr hOut (renderFactSummary er)
+              finish nExtract
             _ -> do
-              -- writeCodegraph 讓 IOException 原樣上拋(其 haddock 明文
-              -- 「由 F004 的 CLI 層決定 exit code 與訊息」),在此收斂
-              r <- try (writeCodegraph (toExportOptions cmd) cg)
-              case r of
-                Left e -> do
-                  emitNotes hErr
-                    [T.pack ("export: " <> show (e :: IOException))]
-                  pure (ExitFailure 1)
-                Right rep -> do
-                  emitNotes hErr (exportNoteLines rep)
-                  TIO.hPutStr hOut (wroteLine rep)
+              let cg = buildGraph (toBuildOptions cmd) pm er
+              -- ↓ 硬性要求的落點:cgWarnings 的唯一出口
+              emitNotes hErr (graphNoteLines cg)
+              let nGraph = nExtract + length (cgWarnings cg)
+              case ecSummary cmd of
+                Just SummaryGraph -> do
+                  TIO.hPutStr hOut (renderGraphSummary cg)
                   finish nGraph
+                _ -> do
+                  -- writeCodegraph 讓 IOException 原樣上拋(其 haddock 明文
+                  -- 「由 F004 的 CLI 層決定 exit code 與訊息」),在此收斂
+                  r <- try (writeCodegraph (toExportOptions cmd) cg)
+                  case r of
+                    Left e -> do
+                      emitNotes hErr
+                        [T.pack ("export: " <> show (e :: IOException))]
+                      pure (ExitFailure 1)
+                    Right rep -> do
+                      emitNotes hErr (exportNoteLines rep)
+                      TIO.hPutStr hOut (wroteLine rep)
+                      finish nGraph
  where
-  -- 假設 A2:pmWarnings + erWarnings + cgWarnings 任一非空即視為有跳檔;
-  -- brUsed = False 的「降級」不算(否則沒裝 hiedb 的環境在 --backend auto
-  -- 下永遠 exit 1,與 ADR-002「降級而非失敗」直接衝突)
+  -- 假設 A2:pmWarnings + erWarnings + cgWarnings 任一非空即視為有跳檔
   finish n
     | ecStrict cmd && n > 0 = do
         emitNotes hErr [T.pack ("strict: " <> show n <> " warnings")]

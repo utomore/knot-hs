@@ -316,3 +316,16 @@ module Knot.Query.Types
 
 專案沒有納管的 `codegraph.json`(knot 是自己的產生器,圖一向 ad-hoc 生成),故收尾的
 「讓圖跟上」一步略過。需要時可跑 `knot extract . --db <專案外路徑>` 重生。
+
+### S5 後續(2026-08-22,extraction/F007 two-layer-contract)
+
+`Knot.Extract.Backend` 整個模組已隨 F007 刪除,本文檔對帳第 1 處與 M3 的標示標的搬家如下;結論(「具名常數是非契約面、`ewSource` 的值域才是契約」)不變:
+
+| 原位置 | 新位置 | 標籤 |
+|---|---|---|
+| `Extract/Backend.hs` 的 `importScanName` | `src/Knot/Extract/ImportScan.hs`「站名常數(非契約面)」 | 非契約面 |
+| `Extract/Backend.hs` 的 `hiedbName` | `src/Knot/Extract/HieIndex.hs`「站名常數(非契約面)」 | 非契約面 |
+| `Extract/Backend.hs` 的 `runBackends`(調度引擎) | `src/Knot/Extract/Pipeline.hs` 的 `Stages` / `runPipeline`「可注入的四站(非契約面)」 | 非契約面 |
+| `Backend` / `ProbeResult`(模組間公開介面) | 廢除;模組間公開介面改為 `scanImports` / `ensureHie` / `ensureIndex` / `readIndexFacts` | 契約面 |
+
+`test_backend_constant_labels`(T4)由 extraction/F007 的 `test_pipeline_module_surface` 改寫承接;`contractLabelTable` 的「對帳 1」列同步改指上表的新位置(`test_contract_label_table` 仍鎖住全表)。
