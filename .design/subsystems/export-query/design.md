@@ -240,9 +240,9 @@ cli-assembly 不在圖內:它是 executable 的組裝層,串接四個子系統,�
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 5 | cli-zero-setup | 砍五個旗標、`Left ExtractFailure` → exit 1 通道、`--summary` 不印能力等級與 `.hie`、Options 對映同步上游新形狀 | cli-assembly | #4 | - |
+| 5 | cli-zero-setup | 砍五個旗標、`Left ExtractFailure` → exit 1 通道、`--summary` 不印能力等級與 `.hie`、Options 對映同步上游新形狀 | cli-assembly | #4, extraction/F007, project-meta/F004 | F005 |
 
-(共 5 個 features、3 個階段。**#5 是「S5 收尾三件套」之一**:它、extraction 的 two-layer-contract、project-meta 的 hie-retire 三者改的是同一組 DTO 的定義端與消費端,**必須同一批提交**——任一邊先落地都會讓另一邊編不過。「依賴」欄無法引對方的 feature id,因為尚未建檔;建檔後回填)
+(共 5 個 features、3 個階段。**#5 是「S5 收尾三件套」之一**:它、extraction 的 two-layer-contract、project-meta 的 hie-retire 三者改的是同一組 DTO 的定義端與消費端,**必須同一批提交**——任一邊先落地都會讓另一邊編不過。2026-08-22 三份設計齊備,批次順序裁定為 extraction/F007 → project-meta/F004 → export-query/F005,#5 是讓整套重新編得過、測試重新跑得動的收尾者)
 
 ## Feature 契約卡
 

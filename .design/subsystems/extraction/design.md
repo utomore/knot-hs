@@ -119,7 +119,7 @@ data ExtractWarning = ExtractWarning   -- 比照 MetaWarning 模式
 
 1. **納入範圍**:只處理 `pmSources` 中 `sfIncluded = True` 的檔案;只建置 `pkgComponents` 中 `compExcluded = False` 的 component。**`.hie` 的清單由 extraction 自己列舉**(`.knot/build/` 各 component 輸出目錄下),不再來自 project-meta
 2. **來源職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強);`FactDecl` / `FactRef` **永遠且只**來自 hie-index + hie-facts;`FactModule` 由 import-scan 產出;無 module 標頭的檔案依 Haskell 語意視為 `Main`(多個 `Main` 以 `fmFile` 區分)
-3. **兩層缺一不可**(取代舊規則 3「auto 合成」):import-scan 與 hie-index 兩者**都必須整體成功**才回 `Right ExtractResult`;任一整體失敗回 `Left ExtractFailure`,**不產出部分事實流**。沒有「只跑其中一個」的模式
+3. **兩層缺一不可**(取代舊規則 3「auto 合成」):import-scan 與 hie-index 兩者**都必須整體成功**才回 `Right ExtractResult`;任一整體失敗回 `Left ExtractFailure`,**不產出部分事實流**。沒有「只跑其中一個」的模式。**decl 層「成立」的判準是 hie-facts 至少讀出一筆 `FactDecl`**:`ensureIndex` 回 `Right` 只代表索引檔就緒,索引讀不出任何頂層宣告(索引檔壞掉、`mods` / `defs` 查詢失敗、全部 `.hie` 單檔失敗)一律視為 `IndexFailed`,不得以「零 decl 事實 + 警告」的 `Right` 混過去——那正是 ADR-006 要消滅的降級成功(2026-08-22 F007 裁決)
 4. **fromDecl 由 hie-facts 解析**:`FactRef.frFromDecl` 在事實產出時即填好(以 span 包含關係 join 得出);graph-core 不做 span 比對。span 包含是一對多,取 **span 最小(最內層)** 的候選;span 大小相同時依 `(qnSpace, qnOcc)` 字典序破雷。**候選集是該檔全部 `decls` 列,不得以 `is_root` 過濾**——一般頂層函式繫結是 `is_root = 0`,帶著該過濾 `calls` 邊會全空而查詢不報錯(2026-08-21 實測)
 4a. **產生碼只標註、不過濾**(G-E003):`frGenerated` 原樣轉載 hiedb `refs.is_generated`;`fdGenerated` / `frTargetGenerated` 由「該名字在其 module 的 `defs` 有列、`decls` 無列」判定——這是結構事實,不是 `$f` 前綴的名字啟發式。要不要丟棄是 graph-core 規則 3 的決定。`decls` 表整個讀不到或為空時,兩個旗標一律 `False` 並發一則警告;**絕不因為查不到就把全部宣告當成產生碼**
 5. **插樁建置由 extraction 驅動**(ADR-006):每次 `extract` 都對目標專案執行**一次** `cabal build all`(納入的 test-suite / benchmark 以 `--enable-tests` / `--enable-benchmarks` 帶入),加上 `-fwrite-ide-info` 與指向 `.knot/build/` 的 builddir、**不帶 `-hiedir`**、**帶 `--project-dir=<root>`**:cabal 只認 `rootDir`——有 `cabal.project` 就用它,沒有就以該目錄的 `.cabal` 為隱含專案,**不會往上層目錄找別人的 `cabal.project`**(否則指向子目錄時會把上層整個專案建進 `.knot/`;F006 實測)。語意是「指到哪、建哪」;monorepo 子套件若依賴上層 `cabal.project` 的設定,使用者應指向 monorepo 根。**增量交給 cabal**——它用內容雜湊判斷要不要重編,knot 不自己發明一套 mtime 比對(那會漏掉 `.cabal` 改動、旗標改動、相依升版)。沒改動時是一次 up-to-date 檢查(實測 247 ms)。**cabal 的 stdout / stderr 即時轉發到呼叫端的 stderr**——這是轉發子程序輸出,不是 library 自行列印(「不印」的對象是警告與報告,那些仍由 CLI 層印);失敗時尾段進 `bfDetail`。任一 component 建置失敗 → `BuildFailed`,**不 fallback**
@@ -237,7 +237,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 |---|---------|-----------|------|------|-----|
 | 5 | build-driver | 一次 `cabal build all` 插樁建置進 `.knot/build/`、`.hie` 由 cabal 按 component 分目錄、`.gitignore` 自建、`BuildFailed` 語意 | build-driver | - | F005 |
 | 6 | hiedb-embed | hiedb 改 library 嵌入、列舉 `HieLayout`、版本檢查改為失敗、增量索引 | hie-index | #5 | F006 |
-| 7 | two-layer-contract | 契約收斂(砍 `BackendChoice` / `CapabilityLevel` / `BackendReport`、加 `ExtractFailure`)、fact-pipeline 全有全無、移除探測與降級 | fact-pipeline、import-scan | #5, #6 | - |
+| 7 | two-layer-contract | 契約收斂(砍 `BackendChoice` / `CapabilityLevel` / `BackendReport`、加 `ExtractFailure`)、fact-pipeline 全有全無、移除探測與降級 | fact-pipeline、import-scan | #5, #6 | F007 |
 
 (共 7 個 features、3 個階段;階段三全部完成即 S5 在 extraction 側交付。`#5` 與 `#6` 可平行——`HieLayout` 已在契約定義,`#6` 可先以固定佈局測試)
 

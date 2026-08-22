@@ -183,9 +183,9 @@ indexSources :: MetaOptions -> [PackageMeta] -> IO ([SourceFile], [MetaWarning])
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 4 | hie-retire | 移除 hie-locate 模組、`pmHie` / `HieInfo` / `HieDirSource` / `hieDirOverride`,F003 改 closed | (移除 hie-locate) | - | - |
+| 4 | hie-retire | 移除 hie-locate 模組、`pmHie` / `HieInfo` / `HieDirSource` / `hieDirOverride`,F003 改 closed | (移除 hie-locate) | extraction/F007 | F004 |
 
-(共 4 個 features、3 個階段。**#4 的跨子系統順序約束**:必須在 extraction 的 two-layer-contract 與 export-query 的 CLI 旗標移除**之後或同一批**落地——那兩邊是 `pmHie` / `hieDirOverride` 僅存的消費端,先刪定義會讓它們編不過。「依賴」欄填 `-` 是因為對方的 feature 文檔尚未建檔、沒有 id 可引;建檔後回填)
+(共 4 個 features、3 個階段。**#4 的跨子系統順序約束**:必須在 extraction 的 two-layer-contract 與 export-query 的 CLI 旗標移除**之後或同一批**落地——那兩邊是 `pmHie` / `hieDirOverride` 僅存的消費端,先刪定義會讓它們編不過。2026-08-22 三份設計齊備後裁定的批次順序:extraction/F007 → project-meta/F004 → export-query/F005,共同閘門在最後;實查 `pmHie` 的 library 側消費者自 extraction/F006 起已為零,僅存消費端是 `app/Knot/App/Cli.hs` 的 `toMetaOptions`)
 
 ## Feature 契約卡
 
