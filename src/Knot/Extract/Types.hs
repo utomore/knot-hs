@@ -2,7 +2,8 @@
 --
 -- Level 2 契約:@.design/subsystems/extraction/design.md@「對外契約」「事實流 DTO」。
 -- 'ModuleName' 依委派決策 D2 直接共用 project-meta 契約(@Knot.Meta.Types@),
--- 本 module 不重複定義。
+-- 本 module 不重複定義,但**代為 re-export**:契約的四個 DTO 欄位都是這個型別,
+-- 消費端不該為了替收到的值命名而再開一個 import 繞回源頭(G-E004、ADR-005)。
 --
 -- deriving 說明:全部 DTO 有 'Eq' / 'Show';'Fact' 與其成員
 -- ('QualName' / 'NameSpace' / 'DeclKind')與 'CapabilityLevel' 另有 'Ord',
@@ -21,6 +22,8 @@ module Knot.Extract.Types
     -- * 回報
   , BackendReport (..)
   , ExtractWarning (..)
+    -- * 共用詞彙型別(re-export 自 project-meta,見 ADR-005)
+  , ModuleName (..)
   ) where
 
 import Data.Text (Text)

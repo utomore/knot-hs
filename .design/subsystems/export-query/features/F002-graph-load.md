@@ -5,7 +5,7 @@ title: graph-load
 description: 讀回 codegraph.json、驗證結構並分流出查詢用依賴圖
 status: done
 created: 2026-08-21
-updated: 2026-08-21
+updated: 2026-08-22
 depends-on: [F001, graph-core/F001]
 related-adr: [ADR-003]
 related-feature: []
@@ -334,7 +334,7 @@ data QueryGraph = QueryGraph { … }
 
 | 匯出 | 模組 | 為什麼需要匯出 |
 |---|---|---|
-| `NodeId (..)` | `Knot.Query.Types` | 契約在 `QueryCommand` / `QueryResult` 用到 `NodeId`,但**沒定義它**;本 feature 補上(假設 A1)。建構子必須匯出:`F004` 要從 CLI 字串建 id |
+| ~~`NodeId (..)`~~ **已升為契約面** | `Knot.Query.Types` | 契約在 `QueryCommand` / `QueryResult` 用到 `NodeId`,但**沒定義它**;本 feature 補上(假設 A1)。建構子必須匯出:`F004` 要從 CLI 字串建 id → **G-E004 更新**:`design.md`「對外契約 › 查詢面」後來補上了 `newtype NodeId = NodeId Text` 的定義,假設 A1 因此消解;本項不再是非契約面,已移入 `Knot.Query.Types` 的對外契約組 |
 | `QueryNode (..)` | `Knot.Query.Types` | `F003` 的 `FoundNodes [(NodeId, Text, FilePath)]` 要讀 `qnId` / `qnLabel` / `qnFile` |
 | `QueryGraph (..)`(七個欄位選擇器) | `Knot.Query.Types` | `F003` 的四種演算法要讀 `qgNodes` / `qgIndex` / `qgForward` / `qgReverse` / `qgOutDeg` / `qgInDeg`。`Knot.Query`(對 `F004` 的面)只再匯出**抽象型別**,欄位不外露 |
 | `parseQueryGraph :: FilePath -> ByteString -> Either LoadError QueryGraph` | `Knot.Query.Load` | 1-to-1 測試要直接測解析與驗證的分支,不落地檔案(T3 / T4) |
@@ -396,6 +396,10 @@ data QueryGraph = QueryGraph { … }
   `Knot.Graph.Types`,`Knot.Query.Load` 多一個上游相依、`depends-on` 的 `graph-core/F001` 從
   「僅測試路徑」升為產品面相依,測試也不必 qualified import;代價是查詢面與內部 IR 重新耦合,
   且要同步放寬 graph-core 那段 haddock 的不變式
+  → **已消解(G-E004,2026-08-22)**:`design.md`「對外契約 › 查詢面」後來補上了
+  `newtype NodeId = NodeId Text`(註明「查詢面自有,與 graph-core 的同名型別無關」),
+  本假設採取的方向獲得契約背書。連帶效果:`Knot.Query.Types.NodeId` 不再是非契約面,
+  標籤已由 G-E004 移入對外契約組
 - A2:`links` 頂層鍵缺席時的行為契約未定(驗收標準只點名「缺 `nodes`」)→ 採取:**當作空陣列,
   載入成功**(下游 `scan-graph.mjs:89` 也是 `graph.links ?? graph.edges ?? []`;而「有節點沒有邊」
   是語意上完全合法的圖)。**不接受 `edges` 別名**——`ADR-003` 的欄位名是 `links`,接別名等於私自

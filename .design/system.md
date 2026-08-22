@@ -35,7 +35,7 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
 ## 技術棧與環境
 
 - **語言 / 編譯器**:Haskell,GHC 9.14.1(base 4.22),`default-language: GHC2024`,cabal-install 3.16.1.0
-- **架構模式**:單一執行檔 `knot`,內部為四個 Bounded Context 的單向資料流管線
+- **架構模式**:單一執行檔 `knot`,內部為四個 Bounded Context 的單向資料流 DAG(拓撲見下)
 - **硬性版本鎖**:`.hie` 的讀寫綁 GHC 版本,knot-hs 必須用與目標專案相同的 GHC 編譯(→ ADR-001)
 - **關鍵外部依賴**:
   - `hiedb` 執行檔(選用):函式級抽取的後端,由使用者以同版 GHC 加 `--allow-newer=hie-compat:base` 安裝;不存在時函式級能力自動降級,module 級不受影響(→ ADR-002)
@@ -92,7 +92,7 @@ cabal clean && cabal build all --enable-tests --ghc-options=-Werror
    - 頂層選填 `directed`、`built_at_commit`
    - relation 依賴類(`imports`、`calls`、`uses`、`implements` 等十種)才算進下游依賴圖;結構類(`contains`、`method`、`defines`、`declares`、`rationale_for`、`part_of` 六種)不算。兩份名單以 ADR-003 為準,並與 `scan-graph.mjs` 的 `DEP_RELATIONS` / `STRUCTURAL_RELATIONS` 逐項對齊
 2. 查詢結果(S4):stdout 文字輸出
-3. 警告與錯誤:stderr;best-effort 模式下跳檔仍 exit 0,`--strict` 時任何跳檔 exit 1
+3. 警告與錯誤:stderr;best-effort 模式下有警告仍 exit 0,`--strict` 時**任何警告** exit 1
 
 ### CLI 介面(頂層契約)
 
@@ -105,7 +105,7 @@ knot extract [PATH]          產出 codegraph.json
   --hiedir DIR               覆寫 .hie 目錄位置
   --hiedb PATH               覆寫 hiedb 執行檔位置(預設查 PATH)
   --db FILE                  覆寫索引位置(預設 <PATH>/.knot/hiedb.sqlite)
-  --strict                   任何跳檔改為 exit 1
+  --strict                   任何警告改為 exit 1
   --summary meta|facts|graph 改印該站的摘要到 stdout,不寫 codegraph.json
 
 knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導航問題
@@ -146,7 +146,7 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 - **職責**:把事實流組裝成內部圖 IR(純函數):鑄造決定性節點 id(Module + OccName + namespace,絕不用 GHC `Unique`);組裝 module + decl 兩層節點與 `contains` 結構邊;過濾 TH/deriving 產生碼的異常 span;外部目標丟棄與統計;彙整警告
 - **邊界(不做)**:不讀檔案、不認識 `.hie` 或 SQLite、不序列化
-- **對外契約摘要**:輸入事實流,輸出圖 IR(內部模型,非匯出格式)
+- **對外契約摘要**:輸入**事實流 + 專案描述**(後者來自拓撲的邊 2:建圖要靠專案描述的檔案清單判定內外部與過濾),輸出圖 IR(內部模型,非匯出格式)
 
 ### export-query — 匯出與查詢
 
@@ -158,14 +158,38 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 ## 通訊拓撲與原則(Communication Topology)
 
-- **拓撲**:單向 in-memory 管線,無反向呼叫、無旁路:
+- **拓撲**:單向 in-memory **DAG**(無反向呼叫、無環),**四條邊、一條都不多**:
 
-  `project-meta → extraction → graph-core → export-query`
-- **共用詞彙型別的邊界**:`ModuleName` 等詞彙型別由 project-meta 定義、沿管線流動、
-  零轉換(extraction Level 2 的批次澄清裁定)。「無旁路」的判準畫在**公開 DTO**:
-  子系統內部可以用上游詞彙型別,但**對外契約 DTO 不得透出**,否則消費端會被迫跨段
-  依賴。graph-core 的 `GraphStats` 是唯一踩過線的案例,由 G-E001 修正
-- **全域錯誤處理**:best-effort——單一檔案讀不過(壞 `.hie`、版本不合、解析失敗)印警告到 stderr、跳過續跑,仍產出部分圖;有跳檔時 exit code 仍為 0,`--strict` 使任何跳檔變 exit 1。不認得的 relation 或資料一律列印,不靜默吞掉
+  | # | 邊 | 載送什麼 | 為什麼存在 |
+  |---|---|---|---|
+  | 1 | `project-meta → extraction` | `ProjectMeta` | 後端要知道讀哪些檔 |
+  | 2 | `project-meta → graph-core` | `ProjectMeta` | 建圖要靠專案描述的檔案清單判定內外部與過濾(**不是旁路,是宣告內的邊**) |
+  | 3 | `extraction → graph-core` | `ExtractResult`(事實流) | 建圖的原料 |
+  | 4 | `graph-core → export-query` | `CodeGraph`(圖 IR) | 投影的輸入 |
+
+  主線是 `project-meta → extraction → graph-core → export-query`,第 2 條是 project-meta
+  **同時**餵 extraction 與 graph-core 的分岔——它是 graph-core Level 2 契約進入點的
+  參數之一,不是實作偷跑。
+
+  **這四條以外的跨子系統依賴一律視為旁路**,特別是 `export-query → project-meta`
+  與 `export-query → extraction`:兩者都不在表上,必須維持零。
+- **共用詞彙型別的邊界**(兩條判準,同時成立才合格):
+
+  1. **只能透出你真的依賴的人**:公開契約 DTO 得使用上游詞彙型別(`ModuleName`、
+     `DeclKind` 等),但**僅限上表中本子系統確實有邊指向的那些子系統**。透出沒有邊
+     的子系統之型別,等於逼消費端替你建一條旁路
+  2. **報告 / 統計欄位一律不得使用上游詞彙型別**:那種欄位裝的是**外部世界的資料**
+     (被丟棄的第三方 module 名之類),不是沿管線流動的值。包成上游型別換不到任何
+     型別安全,只會讓消費端為了拆包多認識一個型別
+
+  第 1 條擋未來的旁路,第 2 條擋 `GraphStats` 那一類(G-E001 已修正:
+  `gsTopExternalTargets` 改用 `Text`)。**只靠第 1 條是不夠的**——第 2 條邊補上之後
+  project-meta 對 graph-core 就成了合法的相鄰,單看依賴關係反而判不出 `GraphStats`
+  有問題(→ ADR-005)。
+
+  詞彙型別由定義它的子系統擁有,沿管線流動、零轉換(extraction Level 2 的批次澄清
+  裁定);**擁有者要 re-export 它**,消費端才不必為了命名而繞回源頭。
+- **全域錯誤處理**:best-effort——單一檔案讀不過(壞 `.hie`、版本不合、解析失敗)印警告到 stderr、跳過續跑,仍產出部分圖;有警告時 exit code 仍為 0,`--strict` 使**任何警告**變 exit 1(不只跳檔:警告面涵蓋跳檔、解析降級、設定可疑等,實作以三站警告總數判定)。不認得的 relation 或資料一律列印,不靜默吞掉
 - **降級原則**:函式級後端(hiedb)不可用時自動降到 module 級並明確告知,而非整體失敗
 
 ## 架構圖
@@ -174,15 +198,15 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
   Haskell 專案(唯讀)                 knot(單一執行檔)
  ┌──────────────────┐   ┌──────────────────────────────────────────────────┐
  │ *.cabal          │──▶│ project-meta                                     │
- │ cabal.project    │   │   │ 專案描述                                     │
- │ src/**/*.hs      │──▶│   ▼                                              │
- │ .hie/**/*.hie    │──▶│ extraction                                       │
- └──────────────────┘   │   ├─ import-scan(T0)                            │
-                        │   └─ hiedb-sqlite(T1)◀──── hiedb 執行檔(外部, │
-                        │   │ 事實流                  同版 GHC、選用)      │
-                        │   ▼                                              │
-                        │ graph-core                                       │
-                        │   │ 圖 IR                                        │
+ │ cabal.project    │   │   │ ProjectMeta ──────────┐(邊 2:同一份專案描述 │
+ │ src/**/*.hs      │──▶│   ▼(邊 1)              │  也直接餵給 graph-core │
+ │ .hie/**/*.hie    │──▶│ extraction               │  供內外部判定)        │
+ └──────────────────┘   │   ├─ import-scan(T0)    │                       │
+                        │   └─ hiedb-sqlite(T1)◀──┼── hiedb 執行檔(外部, │
+                        │   │ 事實流(邊 3)        │   同版 GHC、選用)     │
+                        │   ▼                      │                       │
+                        │ graph-core ◀─────────────┘                       │
+                        │   │ 圖 IR(邊 4)                                 │
                         │   ▼                                              │
                         │ export-query                                     │
                         └───┬──────────────────────────┬───────────────────┘
@@ -208,4 +232,14 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 **`implements` 邊不在 S3**(2026-08-21 調整):hiedb 0.8 的索引 schema 沒有 instance 表(實測八張表:mods / decls / defs / refs / exports / imports / typenames / typerefs),`FactInstance` 需要的「class + instance 標頭」無直接資料來源。`Fact` 的建構子保留、零邏輯,`implements` 邊另開 feature——要嘛從 refs 反推,要嘛等 ADR-002 預留的第三後端(自寫 `.hie` 解析)。同理,S3 的 decl 層過濾改用 hiedb 的 `refs.is_generated` 事實,不再是「TH 過濾」的啟發式。
 
-**進度**(2026-08-21):S1 與 S4 的 export-query 部分已完成——`knot extract` 在 MagicFarmer(60 節點/247 邊)與 particle-magic(46/127)唯讀跑出 `codegraph.json` 且 `scan-graph.mjs` 解析成功,`knot query` 四項能力可用。S1 尚缺的是其餘子系統的階段二項目;S3 未開始。
+**進度**(2026-08-22):**S1–S4 四階段全數完成**,四個子系統的 14 份 feature 與三份全域優化(G-E001 / G-E002 / G-E003)皆 `done`。
+
+唯讀實跑現況(`--db` 改道專案外,兩個標的皆零寫入、無 `.knot/`):
+
+| 標的 | 節點 / 邊 | 備註 |
+|---|---|---|
+| MagicFarmer | 67 / 288 | `scan-graph.mjs` 解析成功;數字較 2026-08-21 的 60/247 上升是標的自身新增 mind-sea 四個 feature |
+| particle-magic | 46 / 127 | 與 2026-08-21 相同 |
+| knot-hs 自掃 | 548 / 1947 | 0 警告;decl 層含 `calls` / `uses` 邊 |
+
+`knot extract` 的兩層抽取與 `knot query` 四項能力均可用。**唯一已知未做的能力是 `implements` 邊**,理由與去處見上一段。

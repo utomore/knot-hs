@@ -7,7 +7,7 @@ module Knot.Extract.Backend
   ( -- * 後端抽象
     Backend (..)
   , ProbeResult (..)
-    -- * 後端名常數
+    -- * 後端名常數(非契約面:@brBackend@ 的值域是契約,具名常數本身不是)
   , importScanName
   , hiedbName
     -- * 調度引擎(非契約面)

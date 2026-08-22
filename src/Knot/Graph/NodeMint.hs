@@ -27,10 +27,9 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Knot.Extract.Types (Fact (..), NameSpace (..), QualName (..))
+import Knot.Extract.Types (Fact (..), ModuleName (..), NameSpace (..), QualName (..))
 import Knot.Graph.FactGate (GatedFacts (..))
 import Knot.Graph.Types (GraphNode (..), NodeId (..), NodeKind (..))
-import Knot.Meta.Types (ModuleName (..))
 
 -- | module 節點 id 鑄造(A2 裁決的契約簽名)。
 --

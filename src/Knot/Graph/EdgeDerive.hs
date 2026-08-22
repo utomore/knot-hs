@@ -24,7 +24,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 
-import Knot.Extract.Types (Fact (..), NameSpace (..), QualName (..))
+import Knot.Extract.Types (Fact (..), ModuleName (..), NameSpace (..), QualName (..))
 import Knot.Graph.FactGate (GatedFacts (..))
 import Knot.Graph.NodeMint
   ( declNodeIndex
@@ -41,7 +41,6 @@ import Knot.Graph.Types
   , NodeKind (..)
   , Relation (..)
   )
-import Knot.Meta.Types (ModuleName (..))
 
 data EdgeStats = EdgeStats
   { esDroppedExternal :: Int                  -- ^ 指向外部目標而丟棄的邊數(總數,非相異 module 數)
