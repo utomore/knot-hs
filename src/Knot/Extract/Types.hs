@@ -22,13 +22,17 @@ module Knot.Extract.Types
     -- * 回報
   , BackendReport (..)
   , ExtractWarning (..)
+    -- * 整體失敗與 .hie 佈局(ADR-006;F005 定義,#6 / #7 接續使用)
+  , ExtractFailure (..)
+  , HieLayout (..)
     -- * 共用詞彙型別(re-export 自 project-meta,見 ADR-005)
   , ModuleName (..)
+  , ComponentRef (..)
   ) where
 
 import Data.Text (Text)
 
-import Knot.Meta.Types (ModuleName (..))
+import Knot.Meta.Types (ComponentRef (..), ModuleName (..))
 
 -- | 抽取選項。@rootDir@ 是 @sfPath@ / @hieFiles@ 等 repo 相對路徑的錨點
 -- (階段一閘門裁決後的契約變更;後端要開檔就得有這個 root,
@@ -121,5 +125,24 @@ data BackendReport = BackendReport
 data ExtractWarning = ExtractWarning
   { ewSource  :: Text
   , ewMessage :: Text
+  }
+  deriving (Eq, Show)
+
+-- | 整體失敗(ADR-006):兩層任一層拿不到。呼叫端 exit 1、不寫檔,與 @--strict@
+-- 無關。F005 一次定義四個建構子(sum type 不能分次加):'BuildFailed' 由
+-- build-driver 產生,'VersionMismatch' \/ 'IndexFailed' 由 hie-index(#6),
+-- 'NoSources' 由 fact-pipeline(#7)。
+data ExtractFailure
+  = BuildFailed     { bfComponent :: Text, bfDetail :: Text }  -- ^ cabal 回報的失敗單元(解析不到為 @all@)與輸出尾段
+  | VersionMismatch { vmHie :: Text, vmKnot :: Text }          -- ^ .hie 的 GHC 版本 ≠ knot 的(ADR-001)
+  | IndexFailed     { ifDetail :: Text }                        -- ^ hiedb 索引整體失敗
+  | NoSources                                                   -- ^ 納入範圍內零個原始檔
+  deriving (Eq, Show)
+
+-- | build-driver 的產物:@.knot/build@ 下各 component 輸出目錄裡的 @.hie@。
+-- 路徑 repo 相對、正斜線,依碼位序;每筆附其 component(由 cabal 佈局路徑推得)。
+data HieLayout = HieLayout
+  { hlRoot  :: FilePath                       -- ^ @\<root\>\/.knot\/build@
+  , hlFiles :: [(ComponentRef, FilePath)]
   }
   deriving (Eq, Show)

@@ -3,7 +3,7 @@ id: F005
 type: feature
 title: build-driver
 description: 自行驅動目標專案的插樁建置,產出每 component 分目錄的 .hie
-status: open
+status: done
 created: 2026-08-22
 updated: 2026-08-22
 depends-on: [F001, project-meta/F001, project-meta/F002]
@@ -174,12 +174,12 @@ ensureHie :: ExtractOptions -> ProjectMeta -> IO (Either ExtractFailure HieLayou
 
 ## TodoList
 
-- [ ] T1: `Knot.Extract.Types` 新增 `ExtractFailure`(四建構子)與 `HieLayout`,re-export `ComponentRef`;`knot-hs.cabal` 的 `knot-internal` 加 `Knot.Extract.BuildDriver`  `dep: -`
-- [ ] T2: `.knot/` 準備——建目錄、寫 `.gitignore`(內容 `*`,已存在不覆寫),冪等  `dep: T1`
-- [ ] T3: cabal 呼叫——依 `pmPackages` 組 argv(`all` / `--enable-tests` / `--enable-benchmarks` / `--builddir` / `--ghc-options=-fwrite-ide-info`)、`cwd` 釘在 `rootDir`、不走 shell;輸出逐行轉發到 stderr 並保留尾段;exit ≠ 0 / `IOException` → `BuildFailed`,`bfComponent` 盡力解析  `dep: T1`
-- [ ] T4: `HieLayout` 列舉——走訪 builddir 收 `*.hie`,cabal 佈局路徑 → `ComponentRef`(六種 kind 段 + 主 library),`pkgName` 最長前綴比對,依路徑碼位序  `dep: T1`
-- [ ] T5: `ensureHie` 組裝 T2 → T3 → T4,全部 `IOException` 收斂成 `Left`  `dep: T2, T3, T4`
-- [ ] T6: 對 knot-hs 自身的唯讀 selfcheck:`.knot/build/`、`.knot/.gitignore`、兩份 `Main.hie` 分目錄、對方 `dist-newstyle/cache/plan.json` mtime 與大小不變、第二次呼叫快於第一次、不帶 `--include-tests` 時 `t/` 下無 `.hie`  `dep: T5`
+- [x] T1: `Knot.Extract.Types` 新增 `ExtractFailure`(四建構子)與 `HieLayout`,re-export `ComponentRef`;`knot-hs.cabal` 的 `knot-internal` 加 `Knot.Extract.BuildDriver`  `dep: -`
+- [x] T2: `.knot/` 準備——建目錄、寫 `.gitignore`(內容 `*`,已存在不覆寫),冪等  `dep: T1`
+- [x] T3: cabal 呼叫——依 `pmPackages` 組 argv(`all` / `--enable-tests` / `--enable-benchmarks` / `--builddir` / `--ghc-options=-fwrite-ide-info`)、`cwd` 釘在 `rootDir`、不走 shell;輸出逐行轉發到 stderr 並保留尾段;exit ≠ 0 / `IOException` → `BuildFailed`,`bfComponent` 盡力解析  `dep: T1`
+- [x] T4: `HieLayout` 列舉——走訪 builddir 收 `*.hie`,cabal 佈局路徑 → `ComponentRef`(六種 kind 段 + 主 library),`pkgName` 最長前綴比對,依路徑碼位序  `dep: T1`
+- [x] T5: `ensureHie` 組裝 T2 → T3 → T4,全部 `IOException` 收斂成 `Left`  `dep: T2, T3, T4`
+- [x] T6: 對 knot-hs 自身的唯讀 selfcheck:`.knot/build/`、`.knot/.gitignore`、兩份 `Main.hie` 分目錄、對方 `dist-newstyle/cache/plan.json` mtime 與大小不變、第二次呼叫快於第一次、不帶 `--include-tests` 時 `t/` 下無 `.hie`  `dep: T5`
 
 ## 1-to-1 測試對照表
 
@@ -194,4 +194,45 @@ ensureHie :: ExtractOptions -> ProjectMeta -> IO (Either ExtractFailure HieLayou
 
 ## 實作備註
 
-(開發過程中與設計的偏差記錄於此,撰寫時留空)
+### 結果(2026-08-22)
+
+| 驗收標準 | 實測 |
+|---|---|
+| 1 `.knot/build/`、分目錄 `.hie`、`.gitignore` | 三者皆在;`.gitignore` 內容 `*`,第二次呼叫不覆寫 |
+| 2 對方 `dist-newstyle` 不變 | `plan.json` 的 mtime + 大小前後相等 |
+| 3 `hlFiles` 的 component 與路徑一致 | 六種 kind 段 + 主 library 的對映全部由純函數測試釘住 |
+| 4 兩份 `Main.hie` 分目錄 | `--include-tests` 下 `exe:knot` 與 `test:knot-test` 各一份,目錄不同 |
+| 5 第二次明顯快 | knot-hs 自身:**首次 19.5 s → 第二次 136 ms**;`.hie` 32 個(不含 test)/ 37 個(含 test) |
+| 6 編不過 → `BuildFailed` | broken-build fixture 4.3 s 內回 `Left`,`bfDetail` 含 cabal 錯誤文字 |
+| 7 排除的 component 不建 | 不帶 `--include-tests` 時無任何 `test:` 的 `.hie` |
+
+測試 155 → **161** 全綠;閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` exit 0。
+
+### 與設計的偏差
+
+1. **輸出轉發的實作改為單一 pipe、單一讀者**(設計寫「逐行轉發」沒指定機制)。第一版用
+   `CreatePipe` × 2 + `forkIO` 兩個 pump,**在非 `-threaded` RTS 下死鎖**:`waitForProcess`
+   是 blocking 的 safe FFI call,會凍結所有 green thread,pump 跑不了、pipe 塞滿、cabal
+   寫不出去就永遠不結束(實測 10 分鐘沒回來)。改為 `createPipe` + `hDuplicate` 把 stdout
+   與 stderr 併進同一條 pipe,主執行緒 drain 到 EOF **之後**才 `waitForProcess`——與既有
+   `readCreateProcessWithExitCode` 能用的原因相同(先 drain 再 wait)。尾段因此混合兩股
+   輸出,`failedUnitOf` 的解析不受影響
+2. **T5 改用新 fixture `test/fixtures/buildable/`**,不用設計寫的 `graph`。`graph` fixture
+   本來就不可建置(`Demo/Core.hs` import `Data.Text` 卻沒列 `text` 相依;`app/Main.hs`
+   import 自己)——它是 import-scan 的測試材料,五份黃金檔釘著它的 import 行,不能改。
+   T5 的失敗案例改用 repo 外的空暫存目錄,理由見下一條
+3. **fixture 必須自帶 `cabal.project`**。沒有的話 cabal 從 fixture 目錄往上找到 knot-hs
+   自己的 `cabal.project`,`cabal build all` 就在 fixture 的 builddir 裡**建整個 knot-hs**
+   (實測:`broken-build/.knot/build/…/knot-hs-0.0.1.0/`)。`broken-build` 與 `buildable`
+   都補了 `packages: .`。這對真實目標專案不是問題(它們自己就是專案根),但對「子目錄當
+   專案」的情境是個要知道的 cabal 行為,已記進 T5 的註解
+4. **G-E001 的公開面守門測試計數更新**:`knot-internal` 26 → 27、私有模組 17 → 18
+   (新增 `Knot.Extract.BuildDriver`,依設計不進 `reexported-modules`)。這是該測試的
+   預期用途,不是放寬
+
+### 實作自主權範圍內的選擇(不算偏差)
+
+- 尾段保留 40 行;`bfDetail` 首行固定為 `cabal exited with <code>`
+- `enumerateHie` 走訪 builddir 全樹收 `*.hie`,不假設 `extra-compilation-artifacts/hie/`
+  這個中間層(cabal 版本可能變),component 只看前五段
+- `componentRefOf` 對段數不足的路徑回 `ComponentRef ("", "")`,不拋例外

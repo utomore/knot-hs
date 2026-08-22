@@ -19,6 +19,7 @@ library knot-internal
                       Knot.Extract
                       Knot.Extract.Types
                       Knot.Extract.Backend
+                      Knot.Extract.BuildDriver
                       Knot.Extract.ImportScan
                       Knot.Extract.HiedbDriver
                       Knot.Extract.HiedbFacts

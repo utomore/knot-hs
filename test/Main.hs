@@ -30,13 +30,16 @@ import System.Directory
   , doesDirectoryExist
   , doesFileExist
   , findExecutable
+  , getFileSize
+  , getModificationTime
   , getTemporaryDirectory
   , listDirectory
   , makeAbsolute
   , removePathForcibly
   )
 import System.Exit (ExitCode (..))
-import System.FilePath (isAbsolute, takeDirectory, takeFileName, (</>))
+import System.FilePath (isAbsolute, takeDirectory, takeExtension, takeFileName, (</>))
+import GHC.Clock (getMonotonicTime)
 import System.Info (fullCompilerVersion)
 import System.IO
   ( Handle
@@ -107,6 +110,17 @@ import Knot.Extract.Backend
   , importScanName
   , runBackends
   )
+import Knot.Extract.BuildDriver
+  ( cabalArgs
+  , componentRefOf
+  , ensureHie
+  , enumerateHie
+  , failedUnitOf
+  , knotBuildDir
+  , knotDir
+  , prepareKnotDir
+  , runCabalWith
+  )
 import Knot.Extract.HiedbDriver
   ( IndexStats (..)
   , chunkFileArgs
@@ -146,6 +160,7 @@ import Knot.Extract.Types
   , ExtractOptions (..)
   , ExtractResult (..)
   , ExtractWarning (..)
+  , HieLayout (..)
   , Fact (..)
   , NameSpace (..)
   , QualName (..)
@@ -288,6 +303,7 @@ tests mHiedb = testGroup "knot-hs"
   , extractionF001Tests, extractionF002Tests
   , extractionF003Tests mHiedb
   , extractionF004Tests mHiedb
+  , extractionF005Tests
   , graphCoreF001Tests
   , graphCoreF002Tests
   , graphCoreF003Tests
@@ -5655,13 +5671,13 @@ testCabalContractSurface = testCase "test_cabal_contract_surface" $ do
   -- 公開面恰為契約模組(排序後逐字比對,順序不影響判定)
   sort reexported @?= sort contractModules
   -- 內部 library 收全部 26 個模組
-  length exposed @?= 26
+  length exposed @?= 27   -- F005 加 Knot.Extract.BuildDriver
   -- 每個被 reexport 的模組都真的存在於內部 library
   assertBool ("reexported modules missing from knot-internal: "
                <> show [m | m <- reexported, m `notElem` exposed])
     (all (`elem` exposed) reexported)
   -- 17 個內部模組一個都不得出現在公開面
-  length private @?= 17
+  length private @?= 18
   assertBool ("internal modules leaked into the public surface: "
                <> show [m | m <- private, m `elem` reexported])
     (not (any (`elem` reexported) private))
@@ -6050,3 +6066,215 @@ testDeclLineWithinFile = testCase "test_decl_line_within_file" $ do
       removePathForcibly (takeDirectory db)
     _ -> putStrLn
       "[skip] test_decl_line_within_file: knot-hs itself has no .hie files"
+
+--------------------------------------------------------------------------------
+-- extraction/F005 build-driver
+--------------------------------------------------------------------------------
+
+extractionF005Tests :: TestTree
+extractionF005Tests = testGroup "extraction/F005 build-driver"
+  [ testBuildDriverTypesConstruct   -- T1
+  , testKnotDirPrepare              -- T2
+  , testCabalInvocation             -- T3
+  , testHieLayoutEnumeration        -- T4
+  , testEnsureHiePipeline           -- T5
+  , testBuildDriverSelfcheck        -- T6
+  ]
+
+brokenBuildFixture, buildableFixture :: FilePath
+brokenBuildFixture = "test/fixtures/broken-build"
+buildableFixture   = "test/fixtures/buildable"
+
+-- | 組一個只有 component 清單的 ProjectMeta(cabalArgs 只看這個)。
+metaWithComponents :: [(ComponentKind, Bool)] -> ProjectMeta
+metaWithComponents ks = emptyMeta
+  { pmPackages =
+      [ PackageMeta
+          { pkgName       = T.pack "p"
+          , pkgCabalFile  = "p.cabal"
+          , pkgComponents =
+              [ ComponentMeta
+                  { compName = T.pack ("c" <> show i), compKind = k
+                  , compSourceDirs = ["src"], compExcluded = ex }
+              | (i, (k, ex)) <- zip [0 :: Int ..] ks ]
+          } ] }
+
+-- F005 T1:四建構子可構造且互異;HieLayout 建值與 Eq;ComponentRef 經 Extract.Types re-export
+testBuildDriverTypesConstruct :: TestTree
+testBuildDriverTypesConstruct = testCase "test_build_driver_types_construct" $ do
+  let bf = XT.BuildFailed (T.pack "knot-hs:exe:knot") (T.pack "boom")
+  case bf of
+    XT.BuildFailed c d -> do c @?= T.pack "knot-hs:exe:knot"; d @?= T.pack "boom"
+    other -> assertFailure ("expected BuildFailed, got " <> show other)
+  let vm = XT.VersionMismatch (T.pack "9.12.2") (T.pack "9.14.1")
+      ix = XT.IndexFailed (T.pack "locked")
+  length (nubOrd (map show [bf, vm, ix, XT.NoSources])) @?= 4
+  XT.NoSources @?= XT.NoSources
+  -- ComponentRef 由 Knot.Extract.Types 取得(ADR-005 附帶義務),型別與 project-meta 的同一個
+  let cref = XT.ComponentRef (T.pack "p", T.pack "exe:a")
+      hl   = XT.HieLayout { XT.hlRoot = ".knot/build", XT.hlFiles = [(cref, ".knot/build/a.hie")] }
+  XT.hlRoot hl @?= ".knot/build"
+  map fst (XT.hlFiles hl) @?= [ComponentRef (T.pack "p", T.pack "exe:a")]
+  hl @?= hl
+
+-- F005 T2:.knot/ 準備冪等;既有 .gitignore 不覆寫
+testKnotDirPrepare :: TestTree
+testKnotDirPrepare = testCase "test_knot_dir_prepare" $
+  withExportDir "f005-knot" $ \dir -> do
+    prepareKnotDir dir
+    doesDirectoryExist (knotDir dir) >>= (@?= True)
+    readUtf8 (knotDir dir </> ".gitignore") >>= (@?= T.pack "*\n")
+    knotBuildDir dir @?= (dir </> ".knot" </> "build")
+    writeUtf8 (knotDir dir </> ".gitignore") "custom\n"
+    prepareKnotDir dir
+    readUtf8 (knotDir dir </> ".gitignore") >>= (@?= T.pack "custom\n")
+
+-- F005 T3:argv 純函數、失敗單元解析、真實失敗建置、cabal 啟動失敗
+testCabalInvocation :: TestTree
+testCabalInvocation = testCase "test_cabal_invocation" $ do
+  -- (a) argv:基本四段;納入的 test / bench 才帶 --enable-*
+  cabalArgs "/bd" (metaWithComponents [(MainLibrary, False), (Executable, False)])
+    @?= ["build", "all", "--builddir=/bd", "--ghc-options=-fwrite-ide-info"]
+  let withTests = cabalArgs "/bd" (metaWithComponents [(TestSuite, False)])
+      withBench = cabalArgs "/bd" (metaWithComponents [(Benchmark, False)])
+      excluded  = cabalArgs "/bd" (metaWithComponents [(TestSuite, True), (Benchmark, True)])
+  assertBool "included test-suite → --enable-tests" ("--enable-tests" `elem` withTests)
+  assertBool "no --enable-benchmarks without benchmark" ("--enable-benchmarks" `notElem` withTests)
+  assertBool "included benchmark → --enable-benchmarks" ("--enable-benchmarks" `elem` withBench)
+  assertBool "excluded components add no --enable-*"
+    (not (any (`elem` excluded) ["--enable-tests", "--enable-benchmarks"]))
+  -- 失敗單元解析:有 from → pkg:unit;無 from → unit;解析不到 → all
+  failedUnitOf (map T.pack ["Error: [Cabal-7125]", "Failed to build exe:knot from knot-hs-0.0.1.0."])
+    @?= T.pack "knot-hs:exe:knot"
+  failedUnitOf [T.pack "Failed to build lib:foo"] @?= T.pack "lib:foo"
+  failedUnitOf [T.pack "nothing relevant"] @?= T.pack "all"
+  failedUnitOf [] @?= T.pack "all"
+  -- (b) 真的編不過的 fixture → BuildFailed,指名單元(或 all),尾段含 cabal 的錯誤
+  pm <- loadProjectMeta (defOpts brokenBuildFixture)
+  r <- ensureHie ((extOpts Auto) { XT.rootDir = brokenBuildFixture }) pm
+  case r of
+    Left (XT.BuildFailed c d) -> do
+      assertBool ("bfComponent should name the exe or be all, got " <> show c)
+        (c `elem` map T.pack ["broken-build:exe:broken-exe", "all"])
+      assertBool ("bfDetail should carry cabal's output, got " <> show d)
+        (hasText "cabal exited with" d && (hasText "broken" d || hasText "rror" d))
+    other -> assertFailure ("expected Left BuildFailed, got " <> show other)
+  removePathForcibly (knotDir brokenBuildFixture)
+  -- (c) cabal 本身啟動不了 → BuildFailed 且訊息指明
+  r2 <- runCabalWith "knot-no-such-cabal-executable" "." ["--version"]
+  case r2 of
+    Left (XT.BuildFailed c d) -> do
+      c @?= T.pack "all"
+      assertBool ("message should say it cannot start cabal, got " <> show d)
+        (hasText "cannot start" d)
+    other -> assertFailure ("expected Left BuildFailed, got " <> show other)
+
+-- F005 T4:cabal 佈局路徑 → ComponentRef;走訪結果依碼位序
+testHieLayoutEnumeration :: TestTree
+testHieLayoutEnumeration = testCase "test_hie_layout_enumeration" $ do
+  let pkgs = map T.pack ["knot-hs", "my-pkg"]
+      segs kind nm = ["build", "x86_64-windows", "ghc-9.14.1", "knot-hs-0.0.1.0", kind, nm
+                     , "build", nm, nm <> "-tmp", "extra-compilation-artifacts", "hie", "Main.hie"]
+      cref p c = ComponentRef (T.pack p, T.pack c)
+  componentRefOf pkgs (segs "x" "knot")          @?= cref "knot-hs" "exe:knot"
+  componentRefOf pkgs (segs "t" "knot-test")     @?= cref "knot-hs" "test:knot-test"
+  componentRefOf pkgs (segs "b" "bench")         @?= cref "knot-hs" "bench:bench"
+  componentRefOf pkgs (segs "f" "flib")          @?= cref "knot-hs" "flib:flib"
+  componentRefOf pkgs (segs "l" "knot-internal") @?= cref "knot-hs" "lib:knot-internal"
+  -- 主 library:第五段直接是 build
+  componentRefOf pkgs ["build", "a", "g", "knot-hs-0.0.1.0", "build", "Knot", "Meta.hie"]
+    @?= cref "knot-hs" "lib:knot-hs"
+  -- 套件名含連字號:最長前綴比對
+  componentRefOf pkgs ["build", "a", "g", "my-pkg-1.2.3", "x", "e", "f.hie"] @?= cref "my-pkg" "exe:e"
+  -- 不在 pmPackages 的套件:去版號退路
+  componentRefOf pkgs ["build", "a", "g", "other-9.9", "x", "e", "f.hie"] @?= cref "other" "exe:e"
+  -- 走訪:假 builddir,兩個 component 各一個空 .hie,非 .hie 檔不收,結果依路徑碼位序
+  withExportDir "f005-layout" $ \dir -> do
+    let bd = dir </> "bd"
+        mk rel = do
+          createDirectoryIfMissing True (takeDirectory (bd </> rel))
+          writeUtf8 (bd </> rel) ""
+    mk ("build/a/g/knot-hs-0.0.1.0/x/knot/build/knot/Main.hie")
+    mk ("build/a/g/knot-hs-0.0.1.0/build/Knot/Meta.hie")
+    mk ("build/a/g/knot-hs-0.0.1.0/build/Knot/Meta.hi")
+    hl <- enumerateHie (metaWithComponents []) { pmPackages = [] } dir dir bd
+    let paths = map snd (hlFiles hl)
+    paths @?= sort paths
+    length paths @?= 2
+    assertBool "only .hie files" (all ((== ".hie") . takeExtension) paths)
+    assertBool "paths relative to root with forward slashes"
+      (all (\p -> "bd/build/" `isPrefixOf` p && '\\' `notElem` p) paths)
+    map fst (hlFiles hl) @?= [ref "knot-hs" "lib:knot-hs", ref "knot-hs" "exe:knot"]
+
+-- F005 T5:ensureHie 對可建置的 fixture 回 Right;無 cabal 的目錄回 Left
+testEnsureHiePipeline :: TestTree
+testEnsureHiePipeline = testCase "test_ensure_hie_pipeline" $ do
+  -- graph fixture 刻意不可建置(Demo.Core import Data.Text 卻沒列相依,是 import-scan
+  -- 的測試材料,五份黃金檔釘著它的 import 行),故另備一個真的能建的 buildable fixture
+  pm <- loadProjectMeta (defOpts buildableFixture)
+  r <- ensureHie ((extOpts Auto) { XT.rootDir = buildableFixture }) pm
+  case r of
+    Right hl -> do
+      hlRoot hl @?= "test/fixtures/buildable/.knot/build"
+      assertBool "should enumerate at least one .hie" (not (null (hlFiles hl)))
+      forM_ (hlFiles hl) $ \(_, p) -> do
+        assertBool ("path under .knot/build: " <> p) (".knot/build/" `isPrefixOf` p)
+        takeExtension p @?= ".hie"
+      -- buildable fixture 有 lib + exe:兩種 component 都出現,且對映逐字等於 compName
+      let comps = nubOrd [c | (ComponentRef (_, c), _) <- hlFiles hl]
+      assertBool ("expected lib and exe components, got " <> show comps)
+        (all (`elem` comps) (map T.pack ["lib:buildable", "exe:demo-exe"]))
+    Left f -> assertFailure ("expected Right, got " <> show f)
+  removePathForcibly (knotDir buildableFixture)
+  -- 失敗案例用 repo 外的空暫存目錄:fixture 目錄沒有 cabal.project 時,cabal 會往上
+  -- 找到 knot-hs 自己的 cabal.project 而建整個 knot-hs(實測踩到,卡了十分鐘)
+  withExportDir "f005-empty" $ \dir -> do
+    r2 <- ensureHie ((extOpts Auto) { XT.rootDir = dir }) emptyMeta
+    case r2 of
+      Left (XT.BuildFailed _ d) ->
+        assertBool ("cabal should complain about the missing package, got " <> show d)
+          (hasText "cabal exited with" d)
+      other -> assertFailure ("expected Left BuildFailed for an empty dir, got " <> show other)
+
+-- F005 T6:對 knot-hs 自身的唯讀 selfcheck——驗收標準 1、2、4、5、7
+testBuildDriverSelfcheck :: TestTree
+testBuildDriverSelfcheck = testCase "test_build_driver_selfcheck" $ do
+  removePathForcibly ".knot"
+  let plan = "dist-newstyle/cache/plan.json"
+      snapshot = do
+        e <- doesFileExist plan
+        if e then Just <$> ((,) <$> getModificationTime plan <*> getFileSize plan) else pure Nothing
+  before <- snapshot
+  -- 不帶 --include-tests:test-suite 不建、t/ 下無 .hie、恰一份 Main.hie(exe)
+  pm <- loadProjectMeta (defOpts ".")
+  t0 <- getMonotonicTime
+  r1 <- ensureHie ((extOpts Auto) { XT.rootDir = "." }) pm
+  t1 <- getMonotonicTime
+  r2 <- ensureHie ((extOpts Auto) { XT.rootDir = "." }) pm
+  t2 <- getMonotonicTime
+  hl <- either (\f -> assertFailure ("first ensureHie failed: " <> show f)) pure r1
+  either (\f -> assertFailure ("second ensureHie failed: " <> show f)) (@?= hl) r2
+  doesDirectoryExist ".knot/build" >>= (@?= True)
+  readUtf8 ".knot/.gitignore" >>= (@?= T.pack "*\n")
+  let mains = [p | (_, p) <- hlFiles hl, takeFileName p == "Main.hie"]
+  length mains @?= 1
+  assertBool "no test-suite .hie without --include-tests"
+    (not (any (\(ComponentRef (_, c), _) -> T.pack "test:" `T.isPrefixOf` c) (hlFiles hl)))
+  let d1 = t1 - t0
+      d2 = t2 - t1
+  assertBool ("second run should be far faster: " <> show (d1, d2)) (d2 < d1 / 2)
+  -- 帶 --include-tests:兩份 Main.hie,各在自己 component 的目錄
+  pmT <- loadProjectMeta ((defOpts ".") { includeTests = True })
+  rT <- ensureHie ((extOpts Auto) { XT.rootDir = "." }) pmT
+  hlT <- either (\f -> assertFailure ("ensureHie with tests failed: " <> show f)) pure rT
+  let mainsT = [(c, p) | (ComponentRef (_, c), p) <- hlFiles hlT, takeFileName p == "Main.hie"]
+  sort (map fst mainsT) @?= map T.pack ["exe:knot", "test:knot-test"]
+  length (nubOrd (map (takeDirectory . snd) mainsT)) @?= 2
+  -- 對方(這裡是 knot-hs 自己)的 dist-newstyle 一個位元組都沒動
+  after <- snapshot
+  after @?= before
+  putStrLn ("[selfcheck/F005] hie=" <> show (length (hlFiles hl))
+    <> " first=" <> show (round (d1 * 1000) :: Int) <> "ms"
+    <> " second=" <> show (round (d2 * 1000) :: Int) <> "ms"
+    <> " withTests=" <> show (length (hlFiles hlT)))
+  removePathForcibly ".knot"
