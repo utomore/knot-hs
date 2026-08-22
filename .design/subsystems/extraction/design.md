@@ -126,7 +126,7 @@ data ExtractWarning = ExtractWarning   -- 比照 MetaWarning 模式
 6. **每個 component 各自一個 `.hie` 目錄**——由 cabal 天然提供,不由 knot 指定:建置**只帶 `-fwrite-ide-info`、不帶 `-hiedir`**,GHC 會把 `.hie` 寫在 `.hi` 旁,而 cabal 本來就替每個 component 準備獨立輸出目錄(`…/<kind>/<comp>/…/extra-compilation-artifacts/hie/`)。理由:GHC 的 `-hiedir` 依 module 名決定路徑、不含 component,`executable` 與 `test-suite` 都有 `Main` 時共用目錄會互相覆蓋(G-B001 的根因)。**不得改用逐 component 各帶 `-hiedir` 的作法**:2026-08-22 spike 證實換 `--ghc-options` 會被 cabal 當組態變更,每次全量重編(9.2 s vs 247 ms)。分目錄後碰撞在設計上不存在,每個 `.hie` 的 component 歸屬由路徑推得
 7. **`.knot/` 快取目錄**:固定在 `<root>/.knot/`,**不提供改道**(它是快取,與 `dist-newstyle` 同性質)。佈局:`build/`(cabal builddir,`.hie` 在其內各 component 的輸出目錄下,規則 6)、索引檔、以及**首次建立時自動寫入內容為 `*` 的 `.gitignore`**——使用者連 `.gitignore` 都不用改。內容格式屬 Level 3 自主權;刪掉整個目錄只會讓下次變慢
 8. **GHC 版本相容**(ADR-001):`.hie` header 的 GHC 版本必須與 knot 自身相同,不合 → `VersionMismatch` **失敗**(不再是警告或降級)。目標專案若以 `with-compiler` 釘了別的 GHC,就是這條失敗
-9. **單檔 best-effort**(在兩層都整體成立的前提下):單一原始檔解析失敗、單一 `.hie` 對映不到納入範圍內的原始檔(含過期的 `.hie`:模組已刪但舊檔還在 `.knot/hie/`)→ 警告 + 跳過,仍產出事實流。這一條與規則 3 的分界:**整體**拿不到是失敗,**個別**檔案拿不到是警告
+9. **單檔 best-effort**(在兩層都整體成立的前提下):單一原始檔解析失敗、單一 `.hie` 對映不到納入範圍內的原始檔(含過期的 `.hie`:模組已刪但舊檔還在 `.knot/build/`)→ 警告 + 跳過,仍產出事實流。這一條與規則 3 的分界:**整體**拿不到是失敗,**個別**檔案拿不到是警告
 10. **決定性**:事實流排序穩定,同樣輸入產生同樣輸出
 
 ## 內部模組劃分(Internal Modules)
@@ -235,7 +235,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 5 | build-driver | 逐 component 插樁建置進 `.knot/`、每 component 一個 hiedir、`.gitignore` 自建、`BuildFailed` 語意 | build-driver | - | F005 |
+| 5 | build-driver | 一次 `cabal build all` 插樁建置進 `.knot/build/`、`.hie` 由 cabal 按 component 分目錄、`.gitignore` 自建、`BuildFailed` 語意 | build-driver | - | F005 |
 | 6 | hiedb-embed | hiedb 改 library 嵌入、列舉 `HieLayout`、版本檢查改為失敗、增量索引 | hie-index | #5 | - |
 | 7 | two-layer-contract | 契約收斂(砍 `BackendChoice` / `CapabilityLevel` / `BackendReport`、加 `ExtractFailure`)、fact-pipeline 全有全無、移除探測與降級 | fact-pipeline、import-scan | #5, #6 | - |
 
