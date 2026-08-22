@@ -5211,6 +5211,16 @@ testExtractOptionsMapping = testCase "test_extract_options_mapping" $ do
   -- --output 未給時走 defaultOutputPath(釘住 F001 假設 A2 的分工)
   let noOut = fullExtractCmd { ecOutput = Nothing }
   ET.outputPath (toExportOptions noOut) @?= defaultOutputPath "proj"
+  -- G-E005:--module-only 且 --backend 停在預設 Auto → 收窄為 ImportsOnly。
+  -- hiedb 在 module-only 下不可能貢獻任何東西(抽取規則 2 + 組裝規則 6),
+  -- 跑它只是白花索引時間(實測 2500ms → 441ms,輸出逐 byte 相同)。
+  let autoMod = fullExtractCmd { ecBackend = Auto, ecModuleOnly = True }
+  backendChoice (toExtractOptions autoMod) @?= ImportsOnly
+  -- 沒有 --module-only 時不收窄
+  backendChoice (toExtractOptions (autoMod { ecModuleOnly = False })) @?= Auto
+  -- 使用者明確指定後端時尊重其選擇,不覆寫
+  backendChoice (toExtractOptions (autoMod { ecBackend = HiedbOnly })) @?= HiedbOnly
+  backendChoice (toExtractOptions (autoMod { ecBackend = ImportsOnly })) @?= ImportsOnly
   -- 三個 DTO 的路徑欄位同源
   [ root (toMetaOptions noOut)
     , XT.rootDir (toExtractOptions noOut)

@@ -49,22 +49,41 @@ cabal install hiedb --allow-newer=hie-compat:base
 該範圍,但實測加上這個旗標後完全可用(見 `ADR-002`)。裝好後 knot 會自動從 `PATH`
 找到它,也可以用 `--hiedb PATH` 指定。
 
+## 導入成本(先看這張表)
+
+knot 有**兩層能力,成本差一個數量級**。先決定你要哪一層。
+
+| | module 級 | 函式級(decl) |
+|---|---|---|
+| 產出 | module 節點 + `imports` 邊 | 再加 decl 節點 + `calls` / `uses` 邊 |
+| 夠不夠架構檢測用 | **夠**(依賴矩陣、循環依賴、跨界引用、hub 全在這層) | 加值:定位加速 |
+| 要裝什麼 | knot | knot **+ hiedb**(都是全域裝一次,**不會裝進你的專案**) |
+| 要不要改目標專案 | **不用** | **要**:用 `-fwrite-ide-info` 重建一次 |
+| 首次耗時 | **0.4 秒** | 重建 `.hie` 42 秒 + 抽取 3 秒 |
+| 改一行之後重跑 | **0.4 秒** | 增量重建 19 秒 + 抽取 2.6 秒 |
+| 會寫進目標專案 | `codegraph.json`(`--output` 可改道) | 再加 `.hie/`(`-hiedir` 可改道)、`.knot/`(`--db` 可改道) |
+
+> 數字量自 knot-hs 自身(32 個 `.hs`,Windows / GHC 9.14.1)。那 19 / 42 秒是
+> `cabal build` 的成本,不是 knot 的——**knot 本身從來不超過 3 秒**。
+
 ## 快速上手
 
-### 只要 module 級依賴圖(零設定)
-
-架構檢測要的就是這一層——依賴矩陣、循環依賴、跨界引用全部只需要 module 級。
+### 只要 module 級依賴圖(零設定、零改動、0.4 秒)
 
 ```bash
 cd /path/to/your-haskell-project
 knot extract . --module-only
 ```
 
-產出 `./codegraph.json`。不需要 `.hie`、不需要 hiedb。
+產出 `./codegraph.json`。**不需要 `.hie`、不需要 hiedb、不必重建你的專案。**
+`--module-only` 會自動跳過 hiedb 後端(它在這個模式下不可能貢獻任何東西)。
+
+架構檢測要的就是這一層——依賴矩陣、循環依賴、跨界引用、架構 hub 全部只需要
+module 級。**如果你只是要接 dev-flow 的 `/arch-audit`,做到這裡就結束了。**
 
 ### 要函式級呼叫圖(需要 `.hie` 與 hiedb)
 
-目標專案得先產出 `.hie`:
+目標專案得先產出 `.hie`——**這是唯一需要改動目標專案的地方**:
 
 ```bash
 cd /path/to/your-haskell-project
@@ -75,16 +94,25 @@ knot extract .
 `--backend auto`(預設)會在 hiedb 可用時輸出兩層圖,不可用時自動降級為 module 級
 並在 stderr 說明,而不是整個失敗。
 
-> **注意**:上面刻意**沒有**加 `--enable-tests`。加了會踩到已知缺陷 G-B001,見
-> 「已知限制」。
+> **注意**:上面刻意**沒有**加 `--enable-tests`。加了 `exe` 與 `test-suite` 的
+> `Main.hie` 會互相覆蓋,那個 module 的 decl 資料會被跳過(見「已知限制」第 2 項)。
 
 ### 掃別人的專案時保持真正唯讀
 
-函式級抽取預設會在目標專案建 `.knot/` 索引快取。要完全不寫入目標專案:
+module 級本來就只寫一個 `codegraph.json`,`--output` 改道即可完全不碰對方專案。
+函式級另外會建 `.hie/` 與 `.knot/`,三者都能改道:
 
 ```bash
-knot extract /path/to/other-project --db /tmp/knot-index.sqlite --output /tmp/cg.json
+# module 級:完全不寫入對方專案
+knot extract /path/to/other --module-only --output /tmp/cg.json
+
+# 函式級:三個產物全部改道到專案外
+cabal build all --ghc-options="-fwrite-ide-info -hiedir /tmp/hie"   # 在對方專案跑
+knot extract /path/to/other --hiedir /tmp/hie --db /tmp/idx.sqlite --output /tmp/cg.json
 ```
+
+**函式級仍然需要在對方專案跑一次 `cabal build`**——`.hie` 是 GHC 編譯期產物,
+沒有繞過的辦法。這是這條路線的固有成本。
 
 ## 指令
 

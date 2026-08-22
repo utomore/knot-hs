@@ -255,10 +255,21 @@ toMetaOptions c = MetaOptions
 toExtractOptions :: ExtractCmd -> XT.ExtractOptions
 toExtractOptions c = XT.ExtractOptions
   { XT.rootDir       = ecPath c
-  , XT.backendChoice = ecBackend c
+  , XT.backendChoice = narrowedBackend
   , XT.hiedbExe      = ecHiedbExe c
   , XT.dbPath        = ecDbPath c
   }
+ where
+  -- @--module-only@ 下 hiedb 不可能貢獻任何東西:抽取規則 2 明訂
+  -- @FactImport@ __永遠且只__來自 import-scan,而組裝規則 6 會讓 graph-core
+  -- 丟掉全部 decl 層事實。跑它只是白花索引時間——實測 knot-hs 自身
+  -- 2500 ms vs 120 ms,而兩者的 @codegraph.json@ 逐 byte 相同。
+  --
+  -- 只在 @--backend@ 停留在預設值 'Auto' 時收窄;使用者明確指定後端時
+  -- 尊重其選擇(例如拿 @--backend hiedb --module-only@ 除錯)。
+  narrowedBackend = case (ecModuleOnly c, ecBackend c) of
+    (True, Auto) -> ImportsOnly
+    (_,    b)    -> b
 
 -- | @--module-only@ → graph-core 的選項。
 toBuildOptions :: ExtractCmd -> BuildOptions
