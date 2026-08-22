@@ -66,11 +66,11 @@ import HieDb
   , withHieDb
   )
 
+import Knot.Extract.BuildDriver (HieLayout (..))
 import Knot.Extract.Types
   ( ExtractFailure (..)
   , ExtractOptions (..)
   , ExtractWarning (..)
-  , HieLayout (..)
   )
 import Knot.Meta.Types (ComponentRef)
 

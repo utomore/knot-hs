@@ -5,7 +5,7 @@ title: export-query
 description: 匯出與查詢子系統:codegraph.json 投影與四項導航查詢 CLI
 status: active
 created: 2026-08-20
-updated: 2026-08-22
+updated: 2026-08-23
 parent: system
 related-adr: [ADR-003, ADR-006]
 code-paths: [src/Knot/Export, src/Knot/Export.hs, src/Knot/Query, src/Knot/Query.hs, app]
@@ -67,6 +67,7 @@ queryGraphNotes   :: QueryGraph -> [(Text, Int)]                 -- 未知 relat
 queryGraphHasNode :: QueryGraph -> NodeId -> Bool                -- 節點存在性
 runQuery          :: QueryGraph -> QueryCommand -> QueryResult   -- 純函數
 renderResult      :: QueryResult -> Text                         -- stdout 文字
+restrictLevel     :: Level -> QueryGraph -> QueryGraph         -- E001:收斂為指定層的誘導子圖;LevelAll 為恆等
 ```
 
 `queryGraphHasNode` 存在的理由:`runQuery` 對「id 不存在」與「存在但無鄰居」都回空結果,呼叫端無從區分,而 CLI 需要對前者給明確訊息。沒有它,組裝層只能繞過 `QueryGraph` 的抽象直接讀內部欄位——那會讓「內容屬 Level 3」的承諾失效。
@@ -74,11 +75,13 @@ renderResult      :: QueryResult -> Text                         -- stdout 文�
 ```haskell
 data QueryCommand
   = FindNodes Text                  -- 關鍵字(id 與 label 的子字串比對,不分大小寫)
-  | Reachable NodeId Direction      -- 可達集合
+  | Reachable NodeId Direction (Maybe Int)   -- 可達集合;第三欄 = 深度上限(E001:CLI --depth N,Nothing = 不限)
   | ShortestPath NodeId NodeId      -- 兩點最短路徑
   | RankConnectivity Int            -- 連通度排名,參數為 top N
 
 data Direction = Forward | Reverse  -- Forward:它依賴誰;Reverse:誰依賴它
+
+data Level = LevelAll | LevelModule | LevelDecl   -- E001:查詢的層。decl 層節點 = 任一 contains 邊的目標;其餘為 module 層
 
 newtype NodeId = NodeId Text        -- 查詢面自有,與 graph-core 的同名型別無關:
                                     -- graph-load 手上只有 JSON 字串,而 graph-core 的
@@ -109,16 +112,20 @@ data LoadError
 5. **`Reachable` 不含起點自身**:只回距離 ≥ 1 的節點;起點若處在環上,會以其真實距離出現
 6. **`ShortestPath` 多解取字典序最小路徑**(路徑視為節點 id 序列比大小):**展開某個節點時**把它的鄰居依 id 排序後入列,前驅取最早抵達者,確保同輸入必同輸出。注意這與「把整層佇列依 id 重排」不同——後者會退化成反向貪心而選到錯的路徑(反例:`S→Alpha→Xray→T` 與 `S→Beta→Whisky→T`,`Alpha < Beta` 但 `Whisky < Xray`,正解是走 `Alpha` 那條)
 
+7. **層(E001)**:`restrictLevel` 把圖收斂為指定層的誘導子圖——`LevelModule` 只留非 `contains` 目標的節點、`LevelDecl` 只留 `contains` 目標,邊只留兩端都保留者,度數依留下的邊重算;四個查詢都在收斂後的圖上跑,`LevelAll` 即原圖。沒有 `contains` 邊的圖(非 knot 產生)全部視為 module 層
+8. **深度(E001)**:`Reachable` 的第三欄為深度上限,`Just N` 只回距離 ≤ N 的節點,`Nothing` 不限;規則 5 不變
+
 ### CLI 子命令對映(承接 system.md 頂層契約)
 
 ```text
-knot query find <keyword>            → FindNodes
-knot query reachable <id> [--reverse] → Reachable
-knot query path <from> <to>          → ShortestPath
-knot query rank [--top N]            → RankConnectivity(N 預設 10)
+knot query [--graph FILE] [--level all|module|decl] <子命令>      → 先 restrictLevel,再 runQuery(E001;預設 all)
+knot query find <keyword>                        → FindNodes
+knot query reachable <id> [--reverse] [--depth N] → Reachable … (Just N | Nothing);N ≥ 1(E001)
+knot query path <from> <to>                      → ShortestPath
+knot query rank [--top N]                        → RankConnectivity(N 預設 10)
 ```
 
-參數解析屬 CLI 組裝層;本子系統收 `QueryCommand`。
+參數解析屬 CLI 組裝層;本子系統收 `QueryCommand` 與 `Level`。
 
 ### CLI `extract` 旗標對映與 exit code(承接 system.md 頂層契約,S5 起)
 

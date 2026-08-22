@@ -42,7 +42,8 @@ buildGraph opts pm result = CodeGraph
   }
  where
   -- 規則 6:moduleOnly 時把事實窄化為 module 層建構子(decl 層直接忽略,
-  -- 不計入任何統計);本階段兩個取值輸出相同(尚無 decl 事實)
+  -- 不計入任何統計)。CLI 恆傳 False(S5 起對應的旗標已廢,ADR-006),這條只為
+  -- library 呼叫者存在(G-E006)
   facts0 = erFacts result
   facts
     | moduleOnly opts = filter isModuleLayer facts0

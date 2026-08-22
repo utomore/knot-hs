@@ -22,6 +22,7 @@ library knot-internal
                       Knot.Extract.ImportScan
                       Knot.Extract.HieIndex
                       Knot.Extract.HiedbFacts
+                      Knot.Extract.HieInstances
                       Knot.Graph
                       Knot.Graph.Types
                       Knot.Graph.FactGate
@@ -44,6 +45,9 @@ library knot-internal
                     , containers
                     , directory
                     , filepath
+                      -- ADR-007:只有 Knot.Extract.HieInstances 准 import GHC.*(.hie 讀取器);
+                      -- hiedb 本來就依賴 ghc,閉包不變。版本由 ADR-001 的鎖決定
+                    , ghc ^>=9.14
                     , hiedb ^>=0.8
                     , process
                     , sqlite-simple ^>=0.4.19

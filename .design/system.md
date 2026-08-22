@@ -5,7 +5,7 @@ title: knot-hs
 description: 讀 Haskell 專案的 .hie 與 import 產出 dev-flow 相容程式碼知識圖
 status: active
 created: 2026-08-20
-updated: 2026-08-22
+updated: 2026-08-23
 subsystems: [project-meta, extraction, graph-core, export-query]
 ---
 
@@ -38,7 +38,8 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
 - **語言 / 編譯器**:Haskell,GHC 9.14.1(base 4.22),`default-language: GHC2024`,cabal-install 3.16.1.0
 - **架構模式**:單一執行檔 `knot`,內部為四個 Bounded Context 的單向資料流 DAG(拓撲見下)
 - **硬性版本鎖**:`.hie` 的讀寫綁 GHC 版本,knot-hs 必須用與目標專案相同的 GHC 編譯(→ ADR-001;ADR-006 使其更關鍵——knot 自己產 `.hie` 又自己讀,兩端必須同版)
-- **關鍵依賴**(→ ADR-006):
+- **關鍵依賴**(→ ADR-006、ADR-007):
+  - **`ghc` library(build-depends,→ ADR-007)**:`implements` 邊直接讀 `.hie`(`GHC.Iface.Ext.*`)。hiedb 本來就依賴它,閉包不變;原始碼中**只有 extraction 的 hie-instances 一個模組**准 import `GHC.*`
   - **`hiedb`(build-depends 嵌入)**:函式級抽取的索引引擎,走 hiedb 的 library API 建索引與查詢,不 spawn 外部執行檔;`cabal.project` 以 `allow-newer: hie-compat:base, hie-compat:ghc` 解相依。**使用者不必安裝、不必知道它存在**
   - **目標專案的建置系統(`cabal`)**:`.hie` 缺席或過期時,knot **自行**對目標專案執行插樁建置(`-fwrite-ide-info`)產生之,建置產物落在 `.knot/` 的獨立 builddir,**不碰對方既有的 `dist-newstyle`**
   - 下游消費者:dev-flow `arch-audit/scripts/scan-graph.mjs`(非依賴,是契約對象;→ ADR-003)
@@ -51,7 +52,7 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
 
 | stanza | 內容 | 誰依賴它 |
 |---|---|---|
-| `library knot-internal`(`visibility: private`) | `src/` 全部 26 個模組 | `test-suite knot-test` |
+| `library knot-internal`(`visibility: private`) | `src/` 全部 27 個模組(F008 起) | `test-suite knot-test` |
 | `library`(公開) | 只 `reexported-modules` 四個子系統的進入點與對外 DTO 共 9 個模組 | `executable knot` |
 
 **exe 只依賴公開 library、test-suite 依賴 private sublibrary**——組裝層碰到非契約
@@ -110,8 +111,9 @@ knot extract [PATH]          產出 codegraph.json(需要時自行建置目標�
 
 knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導航問題
   --graph FILE               讀哪份圖,預設 ./codegraph.json(四個子命令共用)
+  --level all|module|decl    查詢的層,預設 all(四個子命令共用;export-query/E001,設計中)
   find <keyword>             關鍵字比對 id 與 label(不分大小寫)
-  reachable <id> [--reverse] 可達集合;--reverse 改問「誰依賴它」
+  reachable <id> [--reverse] [--depth N]  可達集合;--reverse 改問「誰依賴它」;--depth 限制跳數(E001,設計中)
   path <from> <to>           兩點最短路徑
   rank [--top N]             連通度排名,N 預設 10
 ```
@@ -232,10 +234,11 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 | **S3 函式級抽取** | extraction(hiedb-sqlite 後端)、graph-core(decl 層、產生碼過濾) | 兩層節點、`calls` / `uses` 邊、hub 洗版實測、循環依賴人工複驗 |
 | **S4 查詢 CLI** | export-query(查詢、CLI 組裝) | `knot query` 四項能力可用,`/feature-design`、`/bugfix` 定位加速接上 |
 | **S5 零前置重構** | extraction(hiedb 嵌入、自驅動建置、移除降級)、project-meta(hie-locate 退場)、export-query(砍旗標) | `knot extract .` 在**沒有 `.hie`、沒裝 hiedb** 的乾淨目標專案上一個命令跑出兩層圖;`--backend` / `--module-only` / `--hiedir` / `--hiedb` / `--db` 全部消失(→ ADR-006) |
+| **S6 `implements` 邊** | extraction(階段四 hie-instances:直接讀 `.hie`) | 五種 relation 齊全;fixture 與自掃出現 instance 節點與 `implements` 邊;graph-core 零修改(→ ADR-007、`extraction/F008`) |
 
 每階段結束以 MagicFarmer 驗收(唯讀)。
 
-**`implements` 邊不在 S3**(2026-08-21 調整):hiedb 0.8 的索引 schema 沒有 instance 表(實測八張表:mods / decls / defs / refs / exports / imports / typenames / typerefs),`FactInstance` 需要的「class + instance 標頭」無直接資料來源。`Fact` 的建構子保留、零邏輯,`implements` 邊另開 feature——要嘛從 refs 反推,要嘛直接讀 `.hie`(ADR-006 替代方案 2、3 的路線,目前未採用)。同理,S3 的 decl 層過濾改用 hiedb 的 `refs.is_generated` 事實,不再是「TH 過濾」的啟發式。
+**`implements` 邊不在 S3**(2026-08-21 調整):hiedb 0.8 的索引 schema 沒有 instance 表(實測八張表:mods / decls / defs / refs / exports / imports / typenames / typerefs),`FactInstance` 需要的「class + instance 標頭」無直接資料來源。`Fact` 的建構子保留、零邏輯,`implements` 邊另開 feature——要嘛從 refs 反推,要嘛直接讀 `.hie`。**2026-08-23 裁定直接讀 `.hie`**(ADR-007),立案為 extraction 階段四 `extraction/F008` hie-instances(spike 證實每個明寫 `instance` 在 `.hie` 裡是一個 `ClsInstD` 節點、deriving 不產生節點),graph-core 側零修改。同理,S3 的 decl 層過濾改用 hiedb 的 `refs.is_generated` 事實,不再是「TH 過濾」的啟發式。
 
 **進度**(2026-08-22):**S1–S4 四階段全數完成**,四個子系統的 14 份 feature 與三份全域優化(G-E001 / G-E002 / G-E003)皆 `done`。**S5 開工**:與 graphify 實測對照後發現 S1–S4 的成果在別人的專案上幾乎不可用(要裝第二個工具、要自己重建專案、要理解內部的能力分級),ADR-006 重定架構,extraction 與 export-query 的 Level 2 要重做。
 
@@ -247,4 +250,14 @@ S1–S4 完成時的唯讀實跑現況(當時以 `--db` 改道專案外;該旗�
 | particle-magic | 46 / 127 | 與 2026-08-21 相同 |
 | knot-hs 自掃 | 548 / 1947 | 0 警告;decl 層含 `calls` / `uses` 邊 |
 
-`knot extract` 的兩層抽取與 `knot query` 四項能力均可用。**唯一已知未做的能力是 `implements` 邊**,理由與去處見上一段。
+**S5 實跑驗收**(2026-08-23,ADR-006 的承諾第一次在乾淨樹上實測:先刪掉標的的 `.knot/`,以同一支 knot 各跑 cold / warm 一次;`--output` 改道到專案外,標的的 `git status` 前後皆為空):
+
+| 標的(commit) | cold(含目標專案完整建置) | warm(沒改動) | 節點 / 邊 | 備註 |
+|---|---|---|---|---|
+| MagicFarmer(`f889831`,141 `.hs`) | **66.1 s** | **1.4 s** | 1580 / 6576 | exit 0;cold / warm 的 `codegraph.json` byte 相同;graph 0 警告。extraction 75 則警告:標的的 `cabal.project` 寫了 `tests: True`,cabal 把被排除的 test-suite 也建了,其 spec `.hie` 對映到 `sfIncluded = False` 的檔 → 依 G-B001 規則逐檔警告並跳過(行為正確但吵,見下) |
+| particle-magic(`596b1f0`,223 `.hs`) | **35.1 s** | **0.7 s** | 1567 / 7027 | exit 0;byte 相同;extraction 0 警告;graph 7 則警告(`Main` 宣告於 5 個來源檔 → 消歧為 `Main@<file>`,`app/Main.hs` 對 `main` 的 3 條引用目標歧義被丟棄——D1 規則的預期行為) |
+| knot-hs 自掃 | — | 2.5 s | 540 / 1991 | E001 後;測試基線 526 不變(測試不含 E001 新增的型別) |
+
+兩個標的的 `FactInstance` 皆為 0(F008 前的預期)。**觀察到的候選優化**(未立案):目標專案自己的 `cabal.project` 開了 `tests: True` 時,`.knot/build/` 會出現被排除 component 的 `.hie`,hie-facts 每檔一則「cannot map」警告——`HieLayout` 每筆本來就帶 `ComponentRef`,hie-index 可在索引前依 `compExcluded` 過濾,把 75 則警告歸零;屬 extraction 單子系統的 E 文檔題目。
+
+`knot extract` 的兩層抽取與 `knot query` 四項能力均可用。**`implements` 邊自 2026-08-23 起成立**(`extraction/F008`,S6):明寫的 `instance` 成為 instance 節點並對其 class 發 `implements` 邊;`deriving` 不上圖。五種 relation 至此齊全。
