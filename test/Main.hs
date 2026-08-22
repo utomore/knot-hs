@@ -5,7 +5,7 @@
 module Main (main) where
 
 import Control.Exception (evaluate, throwIO)
-import Control.Monad (forM_)
+import Control.Monad (forM, forM_)
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Key as AK
 import qualified Data.Aeson.KeyMap as AKM
@@ -298,6 +298,7 @@ tests mHiedb = testGroup "knot-hs"
   , globalE003Tests
   , globalE001Tests
   , globalE004Tests
+  , globalB002Tests
   ]
 
 f001Tests :: TestTree
@@ -5544,30 +5545,29 @@ testGeneratedFilterSelfcheck = testCase "test_generated_filter_selfcheck" $ do
           -- 目標 3:兩種 hiedb 索引建法(走目錄 vs 逐檔清單)產出的圖相同。
           -- 走目錄會多收 8 個 deriving 字典的 defs 列(逐檔清單收不到),
           -- 過濾對稱化之後那 8 筆兩邊都被濾掉,節點與邊必須逐一相等。
-          -- 前提:.hie 目錄只含納入範圍內的 module。若含範圍外者(例如以
-          -- --enable-tests 產生時的 test-suite Main),`hiedb index <目錄>`
-          -- 會把測試檔裡的記錄欄位**使用**收成 library 選擇器的 defs 列、
-          -- 行號指到測試檔(實測 Knot.Export.Types.rootDir 被標成 L4482,
-          -- 該檔只有 38 行)→ 兩法必然不同。那是 G-B002 的獨立缺陷,不在
-          -- 本檢查的前提內,故明示跳過而非放寬斷言。
-          let outOfScope =
-                [ w | w <- erWarnings res
-                , hasText "cannot map indexed module" (ewMessage w) ]
+          -- 目標 3 的比對範圍在 G-B002 收斂為「節點與邊的**身分**」,不含行號。
+          --
+          -- 理由(2026-08-22 實測):hiedb 的兩種呼叫形式對**同一個**
+          -- @(hieFile, occ)@ 會寫出不同的 @defs.sl@——`fExportOptions:rootDir`
+          -- 在逐檔清單索引是 19、走目錄索引是 4492,而 @Knot/Export/Types.hs@
+          -- 只有 38 行,4492 是 @test/Main.hs@ 的行號。**走目錄那個是錯的**。
+          -- knot 正式路徑用逐檔清單(為了排除幽靈 .hie),取到的是正確值,
+          -- 所以「兩法必須完全相等」這個不變量本身就不該成立。
+          --
+          -- 原本的意圖(逐檔清單不得漏收任何節點)由身分比對完整保留;
+          -- 行號正確性改由 'testDeclLineWithinFile' 直接守住,比互相比對更強。
           mExe <- findExecutable "hiedb"
-          if not (null outOfScope)
-            then putStrLn ("[skip] G-E003 目標 3(兩種索引建法比對):.hie 含 "
-                    <> show (length outOfScope)
-                    <> " 個納入範圍外的 module,走目錄索引會被污染,見 G-B002")
-            else forM_ mExe $ \exe -> do
-              let dirDb = tmp </> "knot-hs-ge003-self" </> "dir.sqlite"
-              (code, _, _) <- readProcessWithExitCode exe
-                ["-D", dirDb, "--src-base-dir", ".", "index", hieDir hie] ""
-              code @?= ExitSuccess
-              resDir <- extract
-                ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just dirDb }) pm
-              let gDir = buildGraph defBuildOpts pm resDir
-              cgNodes gDir @?= cgNodes g
-              cgEdges gDir @?= cgEdges g
+          forM_ mExe $ \exe -> do
+            let dirDb = tmp </> "knot-hs-ge003-self" </> "dir.sqlite"
+            (code, _, _) <- readProcessWithExitCode exe
+              ["-D", dirDb, "--src-base-dir", ".", "index", hieDir hie] ""
+            code @?= ExitSuccess
+            resDir <- extract
+              ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just dirDb }) pm
+            let gDir = buildGraph defBuildOpts pm resDir
+                edgeId e = (geSource e, geRelation e, geTarget e)
+            map gnId (cgNodes gDir) @?= map gnId (cgNodes g)
+            map edgeId (cgEdges gDir) @?= map edgeId (cgEdges g)
           -- 唯讀驗收:目標專案內不得新建 .knot/
           doesDirectoryExist ".knot" >>= (@?= knotBefore)
           putStrLn ("[selfcheck/G-E003] nodes=" <> show (length (cgNodes g))
@@ -5991,3 +5991,52 @@ testContractLabelTable = testCase "test_contract_label_table" $ do
             <> (if wantNonContract then "非契約面" else "契約面")
             <> ", but its section reads " <> show grp)
           (isNonContract == wantNonContract)
+
+--------------------------------------------------------------------------------
+-- G-B002 節點行號必須落在其原始檔的行數範圍內
+--------------------------------------------------------------------------------
+
+globalB002Tests :: TestTree
+globalB002Tests = testGroup "global/G-B002 hiedb-dir-index-defs-pollution"
+  [ testDeclLineWithinFile
+  ]
+
+-- | G-B002:每個節點的 @gnLine@ 都必須落在 @gnFile@ 的實際行數內。
+--
+-- 這是「@(檔案, 行號)@ 這一對必須自洽」最直接的守門,比 G-E003 目標 3 原本的
+-- 「兩種索引建法互相比對」更強——後者只證明兩邊一樣,不證明兩邊是對的
+-- (實測走目錄索引會把 @Knot.Export.Types.rootDir@ 標成該檔的第 4492 行,
+--  而它只有 38 行)。
+--
+-- 同時是 G-B001 那類錯歸的通用防線:19 行的 @app\/Main.hs@ 掛上 L3789 的節點
+-- 會被這條直接擋下。
+--
+-- 需要 hiedb 與自身的 @.hie@;缺任一就印明原因跳過(比照其他 selfcheck)。
+testDeclLineWithinFile :: TestTree
+testDeclLineWithinFile = testCase "test_decl_line_within_file" $ do
+  pm <- loadProjectMeta (defOpts ".")
+  case pmHie pm of
+    Just hie | not (null (hieFiles hie)) -> do
+      tmp <- getTemporaryDirectory
+      let db = tmp </> "knot-hs-gb002-self" </> "self.sqlite"
+      removePathForcibly (takeDirectory db)
+      res <- extract ((extOpts Auto) { XT.rootDir = ".", XT.dbPath = Just db }) pm
+      if erLevel res /= DeclLevel
+        then putStrLn "[skip] test_decl_line_within_file: hiedb unavailable, no decl layer"
+        else do
+          let g = buildGraph defBuildOpts pm res
+              located = [ (gnId n, gnFile n, ln)
+                        | n <- cgNodes g, Just ln <- [gnLine n] ]
+          assertBool "self scan should produce located nodes" (not (null located))
+          overflow <- fmap concat $ forM located $ \(nodeId, file, ln) -> do
+            body <- readUtf8 file
+            let total = length (T.lines body)
+            pure [ (nodeId, file, ln, total) | ln > total ]
+          assertBool
+            ("nodes whose line exceeds their file's length: " <> show (take 8 overflow))
+            (null overflow)
+          putStrLn ("[selfcheck/G-B002] 檢查了 " <> show (length located)
+            <> " 個帶行號的節點,全部落在檔案範圍內")
+      removePathForcibly (takeDirectory db)
+    _ -> putStrLn
+      "[skip] test_decl_line_within_file: knot-hs itself has no .hie files"
