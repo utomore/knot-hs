@@ -317,26 +317,32 @@ buildModIndex sfs rows = (idx, reverse warns)
 -- 路徑是絕對路徑的尾段」這個必然成立的事實。邊界必須落在 @\'\/\'@ 上,
 -- 故 @\"emo\/Core.hs\"@ 不會誤命中 @\"src\/Demo\/Core.hs\"@。
 resolveModuleSource
-  :: [SourceFile]      -- ^ pmSources(已由 backend-select 窄化)
+  :: [SourceFile]      -- ^ pmSources(**完整**清單,含 @sfIncluded = False@ 者)
   -> ModuleName        -- ^ mods.mod
   -> Maybe Text        -- ^ mods.hs_src(NULL 時為 Nothing)
   -> Maybe FilePath
 resolveModuleSource sfs modName mHsSrc =
   case mHsSrc >>= longestSuffixMatch of
-    Just p  -> Just p
+    -- 命中被排除的檔 → 這份 .hie 屬於納入範圍外的原始檔,整批跳過(G-B001)。
+    -- 這裡**不能**退回 module 名猜測:同名時(exe 與 test-suite 都有 Main)
+    -- 會把 test 的宣告掛到 executable 的檔案上。
+    Just sf | sfIncluded sf -> Just (sfPath sf)
+            | otherwise     -> Nothing
+    -- 什麼都沒命中 → 路徑因大小寫 / 8.3 短檔名 / symlink 對不上,保命網照舊
     Nothing -> uniqueByModule
  where
   longestSuffixMatch raw =
-    case [ sfPath sf | sf <- sfs, matches (normalise raw) (T.pack (sfPath sf)) ] of
+    case [ sf | sf <- sfs, matches (normalise raw) (T.pack (sfPath sf)) ] of
       []   -> Nothing
       hits -> Just (longest hits)
   -- 同長度且同為後綴 ⇒ 同一個字串,故長度即全序
-  longest = foldr1 (\a b -> if length a >= length b then a else b)
+  longest = foldr1 (\a b -> if length (sfPath a) >= length (sfPath b) then a else b)
   matches src rel = src == rel || (T.singleton '/' <> rel) `T.isSuffixOf` src
   normalise = T.map (\c -> if c == '\\' then '/' else c)
-  uniqueByModule = case [ sfPath sf | sf <- sfs, sfModule sf == Just modName ] of
-    [p] -> Just p
-    _   -> Nothing    -- 零筆或多筆(例:多個 Main)都視為落空
+  uniqueByModule =
+    case [ sfPath sf | sf <- sfs, sfIncluded sf, sfModule sf == Just modName ] of
+      [p] -> Just p
+      _   -> Nothing    -- 零筆或多筆(例:多個 Main)都視為落空
 
 --------------------------------------------------------------------------------
 -- 產生碼判準(G-E003)

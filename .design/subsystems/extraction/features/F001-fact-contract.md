@@ -5,7 +5,7 @@ title: fact-contract
 description: 抽取契約 DTO、後端抽象與 auto 探測降級合成
 status: done
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-22
 depends-on: [project-meta/F001]
 related-adr: [ADR-002]
 related-feature: []
@@ -51,7 +51,7 @@ extraction 子系統的第一個 feature:把 Level 2「對外契約」「事實�
 | 事實流 DTO `Fact`(五個建構子全部)、`QualName`、`NameSpace`、`DeclKind`、`BackendReport`、`ExtractWarning` | 首次定義,原文一致;`ExtractWarning` 依 D1 為 `{ ewSource, ewMessage }` |
 | `ModuleName` 共用 project-meta 契約 | 依 D2 直接 `import Knot.Meta.Types (ModuleName (..))`,不重複定義 |
 | 模組介面 `Backend`(`bName` / `bLevel` / `bProbe` / `bRun`)、`ProbeResult` | 首次定義,原文一致;本階段無實例(測試以假後端填充) |
-| 抽取規則 1(納入範圍) | backend-select 在調度前把 `pmSources` 窄化為 `sfIncluded = True` 的子集(假設 A1) |
+| 抽取規則 1(納入範圍) | 各後端在自己的迭代點只處理 `sfIncluded = True` 的檔(假設 A1;**G-B001 起**改為此,原本是 backend-select 調度前統一窄化) |
 | 抽取規則 3(auto 合成與降級) | `Auto` 跑全部探測通過的後端;`ImportsOnly` / `HiedbOnly` 只跑指定後端;不可用者記入 `BackendReport` 並使 `erLevel` 降級 |
 | 抽取規則 7(best-effort) | 探測與執行全程包例外;單一後端失敗 → 報告 + 警告 + 續跑其他後端,絕不中斷 |
 | 抽取規則 8(決定性) | 合成後事實流以全序排序;報告、警告依固定的註冊序 |
@@ -259,7 +259,7 @@ runBackends :: [Backend] -> ExtractOptions -> ProjectMeta -> IO ExtractResult
 
 ## 待確認假設
 
-- A1: 規則 1「只處理 `sfIncluded = True`」由誰落實?契約卡指派給本 feature,但 `Backend.bRun` 收的是完整 `ProjectMeta` → 採取:backend-select 在調度前窄化 `pmSources`,後端只看得到 included 檔(單點強制,`Backend` 簽名不變)→ 影響:若裁定各後端自行過濾,移除窄化並把過濾寫進 `F002` / `F004` 實作
+- A1: 規則 1「只處理 `sfIncluded = True`」由誰落實?契約卡指派給本 feature,但 `Backend.bRun` 收的是完整 `ProjectMeta` → 採取:backend-select 在調度前窄化 `pmSources`,後端只看得到 included 檔(單點強制,`Backend` 簽名不變)→ 影響:若裁定各後端自行過濾,移除窄化並把過濾寫進 `F002` / `F004` 實作 → **G-B001 已改採該替代方案**(2026-08-22):窄化會抹掉「這份 `.hie` 屬於一個被排除的檔案」的事實,讓 hiedb-facts 的 `hs_src` 比對落空後誤退回 module 名猜測。現改為 `runBackends` 不預先窄化、`ImportScan` 在迭代點套規則 1、`resolveModuleSource` 依 `sfIncluded` 分流
 - A2: `BackendChoice` 如何對應到具體後端?契約未定辨識方式 → 採取:以 `bName` 比對契約字串常數(`"import-scan"` / `"hiedb"`,取自 design.md `brBackend` 的值域)→ 影響:若改以 `bLevel` 判定,只改選擇函數一處
 - A3: 規則 8「排序穩定」的手段未指定 → 採取:為 `Fact` 及其成員 DTO derive `Ord`,合成後對整條事實流做全序排序(不依賴後端產出序)→ 影響:若裁定必須保留後端產出序(只要求各後端自身決定性),改為不排序、僅固定後端串接序;deriving 清單同步縮減
 - A4: 「無任何後端成功執行」時 `erLevel` 取值未定義(`CapabilityLevel` 只有兩個值)→ 採取:回 `ModuleLevel`(能力下限),由 `erReports` 表達「其實什麼都沒跑」→ 影響:若需要第三個「無能力」等級,屬 Level 2 契約變更
