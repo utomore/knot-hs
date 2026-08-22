@@ -154,7 +154,7 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 已建 Level 2:`.design/subsystems/export-query/design.md`
 
-- **職責**:把圖 IR 投影成 `codegraph.json`(欄位規格與 relation 分類遵守 ADR-003,`built_at_commit` 自動偵測);S4 起提供查詢 CLI(關鍵字查節點、反向可達、兩點最短路徑、連通度排名,只走依賴類邊);**並承載 CLI 組裝層**——`knot` 的參數解析、四站管線串接、上游警告匯流與 exit code 決定。組裝層本身是跨子系統的黏合層,落在此處是因為兩個子命令的主體都在管線末站
+- **職責**:把圖 IR 投影成 `codegraph.json`(欄位規格與 relation 分類遵守 ADR-003,`built_at_commit` 自動偵測);S4 起提供查詢 CLI(關鍵字查節點、反向可達、兩點最短路徑、連通度排名,只走依賴類邊);**並承載 CLI 組裝層**——`knot` 的參數解析、四站管線串接、上游警告匯流與 exit code 決定(含 extraction 整體失敗 → exit 1 且不寫檔,ADR-006)。組裝層本身是跨子系統的黏合層,落在此處是因為兩個子命令的主體都在管線末站
 - **邊界(不做)**:不建圖、不改圖;查詢只讀不寫;組裝層不含任何投影/載入/查詢邏輯(全部委由四個子系統的契約函式)
 - **對外契約摘要**:輸入圖 IR(或既有 codegraph.json),輸出 JSON 檔與 stdout 查詢結果
 
