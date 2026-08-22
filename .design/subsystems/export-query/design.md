@@ -138,7 +138,7 @@ cli-assembly 不是 library 契約面,但它承接 system.md「CLI 介面(頂層
 
 | 情況 | exit | 與 `--strict` 的關係 |
 |---|---|---|
-| `extract` 回 `Left ExtractFailure`(建置失敗、GHC 版本不合、索引失敗、零原始檔) | **1** | 無關——這是整體失敗,不是警告;錯誤訊息印 stderr,**不寫** `codegraph.json` |
+| `extract` 回 `Left ExtractFailure`(建置失敗、GHC 版本不合、索引失敗、零原始檔) | **1** | 無關——這是整體失敗,不是警告;錯誤訊息印 stderr,**不寫** `codegraph.json`。**`VersionMismatch` 的訊息必須含 `cabal install knot-hs -w ghc-<vmHie>`**——一份 knot 只能讀一版 GHC 的 `.hie`,這是使用者唯一能做的事(extraction 規則 8) |
 | `writeCodegraph` 拋 `IOException`(寫不出檔) | 1 | 無關 |
 | 三站警告(`pmWarnings` + `erWarnings` + `cgWarnings`)總數 > 0 | 0 | `--strict` 時改為 1 |
 | 一切正常 | 0 | — |

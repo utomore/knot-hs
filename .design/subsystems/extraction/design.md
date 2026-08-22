@@ -125,7 +125,7 @@ data ExtractWarning = ExtractWarning   -- 比照 MetaWarning 模式
 5. **插樁建置由 extraction 驅動**(ADR-006):每次 `extract` 都對目標專案執行**一次** `cabal build all`(納入的 test-suite / benchmark 以 `--enable-tests` / `--enable-benchmarks` 帶入),加上 `-fwrite-ide-info` 與指向 `.knot/build/` 的 builddir、**不帶 `-hiedir`**。**增量交給 cabal**——它用內容雜湊判斷要不要重編,knot 不自己發明一套 mtime 比對(那會漏掉 `.cabal` 改動、旗標改動、相依升版)。沒改動時是一次 up-to-date 檢查(實測 247 ms)。**cabal 的 stdout / stderr 即時轉發到呼叫端的 stderr**——這是轉發子程序輸出,不是 library 自行列印(「不印」的對象是警告與報告,那些仍由 CLI 層印);失敗時尾段進 `bfDetail`。任一 component 建置失敗 → `BuildFailed`,**不 fallback**
 6. **每個 component 各自一個 `.hie` 目錄**——由 cabal 天然提供,不由 knot 指定:建置**只帶 `-fwrite-ide-info`、不帶 `-hiedir`**,GHC 會把 `.hie` 寫在 `.hi` 旁,而 cabal 本來就替每個 component 準備獨立輸出目錄(`…/<kind>/<comp>/…/extra-compilation-artifacts/hie/`)。理由:GHC 的 `-hiedir` 依 module 名決定路徑、不含 component,`executable` 與 `test-suite` 都有 `Main` 時共用目錄會互相覆蓋(G-B001 的根因)。**不得改用逐 component 各帶 `-hiedir` 的作法**:2026-08-22 spike 證實換 `--ghc-options` 會被 cabal 當組態變更,每次全量重編(9.2 s vs 247 ms)。分目錄後碰撞在設計上不存在,每個 `.hie` 的 component 歸屬由路徑推得
 7. **`.knot/` 快取目錄**:固定在 `<root>/.knot/`,**不提供改道**(它是快取,與 `dist-newstyle` 同性質)。佈局:`build/`(cabal builddir,`.hie` 在其內各 component 的輸出目錄下,規則 6)、索引檔、以及**首次建立時自動寫入內容為 `*` 的 `.gitignore`**——使用者連 `.gitignore` 都不用改。內容格式屬 Level 3 自主權;刪掉整個目錄只會讓下次變慢
-8. **GHC 版本相容**(ADR-001):`.hie` header 的 GHC 版本必須與 knot 自身相同,不合 → `VersionMismatch` **失敗**(不再是警告或降級)。目標專案若以 `with-compiler` 釘了別的 GHC,就是這條失敗
+8. **GHC 版本相容**(ADR-001):只索引 `.knot/build/` 下 `ghc-<knot 自身版本>/` 目錄內的 `.hie`——cabal 的 builddir 路徑天然帶版本,**不讀檔頭**;其他版本目錄是 GHC 升級後的殘骸(cabal 不會再碰),略過。**零個相符 → `VersionMismatch` 失敗**(不再是警告或降級),`vmHie` 帶觀察到的版本,CLI 層據此印出 `cabal install knot-hs -w ghc-<版本>`。目標專案若以 `with-compiler` 釘了別的 GHC,就是這條失敗。一份 knot 只能讀一版 GHC 的 `.hie`(`.hie` 是 GHC 內部結構的二進位序列化,讀取器在 `ghc` library 裡、精確比對版本),跨版本的正解是每版 GHC 各裝一份 knot
 9. **單檔 best-effort**(在兩層都整體成立的前提下):單一原始檔解析失敗、單一 `.hie` 對映不到納入範圍內的原始檔(含過期的 `.hie`:模組已刪但舊檔還在 `.knot/build/`)→ 警告 + 跳過,仍產出事實流。這一條與規則 3 的分界:**整體**拿不到是失敗,**個別**檔案拿不到是警告
 10. **決定性**:事實流排序穩定,同樣輸入產生同樣輸出
 
@@ -236,7 +236,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
 | 5 | build-driver | 一次 `cabal build all` 插樁建置進 `.knot/build/`、`.hie` 由 cabal 按 component 分目錄、`.gitignore` 自建、`BuildFailed` 語意 | build-driver | - | F005 |
-| 6 | hiedb-embed | hiedb 改 library 嵌入、列舉 `HieLayout`、版本檢查改為失敗、增量索引 | hie-index | #5 | - |
+| 6 | hiedb-embed | hiedb 改 library 嵌入、列舉 `HieLayout`、版本檢查改為失敗、增量索引 | hie-index | #5 | F006 |
 | 7 | two-layer-contract | 契約收斂(砍 `BackendChoice` / `CapabilityLevel` / `BackendReport`、加 `ExtractFailure`)、fact-pipeline 全有全無、移除探測與降級 | fact-pipeline、import-scan | #5, #6 | - |
 
 (共 7 個 features、3 個階段;階段三全部完成即 S5 在 extraction 側交付。`#5` 與 `#6` 可平行——`HieLayout` 已在契約定義,`#6` 可先以固定佈局測試)
@@ -258,7 +258,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 - **負責模組**:hie-index
 - **實作的 Level 2 介面**:模組介面 `ensureIndex`(新簽名,吃 `HieLayout`)、`IndexHandle`;DTO `ExtractFailure` 的 `VersionMismatch`、`IndexFailed` 建構子;落實抽取規則 8(版本不合即失敗)、規則 1 的 `.hie` 列舉部分(自 `HieLayout` 取,不再有 `pmHie`)
 - **資料流管線段落**:從 `HieLayout` 進,經版本檢查 → 內嵌 hiedb 的增量索引,出 `IndexHandle`(或失敗)
-- **驗收標準**:**knot-hs 的 `build-depends` 含 hiedb、`cabal.project` 含對應的 `allow-newer`,且閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` 仍 exit 0**(ADR-002 點名的編譯連動風險要實際承受一次);程式碼中**不再有**任何 spawn `hiedb` 執行檔的路徑(PATH 查找、`--help` 探測、命令列分批全部移除);對 fixture 專案索引後,索引內 `mods` 列數 = `hlFiles` 筆數;對同一 `HieLayout` 連跑兩次,第二次索引列數不變且明顯較快(增量);以別版 GHC 產的 `.hie`(fixture 自備)→ `VersionMismatch` 且兩個版本字串都填;索引失敗(例如索引檔所在目錄不可寫)→ `IndexFailed`。**索引需求 hiedb 的測試不再有「沒裝就跳過」的分支**——hiedb 現在是 build-depends,沒裝就編不過
+- **驗收標準**:**knot-hs 的 `build-depends` 含 hiedb、`cabal.project` 含對應的 `allow-newer`,且閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` 仍 exit 0**(ADR-002 點名的編譯連動風險要實際承受一次);程式碼中**不再有**任何 spawn `hiedb` 執行檔的路徑(PATH 查找、`--help` 探測、命令列分批全部移除);對 fixture 專案索引後,索引內 `mods` 列數 = **版本相符**的 `hlFiles` 筆數;對同一 `HieLayout` 連跑兩次,第二次索引列數不變且明顯較快(增量);`HieLayout` 只含 `ghc-9.12.2/` 路徑時 → `VersionMismatch` 且 `vmHie` = `9.12.2`、`vmKnot` = 自身版本(路徑判定,不需別版 GHC 的 fixture);混有自身版本與舊版路徑時只索引相符者;索引失敗(例如索引檔所在目錄不可寫)→ `IndexFailed`。**索引需求 hiedb 的測試不再有「沒裝就跳過」的分支**——hiedb 現在是 build-depends,沒裝就編不過
 - **明確不做**:不驅動建置(build-driver 的事);不讀索引出事實(hie-facts 的事);不處理 `.hie` 對映不到原始檔的情況(規則 9,hie-facts 的丟棄路徑);不提供索引位置覆寫
 
 ### two-layer-contract
