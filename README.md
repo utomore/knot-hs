@@ -229,19 +229,21 @@ hiedb 0.8 的索引 schema 沒有 instance 表(實測八張表:mods / decls / de
 exports / imports / typenames / typerefs),class/instance 關係沒有直接的資料來源。
 `Fact` 的建構子已保留,邊的推導待後續 feature。
 
-### 4. `hs-source-dirs` 取預設值 `.` 的 component 會認領整個 repo
+### 4. 沒列在 `exposed-modules` / `other-modules` / `main-is` 的檔案不屬於任何 component
 
-Cabal 的 `hs-source-dirs` 預設值是 `.`。knot 判斷「哪個檔屬於哪個 component」**只看
-目錄前綴**,不看 component 宣告的 `exposed-modules` / `other-modules` / `main-is`。
-所以某個 component 省略這欄時,repo 內**全部** `.hs` 都會被判給它並標為納入——包含
-test fixture、範例碼、腳本。再加上「只要任一 owner 未排除即納入」的判定規則,
-test-suite 的排除也抵銷不掉。
+knot 判斷「哪個檔屬於哪個 component」看兩件事:檔案落在該 component 的
+`hs-source-dirs` 下,**且** 由路徑推得的 module 名在它的 `exposed-modules` /
+`other-modules` 清單內(或路徑就是它的 `main-is`)。這是 Cabal 本身的語意,
+所以 `hs-source-dirs` 省略(預設 `.`)的 component 也只會認領它真正宣告的 module,
+不會把 test fixture、範例碼、腳本整個 repo 吃進去。
 
-**迴避法**:在目標專案的 `.cabal` 明寫 `hs-source-dirs`。
+代價是 `.cabal` 漏列的 module(cabal 建置時會警告「modules not listed」的那些)
+在 knot 眼裡沒有 owner:module 名退回大寫尾綴法推導,納入與否退回路徑啟發式
+(頂層 `test/`、`tests/`、`bench/` 排除、其餘納入)。要讓它們被正確歸類,補齊
+`other-modules` 即可——這同時也是 cabal 要求的。
 
-已立案為 `.design/subsystems/project-meta/enhancements/E001-component-module-list-ownership.md`
-——正解是改看 component 的 module 清單,但那是 project-meta 的 Level 2 契約變更,
-會改變每個被掃專案的納入結果,需要獨立的 scope 討論。
+(原本只看目錄前綴的行為與修正過程見
+`.design/subsystems/project-meta/enhancements/E001-component-module-list-ownership.md`。)
 
 ### 5. 驗證覆蓋面
 

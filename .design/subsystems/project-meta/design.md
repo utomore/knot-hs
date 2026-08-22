@@ -5,7 +5,7 @@ title: project-meta
 description: 專案發現子系統:cabal component 解析、檔案歸類與排除判定
 status: active
 created: 2026-08-20
-updated: 2026-08-22
+updated: 2026-08-23
 parent: system
 related-adr: [ADR-001, ADR-006]
 code-paths: [src/Knot/Meta, src/Knot/Meta.hs]
@@ -55,6 +55,8 @@ data ComponentMeta = ComponentMeta
   { compName       :: Text             -- 前綴比照 cabal target 語法:lib: / exe: / flib: / test: / bench:(A3)
   , compKind       :: ComponentKind
   , compSourceDirs :: [FilePath]       -- hs-source-dirs(repo 相對)
+  , compModules    :: [ModuleName]     -- exposed-modules ++ other-modules(宣告序、去重;E001)
+  , compMainIs     :: Maybe FilePath   -- main-is,相對 hs-source-dirs 的原樣路徑(正斜線);library / foreign-library 為 Nothing(E001)
   , compExcluded   :: Bool             -- 依 kind 與 includeTests 判定;extraction 據此決定建置哪些 component
   }
 
@@ -86,8 +88,8 @@ data MetaWarning = MetaWarning         -- (A2 裁決)
 ### 判定規則(契約的一部分)
 
 1. **排除 kind**:`TestSuite`、`Benchmark` 預設 `compExcluded = True`,`includeTests = True` 時翻轉;其餘 kind 一律納入
-2. **一對多歸類**:檔案落在多個 component 的 `hs-source-dirs` 時,`sfOwners` 全列;**只要任一 owner 未排除即 `sfIncluded = True`**(例:particle-magic 的 `app/Main.hs` 同屬 executable 與 test-suite → 納入)
-3. **module 對映**:S2 起以「檔案路徑相對於所屬 component 的 hs-source-dirs」精確推導;S1(無 `.cabal` 解析)以**大寫路徑尾綴法**——取路徑中最長的、每段皆大寫開頭的尾綴(`src/MagicFarmer/Render/Core.hs` → `MagicFarmer.Render.Core`)。兩法對呼叫者透明,契約不變;不屬任何 component 的檔案退回大寫尾綴法(A5)
+2. **一對多歸類**(E001 改寫):檔案 f 歸屬 component c,當且僅當 c 的某個 `hs-source-dirs` d 是 f 的目錄前綴,**且**「f 相對 d 推得的 module 名 ∈ `compModules c`」或「f 相對 d 的路徑 == `compMainIs c`」。命中多個 component 時 `sfOwners` 全列;**只要任一 owner 未排除即 `sfIncluded = True`**(例:`app/Main.hs` 同時是 executable 與 test-suite 的 `main-is` → 兩個 owner → 納入)。只落在某個 `hs-source-dirs` 下、卻沒被任何 component 的 module 清單或 `main-is` 指到的檔案(漏列的 `other-modules`、fixture、腳本)**無 owner**,走 A5 退回——`hs-source-dirs` 取預設值 `.` 的 component 因此不會認領整個 repo
+3. **module 對映**:S2 起以「檔案路徑相對於所屬 component 的 hs-source-dirs」精確推導(取最長命中的 dir);**只經 `main-is` 命中**的檔案 `sfModule = Main`(Haskell 語意:`main-is` 檔的 module 名與路徑無關,E001);S1(無 `.cabal` 解析)以**大寫路徑尾綴法**——取路徑中最長的、每段皆大寫開頭的尾綴(`src/MagicFarmer/Render/Core.hs` → `MagicFarmer.Render.Core`)。兩法對呼叫者透明,契約不變;不屬任何 component 的檔案退回大寫尾綴法(A5)
 4. **S1 排除啟發式**:無 component 資訊時,頂層 `test/`、`tests/`、`bench/` 目錄下的檔案視為排除;S2 起由 component 判定取代(無 owner 的檔案仍沿用本啟發式,A5)
 5. ~~**`.hie` 發現順序**~~:**S5 廢除**(ADR-006)。`.hie` 不再是輸入,沒有發現順序可言
 6. ~~**幽靈判定**~~:**S5 廢除**,移交 extraction 抽取規則 9(單檔 best-effort:對映不到納入範圍內原始檔的 `.hie` 警告 + 跳過)
@@ -95,7 +97,7 @@ data MetaWarning = MetaWarning         -- (A2 裁決)
 
 編號 5、6 保留不重排,讓既有 feature 文檔與閘門紀錄的引用仍能對上。
 
-**已知待解**(`enhancements/E001`):component 歸屬只看 `hs-source-dirs` 目錄前綴、不看 component 宣告的 module 清單,`hs-source-dirs` 取預設值 `.` 時會認領整個 repo。是規則 2、3 的精度問題,需獨立 scope 討論,不在 S5 範圍。
+**E001(2026-08-23)**:規則 2 原本只看 `hs-source-dirs` 目錄前綴,`hs-source-dirs` 取預設值 `.` 的 component 會認領整個 repo;現改為同時對照 component 宣告的 module 清單與 `main-is`(`ComponentMeta` 的 `compModules` / `compMainIs` 即為此而加)。
 
 ## 內部模組劃分(Internal Modules)
 
@@ -204,7 +206,7 @@ indexSources :: MetaOptions -> [PackageMeta] -> IO ([SourceFile], [MetaWarning])
 - **負責模組**:discovery、cabal-model、source-index
 - **實作的 Level 2 介面**:模組介面 `resolvePackage`;DTO `PackageMeta`、`ComponentMeta`、`ComponentKind`、`ComponentRef`;強化 `indexSources` 落實判定規則 1(kind 排除)、規則 2(一對多歸類與納入判定)、規則 3 的精確 module 對映(取代大寫尾綴法);`findCabalFiles` 支援 `cabal.project` 的多套件列表
 - **資料流管線段落**:從 discovery 的 `.cabal` 清單進,經 cabal-model → source-index,出 owners/included/module 填實的 `[SourceFile]` 與 `pmPackages`
-- **驗收標準**:對 particle-magic(唯讀)執行——列出 9 個 component(named library 2、executable 4、foreign-library 1、test-suite 1、benchmark 1);`app/` 下檔案 `sfOwners` 含 executable 與 test-suite(A9:實際亦含 benchmark,共三個 owner)且 `sfIncluded = True`;僅屬 test-suite 的 `test/` 檔案 `sfIncluded = False`;多套件 `cabal.project` 能列出多個 `PackageMeta`(以臨時 fixture 專案驗證,不得改動驗收標的專案)
+- **驗收標準**:對 particle-magic(唯讀)執行——列出 9 個 component(named library 2、executable 4、foreign-library 1、test-suite 1、benchmark 1);`app/` 下檔案 `sfOwners` 含 executable 與 test-suite(A9:實際亦含 benchmark,共三個 owner——**E001 起**這句只在該檔同時是三者的 `main-is` / module 清單成員時成立;`comps` fixture 的 `app/Main.hs` 因 test/bench 的 `main-is` 是別的檔,owner 只剩 executable)且 `sfIncluded = True`;僅屬 test-suite 的 `test/` 檔案 `sfIncluded = False`;多套件 `cabal.project` 能列出多個 `PackageMeta`(以臨時 fixture 專案驗證,不得改動驗收標的專案)
 - **明確不做**:不做非預設 flag 組合的 conditional 求值(以預設 flag 攤平);不解析 build-depends 依賴圖;不讀 `.hie`;不掃 `dist-newstyle` 內的原始碼
 
 ### hie-discovery

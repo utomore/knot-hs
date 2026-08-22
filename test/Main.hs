@@ -224,6 +224,11 @@ condFixture    = "test/fixtures/cond"
 multiFixture   = "test/fixtures/multi"
 brokenFixture  = "test/fixtures/broken"
 
+-- | project-meta/E001 用:library 與 test-suite 省略 hs-source-dirs(預設 `.`)、
+-- executable 的 main-is 在子目錄,外加兩個沒被任何 component 列出的雜檔。
+dotdirFixture :: FilePath
+dotdirFixture = "test/fixtures/dotdir"
+
 -- | graph-core/F001 端到端用:含真實內部 import、外部 import、重複 import
 -- 與自 import 的專案樹。
 graphFixture :: FilePath
@@ -267,6 +272,7 @@ main = defaultMain tests
 tests :: TestTree
 tests = testGroup "knot-hs"
   [ f001Tests, f002Tests, f004Tests
+  , projectMetaE001Tests
   , extractionF001Tests, extractionF002Tests
   , extractionF004Tests
   , extractionF005Tests
@@ -515,12 +521,16 @@ testFindCabalProject = testCase "test_find_cabal_project" $ do
     _   -> assertFailure ("expected exactly one warning, got: " <> show w4)
 
 -- F002 T6: 規則 2——一對多歸類、sfIncluded 判定、includeTests 翻轉、無 owner 退回啟發式
+--
+-- E001 起 app/Main.hs 只剩 exe:comps-exe 一個 owner:test/bench 雖然把 app 列進
+-- hs-source-dirs,但它們的 main-is 是 Spec.hs / Bench.hs、也沒把 Main 列進
+-- other-modules,依新契約不算它們的(原「三個 owner」是純目錄前綴規則的產物)。
+-- 一對多的案例改由 E001 T3 以 dotdir fixture 的 Foo.hs(lib + test 皆列出)驗證。
 testOwnersAndIncluded :: TestTree
 testOwnersAndIncluded = testCase "test_owners_and_included" $ do
   pm <- loadProjectMeta (defOpts compsFixture)
   appMain <- findSf "app/Main.hs" (pmSources pm)
-  sfOwners appMain @?=
-    [ ref "comps" "exe:comps-exe", ref "comps" "test:comps-test", ref "comps" "bench:comps-bench" ]
+  sfOwners appMain @?= [ref "comps" "exe:comps-exe"]
   sfIncluded appMain @?= True
   spec <- findSf "test/Spec.hs" (pmSources pm)
   sfOwners spec @?= [ref "comps" "test:comps-test"]
@@ -615,8 +625,8 @@ testS2DeterministicRegression = testCase "test_s2_deterministic_and_regression" 
 testRenderSummaryComponents :: TestTree
 testRenderSummaryComponents = testCase "test_render_summary_components" $ do
   let comps =
-        [ ComponentMeta (T.pack "lib:demo") MainLibrary ["src"] False
-        , ComponentMeta (T.pack "test:demo-test") TestSuite ["test"] True
+        [ ComponentMeta (T.pack "lib:demo") MainLibrary ["src"] [] Nothing False
+        , ComponentMeta (T.pack "test:demo-test") TestSuite ["test"] [] (Just "Spec.hs") True
         ]
       pm = ProjectMeta
         { pmPackages = [PackageMeta (T.pack "demo") "demo.cabal" comps]
@@ -5717,7 +5727,8 @@ metaWithComponents ks = emptyMeta
           , pkgComponents =
               [ ComponentMeta
                   { compName = T.pack ("c" <> show i), compKind = k
-                  , compSourceDirs = ["src"], compExcluded = ex }
+                  , compSourceDirs = ["src"], compModules = [], compMainIs = Nothing
+                  , compExcluded = ex }
               | (i, (k, ex)) <- zip [0 :: Int ..] ks ]
           } ] }
 
@@ -5901,3 +5912,144 @@ testBuildDriverSelfcheck = testCase "test_build_driver_selfcheck" $ do
     <> " second=" <> show (round (d2 * 1000) :: Int) <> "ms"
     <> " withTests=" <> show (length (hlFiles hlT)))
   removePathForcibly ".knot"
+
+--------------------------------------------------------------------------------
+-- project-meta/E001 component-module-list-ownership
+--------------------------------------------------------------------------------
+
+projectMetaE001Tests :: TestTree
+projectMetaE001Tests = testGroup "project-meta/E001 component-module-list-ownership"
+  [ testE001ComponentMetaFields   -- T1
+  , testE001CabalModuleList       -- T2
+  , testE001OwnerByModuleList     -- T3
+  , testE001MainIsModule          -- T4
+  , testE001SelfScanDotDir        -- T5
+  ]
+
+-- E001 T1:ComponentMeta 六欄位建構、Eq;compModules 是 [ModuleName]
+testE001ComponentMetaFields :: TestTree
+testE001ComponentMetaFields = testCase "test_e001_component_meta_fields" $ do
+  let mods = [mn "A", mn "A.B"]
+      c = ComponentMeta
+            { compName = T.pack "exe:x", compKind = Executable, compSourceDirs = ["app"]
+            , compModules = mods, compMainIs = Just "Main.hs", compExcluded = False }
+  compModules c @?= mods
+  compMainIs c @?= Just "Main.hs"
+  c @?= ComponentMeta (T.pack "exe:x") Executable ["app"] mods (Just "Main.hs") False
+  assertBool "compModules participates in Eq" (c { compModules = [] } /= c)
+  assertBool "compMainIs participates in Eq"  (c { compMainIs = Nothing } /= c)
+
+-- E001 T2:cabal-model 填 compModules(exposed ++ other,宣告序)與 compMainIs(正斜線)
+testE001CabalModuleList :: TestTree
+testE001CabalModuleList = testCase "test_e001_cabal_module_list" $ do
+  cs <- componentsOf (compsFixture <> "/comps.cabal")
+  let modsOf n = compModules <$> find ((== T.pack n) . compName) cs
+      mainOf n = compMainIs  <$> find ((== T.pack n) . compName) cs
+  modsOf "lib:comps"         @?= Just [mn "Comps.Core"]
+  modsOf "lib:sub"           @?= Just [mn "Comps.Sub"]
+  modsOf "flib:comps-ffi"    @?= Just [mn "Comps.FFI"]
+  modsOf "exe:comps-exe"     @?= Just []
+  mainOf "lib:comps"         @?= Just Nothing
+  mainOf "flib:comps-ffi"    @?= Just Nothing
+  mainOf "exe:comps-exe"     @?= Just (Just "Main.hs")
+  mainOf "test:comps-test"   @?= Just (Just "Spec.hs")
+  mainOf "bench:comps-bench" @?= Just (Just "Bench.hs")
+  -- cond:library 連一個 module 都沒宣告 → 空清單、無 main-is
+  cc <- componentsOf (condFixture <> "/cond.cabal")
+  map compModules cc @?= [[]]
+  map compMainIs cc  @?= [Nothing]
+  -- dotdir:exposed-modules 宣告序、子目錄 main-is 正斜線、省略的 hs-source-dirs = "."
+  ds <- componentsOf (dotdirFixture <> "/dotdir.cabal")
+  let dmodsOf n = compModules <$> find ((== T.pack n) . compName) ds
+  dmodsOf "lib:dotdir"      @?= Just [mn "Foo", mn "Foo.Bar"]
+  dmodsOf "test:dotdir-test" @?= Just [mn "Foo"]
+  (compMainIs     <$> find ((== T.pack "exe:dotdir-exe") . compName) ds) @?= Just (Just "Cli/Main.hs")
+  (compSourceDirs <$> find ((== T.pack "lib:dotdir") . compName) ds)     @?= Just ["."]
+ where
+  componentsOf p = do
+    r <- resolvePackage p
+    either (\w -> assertFailure ("expected Right for " <> p <> ", got: " <> show w))
+           (pure . pkgComponents) r
+
+-- E001 T3:規則 2——hs-source-dirs 省略(.)的 component 只認領清單內的 module;
+-- 一對多仍成立(Foo 同列於 lib 與 test);雜檔無 owner、走規則 4 啟發式
+testE001OwnerByModuleList :: TestTree
+testE001OwnerByModuleList = testCase "test_e001_owner_by_module_list" $ do
+  pm <- loadProjectMeta (defOpts dotdirFixture)
+  pmWarnings pm @?= []
+  foo <- findSf "Foo.hs" (pmSources pm)
+  sfOwners foo   @?= [ref "dotdir" "lib:dotdir", ref "dotdir" "test:dotdir-test"]
+  sfModule foo   @?= Just (mn "Foo")
+  sfIncluded foo @?= True
+  bar <- findSf "Foo/Bar.hs" (pmSources pm)
+  sfOwners bar   @?= [ref "dotdir" "lib:dotdir"]
+  sfModule bar   @?= Just (mn "Foo.Bar")
+  sfIncluded bar @?= True
+  stray <- findSf "examples/Stray.hs" (pmSources pm)
+  sfOwners stray   @?= []
+  sfModule stray   @?= Just (mn "Stray")   -- 無 owner → 尾綴法
+  sfIncluded stray @?= True                -- 無 owner → 啟發式:不在頂層 test/ 下
+  decoy <- findSf "test/fixtures/Decoy.hs" (pmSources pm)
+  sfOwners decoy   @?= []                  -- test-suite 的 "." 不再把它認走
+  sfIncluded decoy @?= False               -- 啟發式:頂層 test/ 排除
+  pmOn <- loadProjectMeta ((defOpts dotdirFixture) { includeTests = True })
+  decoyOn <- findSf "test/fixtures/Decoy.hs" (pmSources pmOn)
+  sfIncluded decoyOn @?= True              -- 啟發式跟著 includeTests 翻轉
+  -- comps:src/lowercase/util.hs 在 lib:comps 的 src 下,但推不出合法 module 名、
+  -- 也不在清單內 → 不再被 lib:comps 認領
+  pmC <- loadProjectMeta (defOpts compsFixture)
+  util <- findSf "src/lowercase/util.hs" (pmSources pmC)
+  sfOwners util   @?= []
+  sfModule util   @?= Nothing
+  sfIncluded util @?= True
+
+-- E001 T4:規則 3——僅 main-is 命中 → sfModule = Main(與路徑無關);
+-- comps 的 app/Main.hs 只剩 exe(test/bench 的 main-is 是別的檔)
+testE001MainIsModule :: TestTree
+testE001MainIsModule = testCase "test_e001_main_is_module" $ do
+  pm <- loadProjectMeta (defOpts dotdirFixture)
+  cli <- findSf "app/Cli/Main.hs" (pmSources pm)
+  sfOwners cli   @?= [ref "dotdir" "exe:dotdir-exe"]
+  sfModule cli   @?= Just (mn "Main")      -- 不是 Cli.Main
+  sfIncluded cli @?= True
+  spec <- findSf "Spec.hs" (pmSources pm)
+  sfOwners spec   @?= [ref "dotdir" "test:dotdir-test"]
+  sfModule spec   @?= Just (mn "Main")     -- 不是 Spec
+  sfIncluded spec @?= False
+  pmC <- loadProjectMeta (defOpts compsFixture)
+  appMain <- findSf "app/Main.hs" (pmSources pmC)
+  sfOwners appMain @?= [ref "comps" "exe:comps-exe"]
+  sfModule appMain @?= Just (mn "Main")
+  -- multi:main-is 在 repo 子目錄的套件,錨定後仍命中
+  pmM <- loadProjectMeta (defOpts multiFixture)
+  bMain <- findSf "pkg-b/app/Main.hs" (pmSources pmM)
+  sfOwners bMain @?= [ref "pkg-b" "exe:pkg-b-exe"]
+  aSpec <- findSf "pkg-a/test/ASpec.hs" (pmSources pmM)
+  sfOwners aSpec @?= [ref "pkg-a" "test:pkg-a-test"]
+  sfModule aSpec @?= Just (mn "Main")
+
+-- E001 T5:重演 2026-08-22 的事故——knot-hs 公開 library 的 hs-source-dirs 換成 "."
+-- (合成,不改 .cabal)。改善前它會認領 test/fixtures/** 並納入(+27 節點、+8 警告);
+-- 改善後 test/fixtures/** 無 owner 且排除,納入集合與正常載入完全相同。
+testE001SelfScanDotDir :: TestTree
+testE001SelfScanDotDir = testCase "test_e001_self_scan_dot_dir" $ do
+  normal <- loadProjectMeta (defOpts ".")
+  let dotted =
+        [ p { pkgComponents =
+                [ if compKind c == MainLibrary then c { compSourceDirs = ["."] } else c
+                | c <- pkgComponents p ] }
+        | p <- pmPackages normal ]
+  assertBool "fixture sanity: knot-hs has a main library"
+    (any ((== MainLibrary) . compKind) (concatMap pkgComponents dotted))
+  (srcs, ws) <- indexSources (defOpts ".") dotted
+  ws @?= []
+  let fixtureFiles = [ sf | sf <- srcs, "test/fixtures/" `isPrefixOf` sfPath sf ]
+  assertBool "fixture sanity: test/fixtures has .hs files" (not (null fixtureFiles))
+  forM_ fixtureFiles $ \sf -> do
+    sfOwners sf   @?= []
+    sfIncluded sf @?= False
+  sort [ sfPath sf | sf <- srcs, sfIncluded sf ]
+    @?= sort [ sfPath sf | sf <- pmSources normal, sfIncluded sf ]
+  -- src/ 的每個檔仍由 knot-internal 認領(它的 hs-source-dirs 沒動)
+  forM_ [ sf | sf <- srcs, "src/" `isPrefixOf` sfPath sf ] $ \sf ->
+    assertBool ("owned: " <> sfPath sf) (ref "knot-hs" "lib:knot-internal" `elem` sfOwners sf)
