@@ -3,14 +3,17 @@ id: ADR-002
 type: adr
 title: hiedb-backend-import-scan-fallback
 description: 函式級抽取採 hiedb SQLite 後端並以 import 掃描保底
-status: accepted
+status: superseded
 created: 2026-08-20
-updated: 2026-08-20
+updated: 2026-08-22
 ---
 
 # ADR-002: 函式級抽取採 hiedb 後端,module 級以 import-scan 保底
 
 ## 狀態(Status)
+
+**superseded by ADR-006**(2026-08-22)。hiedb 改為 build-depends 嵌入、`.hie` 由 knot 自行驅動產生、移除 import-scan 降級保底——三個判斷的複查見 ADR-006「背景」。以下為原文。
+
 
 accepted
 

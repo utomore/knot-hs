@@ -22,6 +22,7 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
 - 產出 module 級依賴圖(滿足架構檢測的全部需求)+ 函式級呼叫圖(定位加速)
 - 決定性輸出:零 API key、零 LLM、同樣輸入同樣結果
 - 末期提供查詢 CLI(關鍵字查節點、反向可達、最短路徑、連通度排名)
+- **零前置、單一命令**:裝一個執行檔、打 `knot extract .`,不要求使用者安裝任何其他工具、不要求他先對自己的專案做任何事——與 graphify 的體驗對齊(→ ADR-006)
 
 **非目標**
 
@@ -30,17 +31,19 @@ knot-hs 要填這個洞:讀取 Haskell 專案,產出 dev-flow 相容的 `codegra
 - 不做視覺化(`scan-graph.mjs` 的文字輸出就是消費端)
 - 不做多語言(只服務 Haskell)
 
-**使用者與體量**:長期維護的個人工具,服務使用者自己的 Haskell 專案。驗收標的兩個,不得異動其程式碼與既有檔案(唯一例外:允許新建 `.knot/` 索引快取目錄,`--db` 可改道):MagicFarmer(`C:\Users\User\Documents\GameProjects\MagicFarmer`,4 個子系統,驗 dev-flow 整合)、particle-magic(`C:\Users\User\Documents\GameProjects\particle-magic`,單套件 9 個 component 含具名 sub-library / foreign-library / 跨目錄 test-suite,驗 component 歸類與多套件 DTO)。
+**使用者與體量**:長期維護的個人工具,服務使用者自己的 Haskell 專案。驗收標的兩個,不得異動其程式碼、既有檔案與既有建置產物(唯一例外:允許新建 `.knot/` 快取目錄——插樁建置的 builddir、產出的 `.hie`、hiedb 索引全部收在裡面,一行 `.gitignore` 即可排除;第一次慢,之後三層都增量):MagicFarmer(`C:\Users\User\Documents\GameProjects\MagicFarmer`,4 個子系統,驗 dev-flow 整合)、particle-magic(`C:\Users\User\Documents\GameProjects\particle-magic`,單套件 9 個 component 含具名 sub-library / foreign-library / 跨目錄 test-suite,驗 component 歸類與多套件 DTO)。
 
 ## 技術棧與環境
 
 - **語言 / 編譯器**:Haskell,GHC 9.14.1(base 4.22),`default-language: GHC2024`,cabal-install 3.16.1.0
 - **架構模式**:單一執行檔 `knot`,內部為四個 Bounded Context 的單向資料流 DAG(拓撲見下)
-- **硬性版本鎖**:`.hie` 的讀寫綁 GHC 版本,knot-hs 必須用與目標專案相同的 GHC 編譯(→ ADR-001)
-- **關鍵外部依賴**:
-  - `hiedb` 執行檔(選用):函式級抽取的後端,由使用者以同版 GHC 加 `--allow-newer=hie-compat:base` 安裝;不存在時函式級能力自動降級,module 級不受影響(→ ADR-002)
+- **硬性版本鎖**:`.hie` 的讀寫綁 GHC 版本,knot-hs 必須用與目標專案相同的 GHC 編譯(→ ADR-001;ADR-006 使其更關鍵——knot 自己產 `.hie` 又自己讀,兩端必須同版)
+- **關鍵依賴**(→ ADR-006):
+  - **`hiedb`(build-depends 嵌入)**:函式級抽取的索引引擎,走 hiedb 的 library API 建索引與查詢,不 spawn 外部執行檔;`cabal.project` 以 `allow-newer: hie-compat:base, hie-compat:ghc` 解相依。**使用者不必安裝、不必知道它存在**
+  - **目標專案的建置系統(`cabal`)**:`.hie` 缺席或過期時,knot **自行**對目標專案執行插樁建置(`-fwrite-ide-info`)產生之,建置產物落在 `.knot/` 的獨立 builddir,**不碰對方既有的 `dist-newstyle`**
   - 下游消費者:dev-flow `arch-audit/scripts/scan-graph.mjs`(非依賴,是契約對象;→ ADR-003)
-- **發佈形式**:`cabal install` 產生獨立執行檔;文件明載版本鎖要求,執行時檢查 `.hie` header 的 GHC 版本並對不合者告警
+- **兩層缺一不可**(→ ADR-006):module 層與函式層同時成立才算成功;任一層拿不到(目標專案建不起來、GHC 版本不合、索引失敗)就**明確失敗**,不產出部分圖。module 級的關聯無法協助寫 code,「降級成功」只是把沒用的結果回報成成功
+- **發佈形式**:`cabal install` 產生獨立執行檔;文件明載版本鎖要求,執行時檢查 `.hie` header 的 GHC 版本,不合者**失敗**而非告警
 
 ### package 佈局(契約面收斂)
 
@@ -81,8 +84,9 @@ cabal clean && cabal build all --enable-tests --ghc-options=-Werror
 ### Input
 
 1. Haskell 專案根目錄(預設為目前目錄):`*.cabal`、`cabal.project`、Haskell 原始碼
-2. `.hie` 目錄(函式級抽取需要;由目標專案以 `-fwrite-ide-info -hiedir <dir>` 產生)
-3. `hiedb` 執行檔(函式級抽取需要,PATH 或指定路徑)
+2. 目標專案**必須能以 `cabal build` 建置成功**——這是唯一的前置條件,且它是對方專案本來就該滿足的。`.hie` 與索引由 knot 自己產生(→ ADR-006),不是輸入
+
+不再是輸入的東西:`.hie` 目錄(knot 自產)、`hiedb` 執行檔(已嵌入)。
 
 ### Output
 
@@ -92,19 +96,15 @@ cabal clean && cabal build all --enable-tests --ghc-options=-Werror
    - 頂層選填 `directed`、`built_at_commit`
    - relation 依賴類(`imports`、`calls`、`uses`、`implements` 等十種)才算進下游依賴圖;結構類(`contains`、`method`、`defines`、`declares`、`rationale_for`、`part_of` 六種)不算。兩份名單以 ADR-003 為準,並與 `scan-graph.mjs` 的 `DEP_RELATIONS` / `STRUCTURAL_RELATIONS` 逐項對齊
 2. 查詢結果(S4):stdout 文字輸出
-3. 警告與錯誤:stderr;best-effort 模式下有警告仍 exit 0,`--strict` 時**任何警告** exit 1
+3. 警告與錯誤:stderr;有警告仍 exit 0,`--strict` 時**任何警告** exit 1。**兩層任一層整體拿不到則 exit 1**,這不是警告、不受 `--strict` 影響(→ ADR-006)
+4. **`.knot/` 快取目錄**(目標專案根目錄下,唯一允許的副作用):插樁建置的 builddir、產出的 `.hie`、hiedb 索引。純快取,刪掉只會讓下次變慢;內容格式屬 Level 2/3 自主權,不是契約
 
 ### CLI 介面(頂層契約)
 
 ```text
-knot extract [PATH]          產出 codegraph.json
+knot extract [PATH]          產出 codegraph.json(需要時自行建置目標專案產 .hie,全自動)
   --output FILE              預設 <PATH>/codegraph.json
-  --backend auto|imports|hiedb   預設 auto(hiedb 可用則兩層、否則 module 級)
-  --module-only              只輸出 module 級節點與邊
   --include-tests            納入 test-suite component(預設排除)
-  --hiedir DIR               覆寫 .hie 目錄位置
-  --hiedb PATH               覆寫 hiedb 執行檔位置(預設查 PATH)
-  --db FILE                  覆寫索引位置(預設 <PATH>/.knot/hiedb.sqlite)
   --strict                   任何警告改為 exit 1
   --summary meta|facts|graph 改印該站的摘要到 stdout,不寫 codegraph.json
 
@@ -116,7 +116,9 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
   rank [--top N]             連通度排名,N 預設 10
 ```
 
-`--db` 是唯讀約束的載重旗標:函式級抽取預設會在目標專案建 `.knot/` 索引快取,改道到專案外才能讓驗收標的真正零寫入(見「使用者與體量」)。`--summary` 承接開發期的三條唯讀對帳路徑(取代早期的 `--facts` / `--graph` 旗標)。
+**ADR-006 移除的旗標**:`--backend`、`--module-only`、`--hiedir`、`--hiedb`、`--db`。它們全是「有兩個後端、有外部執行檔、有使用者要自己產的檔案」這些實作細節洩漏到介面的結果;那些細節不存在了,旗標也就沒有存在的理由。`.knot/` 固定在目標專案根目錄,不提供改道——它是快取,與 `dist-newstyle` 同性質。
+
+`--summary` 承接開發期的三條唯讀對帳路徑(取代早期的 `--facts` / `--graph` 旗標)。
 
 內部旗標細節(參數格式、預設值微調)屬 Level 2/3 自主權,此處只鎖定子命令劃分與語意。
 
@@ -136,9 +138,9 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 已建 Level 2:`.design/subsystems/extraction/design.md`
 
-- **職責**:定義統一的抽取契約,把原始碼/`.hie` 轉成「事實流」(module import、頂層宣告、名稱引用、class/instance 關係);後端作為內部模組實現同一契約:import-scan(T0,零依賴掃 import 行)、hiedb-sqlite(T1,呼叫 `hiedb index` 後讀其 SQLite);auto 模式兩後端並用——imports 邊永遠來自 import-scan,hiedb 只出 decl 層
-- **邊界(不做)**:不決定節點 id、不組圖、不過濾 test(接受 project-meta 的判定)、不寫任何輸出檔
-- **對外契約摘要**:輸入專案描述,輸出事實流;後端能力分級(module 級 / 函式級)由呼叫端查詢,後端不可用時回報降級而非失敗
+- **職責**:定義統一的抽取契約,把原始碼/`.hie` 轉成「事實流」(module import、頂層宣告、名稱引用、class/instance 關係)。兩個來源**都必須成功**:import-scan(掃 import 行,imports 邊的唯一來源)與 hie-index(`.hie` 缺席或過期時**自行驅動目標專案的插樁建置**產生之,再以內嵌的 hiedb library 建索引並讀取,產出 decl 層)。沒有「後端選擇」,沒有「降級」(→ ADR-006)
+- **邊界(不做)**:不決定節點 id、不組圖、不過濾 test(接受 project-meta 的判定)、不寫 `codegraph.json`;**唯一的檔案副作用是 `.knot/` 快取**
+- **對外契約摘要**:輸入專案描述,輸出事實流;任一來源整體失敗(目標專案建不起來、GHC 版本不合、索引失敗)即回報失敗並說明原因,不產出部分事實流
 
 ### graph-core — 圖 IR
 
@@ -189,21 +191,23 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
   詞彙型別由定義它的子系統擁有,沿管線流動、零轉換(extraction Level 2 的批次澄清
   裁定);**擁有者要 re-export 它**,消費端才不必為了命名而繞回源頭。
-- **全域錯誤處理**:best-effort——單一檔案讀不過(壞 `.hie`、版本不合、解析失敗)印警告到 stderr、跳過續跑,仍產出部分圖;有警告時 exit code 仍為 0,`--strict` 使**任何警告**變 exit 1(不只跳檔:警告面涵蓋跳檔、解析降級、設定可疑等,實作以三站警告總數判定)。不認得的 relation 或資料一律列印,不靜默吞掉
-- **降級原則**:函式級後端(hiedb)不可用時自動降到 module 級並明確告知,而非整體失敗
+- **全域錯誤處理**分兩個層次(→ ADR-006):
+  - **整體失敗**(exit 1,與 `--strict` 無關):目標專案建不起來、`.hie` 的 GHC 版本與 knot 不合、索引整體失敗——任一層拿不到就不產圖。理由:部分圖會被下游當真
+  - **單檔 best-effort**(警告 + 跳過,仍產圖):在兩層都成立的前提下,個別檔案讀不過(單一壞 `.hie`、單檔解析失敗)印警告到 stderr、跳過續跑;有警告時 exit 0,`--strict` 使**任何警告**變 exit 1。不認得的 relation 或資料一律列印,不靜默吞掉
+- **沒有降級原則**:ADR-002 的「hiedb 不可用時降到 module 級」已廢除。module 級的關聯無法協助寫 code,把它當成功回報比明確失敗更糟
 
 ## 架構圖
 
 ```text
-  Haskell 專案(唯讀)                 knot(單一執行檔)
+  Haskell 專案                         knot(單一執行檔,內嵌 hiedb)
  ┌──────────────────┐   ┌──────────────────────────────────────────────────┐
  │ *.cabal          │──▶│ project-meta                                     │
  │ cabal.project    │   │   │ ProjectMeta ──────────┐(邊 2:同一份專案描述 │
  │ src/**/*.hs      │──▶│   ▼(邊 1)              │  也直接餵給 graph-core │
- │ .hie/**/*.hie    │──▶│ extraction               │  供內外部判定)        │
- └──────────────────┘   │   ├─ import-scan(T0)    │                       │
-                        │   └─ hiedb-sqlite(T1)◀──┼── hiedb 執行檔(外部, │
-                        │   │ 事實流(邊 3)        │   同版 GHC、選用)     │
+ │                  │   │ extraction               │  供內外部判定)        │
+ │ .knot/ 快取      │◀─▶│   ├─ import-scan         │                       │
+ │  build/ hie/ db  │   │   └─ hie-index ── .hie 缺/過期時自行 cabal build │
+ └──────────────────┘   │   │ 事實流(邊 3)        │   產生,內嵌 hiedb 索引 │
                         │   ▼                      │                       │
                         │ graph-core ◀─────────────┘                       │
                         │   │ 圖 IR(邊 4)                                 │
@@ -227,14 +231,15 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 | **S2 .cabal 整合** | project-meta(component 解析、幽靈 `.hie` 過濾) | 免設定即正確排除 `test/`,test 排除改由 component 判定 |
 | **S3 函式級抽取** | extraction(hiedb-sqlite 後端)、graph-core(decl 層、產生碼過濾) | 兩層節點、`calls` / `uses` 邊、hub 洗版實測、循環依賴人工複驗 |
 | **S4 查詢 CLI** | export-query(查詢、CLI 組裝) | `knot query` 四項能力可用,`/feature-design`、`/bugfix` 定位加速接上 |
+| **S5 零前置重構** | extraction(hiedb 嵌入、自驅動建置、移除降級)、export-query(砍旗標) | `knot extract .` 在**沒有 `.hie`、沒裝 hiedb** 的乾淨目標專案上一個命令跑出兩層圖;`--backend` / `--module-only` / `--hiedir` / `--hiedb` / `--db` 全部消失(→ ADR-006) |
 
 每階段結束以 MagicFarmer 驗收(唯讀)。
 
-**`implements` 邊不在 S3**(2026-08-21 調整):hiedb 0.8 的索引 schema 沒有 instance 表(實測八張表:mods / decls / defs / refs / exports / imports / typenames / typerefs),`FactInstance` 需要的「class + instance 標頭」無直接資料來源。`Fact` 的建構子保留、零邏輯,`implements` 邊另開 feature——要嘛從 refs 反推,要嘛等 ADR-002 預留的第三後端(自寫 `.hie` 解析)。同理,S3 的 decl 層過濾改用 hiedb 的 `refs.is_generated` 事實,不再是「TH 過濾」的啟發式。
+**`implements` 邊不在 S3**(2026-08-21 調整):hiedb 0.8 的索引 schema 沒有 instance 表(實測八張表:mods / decls / defs / refs / exports / imports / typenames / typerefs),`FactInstance` 需要的「class + instance 標頭」無直接資料來源。`Fact` 的建構子保留、零邏輯,`implements` 邊另開 feature——要嘛從 refs 反推,要嘛直接讀 `.hie`(ADR-006 替代方案 2、3 的路線,目前未採用)。同理,S3 的 decl 層過濾改用 hiedb 的 `refs.is_generated` 事實,不再是「TH 過濾」的啟發式。
 
-**進度**(2026-08-22):**S1–S4 四階段全數完成**,四個子系統的 14 份 feature 與三份全域優化(G-E001 / G-E002 / G-E003)皆 `done`。
+**進度**(2026-08-22):**S1–S4 四階段全數完成**,四個子系統的 14 份 feature 與三份全域優化(G-E001 / G-E002 / G-E003)皆 `done`。**S5 開工**:與 graphify 實測對照後發現 S1–S4 的成果在別人的專案上幾乎不可用(要裝第二個工具、要自己重建專案、要理解內部的能力分級),ADR-006 重定架構,extraction 與 export-query 的 Level 2 要重做。
 
-唯讀實跑現況(`--db` 改道專案外,兩個標的皆零寫入、無 `.knot/`):
+S1–S4 完成時的唯讀實跑現況(當時以 `--db` 改道專案外;該旗標已於 S5 移除,改由 `.knot/` 快取承載):
 
 | 標的 | 節點 / 邊 | 備註 |
 |---|---|---|
