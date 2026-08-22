@@ -274,7 +274,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 以下四張為 F001–F004 完成時的契約卡,**所引用的 `Backend` / `ProbeResult` / `BackendChoice` / `CapabilityLevel` / `BackendReport` 已於 S5 廢除**,僅供回溯當時的驗收依據;新的契約以階段三三張卡為準。
 
-### fact-contract(F001,done)
+### fact-contract
 
 - **階段**:階段一
 - **負責模組**:backend-select(S5 改名 fact-pipeline)
@@ -283,7 +283,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 - **驗收標準**:以假後端驗證——auto 模式下探測失敗的後端出現在 `erReports` 且附原因、`erLevel` 正確反映實際跑的後端;`HiedbOnly` 但後端不可用時回空事實 + 報告而不 crash;事實流排序穩定
 - **明確不做**:不實作任何真後端;不解析任何檔案;不定義 CLI 參數解析
 
-### import-scan(F002,done)
+### import-scan
 
 - **階段**:階段一
 - **負責模組**:import-scan
@@ -292,7 +292,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 - **驗收標準**:對 MagicFarmer 與 particle-magic(唯讀)執行——每個 included 檔案有一筆 `FactModule`;多行 import 語法都能抽出 `FactImport`;CPP 條件內的 import 依字面抽取;單檔讀取失敗印警告不中斷;連續兩次執行輸出相同
 - **明確不做**:不解析 import 清單明細;不讀 `.hie`;不驗證 import 的 module 是否存在;不做完整 Haskell 語法解析
 
-### hiedb-driver(F003,done)
+### hiedb-driver
 
 - **階段**:階段二
 - **負責模組**:hiedb-driver(S5 改名 hie-index)
@@ -301,7 +301,7 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 - **驗收標準**:hiedb 不在 PATH 時降級為 `ModuleLevel` 不失敗;對 fixture 執行後 `.knot/hiedb.sqlite` 存在;`dbPath` 覆寫時 `.knot/` 不被建立;重跑時索引重用
 - **明確不做**:不讀索引內容出事實;不自己解析 `.hie`;不管理 `.gitignore`;不清理過期索引
 
-### hiedb-facts(F004,done)
+### hiedb-facts
 
 - **階段**:階段二
 - **負責模組**:hiedb-facts(S5 改名 hie-facts)
