@@ -28,7 +28,7 @@ import Knot.Extract.Types
   , ExtractWarning (..)
   , Fact
   )
-import Knot.Meta.Types (ProjectMeta (..), SourceFile (..))
+import Knot.Meta.Types (ProjectMeta)
 
 -- | backend-select 調度的統一介面,兩個後端各實現一份。
 data Backend = Backend
@@ -61,24 +61,23 @@ data Outcome = Outcome
 -- | 調度引擎;僅為 1-to-1 測試(假後端)而匯出,非 Level 2 契約面
 -- (F001 假設 A6)。
 --
--- 管線:窄化(規則 1)→ 選擇 → 探測 → best-effort 執行(規則 7)
--- → 合成(規則 8)。@erReports@ 依註冊序,每個註冊後端剛好一筆;
--- @erWarnings@ 亦依註冊序串接;@erFacts@ 為全序排序結果,
--- 不受後端產出序影響。
+-- 管線:選擇 → 探測 → best-effort 執行(規則 7)→ 合成(規則 8)。
+-- @erReports@ 依註冊序,每個註冊後端剛好一筆;@erWarnings@ 亦依註冊序串接;
+-- @erFacts@ 為全序排序結果,不受後端產出序影響。
+--
+-- __規則 1(納入範圍)由各後端在自己的迭代點套用__,調度層不預先窄化
+-- (G-B001):契約寫的是「只**處理** @sfIncluded = True@ 的檔案」,而預先
+-- 窄化會把「這份 @.hie@ 屬於一個被排除的檔案」這個事實抹掉,讓
+-- hiedb-facts 的 @hs_src@ 比對落空後誤退回 module 名猜測。
 runBackends :: [Backend] -> ExtractOptions -> ProjectMeta -> IO ExtractResult
 runBackends registry opts pm = do
-  outcomes <- mapM (runOne opts (narrowScope pm)) registry
+  outcomes <- mapM (runOne opts pm) registry
   pure ExtractResult
     { erFacts    = sort (concatMap oFacts outcomes)
     , erLevel    = synthLevel outcomes
     , erReports  = map oReport outcomes
     , erWarnings = concatMap oWarnings outcomes
     }
-
--- | 規則 1:只把 @sfIncluded = True@ 的原始檔交給後端;
--- @pmPackages@ / @pmHie@ / @pmWarnings@ 原樣保留(F001 假設 A1)。
-narrowScope :: ProjectMeta -> ProjectMeta
-narrowScope pm = pm { pmSources = filter sfIncluded (pmSources pm) }
 
 -- | 規則 3:@BackendChoice@ 以 'bName' 比對契約字串常數(F001 假設 A2)。
 isSelected :: BackendChoice -> Backend -> Bool

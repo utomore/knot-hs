@@ -42,8 +42,9 @@ import Knot.Meta.Types (ModuleName (..), ProjectMeta (..), SourceFile (..))
 -- | import-scan 後端(T0):零外部依賴,@bLevel = ModuleLevel@,
 -- @bProbe@ 恆 'Available'。
 --
--- 收到的 'ProjectMeta' 應已由 backend-select 窄化為 @sfIncluded = True@
--- 的子集(F001 假設 A1);本後端**原樣掃描收到的 @pmSources@**,不自行過濾。
+-- 收到的 'ProjectMeta' 是**完整**的(含 @sfIncluded = False@ 的條目);
+-- 抽取規則 1(納入範圍)由本後端在自己的迭代點套用(G-B001 起,調度層
+-- 不再預先窄化——理由見 'runBackends' 的 haddock)。
 importScanBackend :: Backend
 importScanBackend = Backend
   { bName  = importScanName
@@ -54,9 +55,11 @@ importScanBackend = Backend
 
 -- | 逐檔掃描:依 @pmSources@ 原序串接事實與警告(規則 8)。
 -- 全程循序 IO,無並發、無 Map/Set 走訪。
+--
+-- 規則 1 在此套用:只掃 @sfIncluded = True@ 的檔案(G-B001)。
 runImportScan :: ExtractOptions -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 runImportScan opts pm = do
-  results <- mapM (scanFile (rootDir opts)) (pmSources pm)
+  results <- mapM (scanFile (rootDir opts)) (filter sfIncluded (pmSources pm))
   pure (concatMap fst results, concatMap snd results)
 
 -- | 單檔:@rootDir \</\> sfPath@ 讀位元組 → UTF-8 解碼 → 'scanSource'。
