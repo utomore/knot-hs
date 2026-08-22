@@ -130,9 +130,9 @@ knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導�
 
 已建 Level 2:`.design/subsystems/project-meta/design.md`
 
-- **職責**:解析 `.cabal` / `cabal.project` 取得 component(library / executable / test-suite 等,支援多套件)與 `hs-source-dirs`,把每個原始碼檔歸類到 component(一對多);定位 `.hie` 目錄;過濾幽靈 `.hie`(對應原始檔已刪除者);產出 test 排除判定
-- **邊界(不做)**:不讀原始碼內容、不讀 `.hie` 內容、不建圖
-- **對外契約摘要**:輸入專案根目錄,輸出「專案描述」——檔案清單(含 module 名對映、component 歸屬、是否排除)與 `.hie` 目錄資訊
+- **職責**:解析 `.cabal` / `cabal.project` 取得 component(library / executable / test-suite 等,支援多套件)與 `hs-source-dirs`,把每個原始碼檔歸類到 component(一對多);產出 test 排除判定(檔案級的 `sfIncluded` 與 component 級的 `compExcluded`)。**`.hie` 的定位、列舉與幽靈過濾自 S5 起移交 extraction**(ADR-006:`.hie` 由 extraction 自建於 `.knot/`,project-meta 跑在建置之前、看不到它)
+- **邊界(不做)**:不讀原始碼內容、**不碰 `.hie`**、不建圖、不觸發任何編譯
+- **對外契約摘要**:輸入專案根目錄,輸出「專案描述」——檔案清單(含 module 名對映、component 歸屬、是否排除)與 component 清單(extraction 據此決定建置哪些 component)
 
 ### extraction — 事實抽取
 
