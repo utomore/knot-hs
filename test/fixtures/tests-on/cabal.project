@@ -1,0 +1,4 @@
+packages: .
+
+-- extraction/E001 fixture:目標專案自己開 tests: True,cabal build all 會把 test-suite 也建出來
+tests: True

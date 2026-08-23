@@ -14,6 +14,7 @@ module Knot.Query.Types
     LoadError (..)
   , QueryCommand (..)
   , Direction (..)
+  , Level (..)
   , QueryResult (..)
   , NodeId (..)
     -- | 契約是**抽象型別本身**;七個欄位選擇器屬 Level 3,只給 graph-load 與
@@ -25,6 +26,7 @@ module Knot.Query.Types
   ) where
 
 import Data.Map.Strict (Map)
+import Data.Set (Set)
 import Data.Text (Text)
 
 -- | 查詢面的節點 id(F002 假設 A1;該假設已於 @design.md@ 補上契約定義後消解,
@@ -61,7 +63,14 @@ data QueryGraph = QueryGraph
   , qgOutDeg  :: Map NodeId Int
   , qgInDeg   :: Map NodeId Int
   , qgNotes   :: [(Text, Int)]
+  , qgDeclNodes :: Set NodeId           -- ^ E001:任一 @contains@ 邊的目標 = decl 層節點;其餘為 module 層
+  , qgDepEdges  :: [(NodeId, NodeId)]   -- ^ E001:依賴類邊原始清單(含重複、依檔序),'restrictLevel' 重算度數用
   }
+  deriving (Eq, Show)
+
+-- | 查詢的層(E001,Level 2 契約原文)。'restrictLevel' 據此把圖收斂為誘導子圖;
+-- 'LevelAll' 為恆等。沒有 @contains@ 邊的圖(非 knot 產生)全部視為 module 層。
+data Level = LevelAll | LevelModule | LevelDecl
   deriving (Eq, Show)
 
 -- | 從 @codegraph.json@ 載入失敗的三種原因(Level 2 契約原文)。
@@ -78,7 +87,9 @@ data LoadError
 -- 與其預設值)屬組裝層 @F004@;本子系統收到的已經是建好的 'QueryCommand'。
 data QueryCommand
   = FindNodes Text                  -- ^ 關鍵字:id 與 label 的子字串比對,__不分大小寫__
-  | Reachable NodeId Direction      -- ^ 可達集合,__不含起點自身__(查詢規則 5)
+  | Reachable NodeId Direction (Maybe Int)
+                                    -- ^ 可達集合,__不含起點自身__(查詢規則 5);第三欄為深度上限
+                                    -- (查詢規則 8,E001):@Just n@ 只回距離 ≤ n,@Nothing@ 不限
   | ShortestPath NodeId NodeId      -- ^ 兩點最短路徑,多解取字典序最小(查詢規則 6)
   | RankConnectivity Int            -- ^ 連通度排名,參數為 top N
   deriving (Eq, Show)

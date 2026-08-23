@@ -190,16 +190,26 @@ data HieLayout = HieLayout
   }
   deriving (Eq, Show)
 
--- | 走訪 builddir 收全部 @.hie@,依 cabal 佈局推 component,產出 'HieLayout'。
+-- | 走訪 builddir 收 @.hie@,依 cabal 佈局推 component,產出 'HieLayout'。
 -- 路徑為 repo 相對、正斜線,依碼位序(規則 10 的決定性)。
+--
+-- __只列舉納入 component 的 @.hie@__(規則 1,extraction/E001):目標專案自己的
+-- @cabal.project@ 寫了 @tests: True@ 之類時,cabal 會把被排除的 test-suite 也建出來,
+-- 那些 @.hie@ 對映到 @sfIncluded = False@ 的檔,下游只會逐檔警告後跳過——在這裡依
+-- @compExcluded@ 濾掉,就不索引、不警告。對不到任何 component 的檔(佈局認不得)
+-- __保留__,那不是「被排除」,交給規則 9 的 best-effort。
 enumerateHie :: ProjectMeta -> FilePath -> FilePath -> FilePath -> IO HieLayout
 enumerateHie pm root rootAbs buildDirAbs = do
   files <- walk buildDirAbs
   let pkgNames = map pkgName (pmPackages pm)
+      excluded =
+        [ ComponentRef (pkgName p, compName c)
+        | p <- pmPackages pm, c <- pkgComponents p, compExcluded c ]
       entries  = sortOn snd
-        [ (componentRefOf pkgNames (splitDirectories (makeRelative buildDirAbs f))
-          , toSlash (makeRelative rootAbs f))
-        | f <- files ]
+        [ (ref, toSlash (makeRelative rootAbs f))
+        | f <- files
+        , let ref = componentRefOf pkgNames (splitDirectories (makeRelative buildDirAbs f))
+        , ref `notElem` excluded ]
   pure HieLayout { hlRoot = toSlash (knotBuildDir root), hlFiles = entries }
  where
   walk dir = do

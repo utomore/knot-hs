@@ -55,13 +55,15 @@ import Knot.Graph.Types (CodeGraph (..))
 import Knot.Meta (loadProjectMeta)
 import Knot.Meta.Types (ProjectMeta (..))
 import Knot.Query
-  ( LoadError (..)
+  ( Level (..)
+  , LoadError (..)
   , NodeId (..)
   , QueryCommand (..)
   , QueryGraph
   , loadQueryGraph
   , queryGraphHasNode
   , renderResult
+  , restrictLevel
   , runQuery
   )
 
@@ -162,9 +164,11 @@ runQueryCmd hOut hErr cmd = do
       -- (含路徑與問題),CLI 只加前綴,不重寫訊息
       emitNotes hErr [T.pack "query: " <> loadErrorText e]
       pure (ExitFailure 1)
-    Right g -> do
-      emitNotes hErr (queryNoteLines g)
-      emitNotes hErr (missingNodeLines g (qcCommand cmd))
+    Right g0 -> do
+      -- E001:先依 --level 收斂為誘導子圖,四個查詢都在收斂後的圖上跑(查詢規則 7)
+      let g = restrictLevel (qcLevel cmd) g0
+      emitNotes hErr (queryNoteLines g0)
+      emitNotes hErr (missingNodeLines (qcLevel cmd) g0 g (qcCommand cmd))
       TIO.hPutStr hOut (renderResult (runQuery g (qcCommand cmd)))
       -- 查無結果也是 0(空結果是正常結果,不是載入失敗)
       pure ExitSuccess
@@ -183,15 +187,23 @@ loadErrorText e = case e of
 -- 存在性一律問契約的 'queryGraphHasNode'(階段二閘門裁決):組裝層不讀
 -- 'QueryGraph' 的內部欄位,「內容屬 Level 3」的承諾才成立;查詢在 library
 -- 內走 @qgIndex@ 做 O(log n),executable 段也就不需要 @containers@。
-missingNodeLines :: QueryGraph -> QueryCommand -> [Text]
-missingNodeLines g cmd =
-  [ T.concat [T.pack "query: node not found: ", t]
+missingNodeLines :: Level -> QueryGraph -> QueryGraph -> QueryCommand -> [Text]
+missingNodeLines lvl full restricted cmd = concat
+  [ if not (queryGraphHasNode full nid)
+      then [T.concat [T.pack "query: node not found: ", t]]
+    else if not (queryGraphHasNode restricted nid)
+      -- E001:節點在,但被 --level 收斂掉了——不能靜默回空,否則分不出「不存在」與「不在該層」
+      then [T.concat [T.pack "query: node ", t, T.pack " is not at level ", levelText lvl]]
+    else []
   | nid@(NodeId t) <- endpoints
-  , not (queryGraphHasNode g nid)
   ]
  where
   endpoints = case cmd of
-    Reachable start _    -> [start]
+    Reachable start _ _  -> [start]
     ShortestPath from to -> [from, to]
     FindNodes _          -> []
     RankConnectivity _   -> []
+  levelText l = T.pack $ case l of
+    LevelAll    -> "all"
+    LevelModule -> "module"
+    LevelDecl   -> "decl"

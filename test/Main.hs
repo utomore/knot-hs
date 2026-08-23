@@ -12,7 +12,7 @@ import qualified Data.Aeson.KeyMap as AKM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Lazy as BSL
-import Data.Char (isAlphaNum, isDigit, isSpace)
+import Data.Char (isAlphaNum, isDigit, isSpace, isUpper)
 import Data.Containers.ListUtils (nubOrd)
 import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -283,6 +283,8 @@ tests = testGroup "knot-hs"
   , extractionF006Tests
   , extractionF007Tests
   , extractionF008Tests
+  , extractionE001Tests
+  , exportQueryE001Tests
   , graphCoreF001Tests
   , graphCoreF002Tests
   , graphCoreF003Tests
@@ -3912,6 +3914,8 @@ testQueryTypesConstruct = testCase "test_query_types_construct" $ do
         , QT.qgOutDeg  = Map.singleton (qid "A") 1
         , QT.qgInDeg   = Map.singleton (qid "A") 1
         , QT.qgNotes   = [(T.pack "foo", 2)]
+        , QT.qgDeclNodes = Set.empty
+        , QT.qgDepEdges  = [(qid "A", qid "A")]
         }
   QT.qgNodes g   @?= [node]
   QT.qgIndex g   @?= Map.singleton (qid "A") node
@@ -4257,7 +4261,7 @@ foundOf g kw = case runQuery g (QT.FindNodes (T.pack kw)) of
   _                  -> []
 
 reachableOf :: QT.QueryGraph -> QT.NodeId -> QT.Direction -> [(QT.NodeId, Int)]
-reachableOf g i d = case runQuery g (QT.Reachable i d) of
+reachableOf g i d = case runQuery g (QT.Reachable i d Nothing) of
   QT.ReachableSet rows -> rows
   _                    -> []
 
@@ -4271,9 +4275,9 @@ probeAll :: QT.QueryGraph -> [QT.QueryResult]
 probeAll g =
   [ runQuery g (QT.FindNodes (T.pack "impl"))
   , runQuery g (QT.FindNodes T.empty)
-  , runQuery g (QT.Reachable (qid "S") QT.Forward)
-  , runQuery g (QT.Reachable (qid "T") QT.Reverse)
-  , runQuery g (QT.Reachable (qid "Loop") QT.Forward)
+  , runQuery g (QT.Reachable (qid "S") QT.Forward Nothing)
+  , runQuery g (QT.Reachable (qid "T") QT.Reverse Nothing)
+  , runQuery g (QT.Reachable (qid "Loop") QT.Forward Nothing)
   , runQuery g (QT.ShortestPath (qid "S") (qid "T"))
   , runQuery g (QT.RankConnectivity 100)
   ]
@@ -4285,8 +4289,8 @@ testQueryCommandTypes = testCase "test_query_command_types" $ do
   -- QueryCommand 四建構子與參數順序
   let kw    = T.pack "demo"
       cFind = QT.FindNodes kw
-      cFwd  = QT.Reachable (qid "A") QT.Forward
-      cRev  = QT.Reachable (qid "A") QT.Reverse
+      cFwd  = QT.Reachable (qid "A") QT.Forward Nothing
+      cRev  = QT.Reachable (qid "A") QT.Reverse Nothing
       cPath = QT.ShortestPath (qid "A") (qid "B")
       cRank = QT.RankConnectivity 10
   cFind @?= QT.FindNodes kw
@@ -4379,20 +4383,20 @@ testQueryReachable = testCase "test_query_reachable" $ do
     , (qid "S", 3)
     ]
   -- 方向不對稱:T 沒有出邊、S 沒有入邊
-  runQuery g (QT.Reachable (qid "T") QT.Forward) @?= QT.ReachableSet []
-  runQuery g (QT.Reachable (qid "S") QT.Reverse) @?= QT.ReachableSet []
+  runQuery g (QT.Reachable (qid "T") QT.Forward Nothing) @?= QT.ReachableSet []
+  runQuery g (QT.Reachable (qid "S") QT.Reverse Nothing) @?= QT.ReachableSet []
   -- 規則 5 後半:起點在環上時以真實距離出現(自環 1、二元環 2)
   reachableOf g (qid "Self") QT.Forward @?= [(qid "Self", 1)]
   reachableOf g (qid "Self") QT.Reverse @?= [(qid "Self", 1)]
   reachableOf g (qid "Loop") QT.Forward @?= [(qid "Cyc", 1), (qid "Loop", 2)]
   reachableOf g (qid "Cyc")  QT.Forward @?= [(qid "Loop", 1), (qid "Cyc", 2)]
   -- 驗收標準 6:contains 邊不進依賴圖——Iso 出不去、Alpha 反向也看不到 Iso
-  runQuery g (QT.Reachable (qid "Iso") QT.Forward) @?= QT.ReachableSet []
-  runQuery g (QT.Reachable (qid "Iso") QT.Reverse) @?= QT.ReachableSet []
+  runQuery g (QT.Reachable (qid "Iso") QT.Forward Nothing) @?= QT.ReachableSet []
+  runQuery g (QT.Reachable (qid "Iso") QT.Reverse Nothing) @?= QT.ReachableSet []
   reachableOf g (qid "Alpha") QT.Reverse @?= [(qid "S", 1)]
   -- 假設 A1:起點不存在回空集合,不拋例外
-  runQuery g (QT.Reachable (qid "NoSuchNode") QT.Forward) @?= QT.ReachableSet []
-  runQuery g (QT.Reachable (qid "NoSuchNode") QT.Reverse) @?= QT.ReachableSet []
+  runQuery g (QT.Reachable (qid "NoSuchNode") QT.Forward Nothing) @?= QT.ReachableSet []
+  runQuery g (QT.Reachable (qid "NoSuchNode") QT.Reverse Nothing) @?= QT.ReachableSet []
 
 -- export-query/F003 T4: ShortestPath——等長多解取字典序最小(規則 6,反向貪心
 -- 的反例)、不連通與端點不存在回 Nothing、from == to 回 Just [from](假設 A2)
@@ -4513,7 +4517,7 @@ testQueryDeterminism = testGroup "test_query_determinism"
       g <- loadFixture fixtureSrc
       let cmds =
             [ QT.FindNodes (T.pack "impl")
-            , QT.Reachable (qid "S") QT.Forward
+            , QT.Reachable (qid "S") QT.Forward Nothing
             , QT.ShortestPath (qid "S") (qid "T")
             , QT.RankConnectivity 100
             ]
@@ -4549,8 +4553,8 @@ testQueryDeterminism = testGroup "test_query_determinism"
           tgt = QT.NodeId (T.pack to)
           fwd = reachableOf g f QT.Forward
       -- 同輸入同輸出
-      runQuery g (QT.Reachable f QT.Forward)
-        === runQuery g (QT.Reachable f QT.Forward)
+      runQuery g (QT.Reachable f QT.Forward Nothing)
+        === runQuery g (QT.Reachable f QT.Forward Nothing)
       runQuery g (QT.ShortestPath f tgt) === runQuery g (QT.ShortestPath f tgt)
       -- 規則 5:距離恆 >= 1(起點不入結果);規則 4:依 (距離, id) 升序
       assert (all ((>= 1) . snd) fwd)
@@ -4773,7 +4777,7 @@ testCliToplevelParse = testCase "test_cli_toplevel_parse" $ do
       (_, c) <- expectParseFailure argv
       assertBool (show argv <> " --help should exit 0") (c == ExitSuccess))
   -- 四個 CLI DTO 各建一值並比對 Eq
-  let q = QueryCmd { qcFile = "g.json", qcCommand = QT.FindNodes (T.pack "Demo") }
+  let q = QueryCmd { qcFile = "g.json", qcLevel = QT.LevelAll, qcCommand = QT.FindNodes (T.pack "Demo") }
   CmdExtract baseExtractCmd @?= CmdExtract baseExtractCmd
   CmdQuery q @?= CmdQuery q
   assertBool "CmdExtract /= CmdQuery" (CmdExtract baseExtractCmd /= CmdQuery q)
@@ -4854,9 +4858,9 @@ testQueryFlagsParse = testCase "test_query_flags_parse" $ do
   q2 <- expectQueryCmd ["query", "--graph", "out/g.json", "find", "x"]
   qcFile q2 @?= "out/g.json"              -- 假設 A3 的改道
   q3 <- expectQueryCmd ["query", "reachable", "A"]
-  qcCommand q3 @?= QT.Reachable (qid "A") QT.Forward
+  qcCommand q3 @?= QT.Reachable (qid "A") QT.Forward Nothing
   q4 <- expectQueryCmd ["query", "reachable", "A", "--reverse"]
-  qcCommand q4 @?= QT.Reachable (qid "A") QT.Reverse
+  qcCommand q4 @?= QT.Reachable (qid "A") QT.Reverse Nothing
   q5 <- expectQueryCmd ["query", "path", "A", "B"]
   qcCommand q5 @?= QT.ShortestPath (qid "A") (qid "B")
   (_, pc) <- expectParseFailure ["query", "path", "A"]
@@ -4998,34 +5002,34 @@ testRunQuery = testCase "test_run_query" $
       Right x -> pure x
       Left e  -> assertFailure ("fixture graph should load: " <> show e)
     -- 命中:stdout 等於 renderResult,exit 0
-    let findCmd = QueryCmd { qcFile = out, qcCommand = QT.FindNodes (T.pack "Demo") }
+    let findCmd = QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcCommand = QT.FindNodes (T.pack "Demo") }
     (code1, out1, _) <- withCaptured dir (\hO hE -> runQueryCmd hO hE findCmd)
     code1 @?= ExitSuccess
     out1 @?= renderResult (runQuery g (qcCommand findCmd))
     assertBool ("a hit should list nodes: " <> show out1) (T.length out1 > 0)
     -- 查無結果:一樣 exit 0(驗收標準 6)
-    let missCmd = QueryCmd { qcFile = out, qcCommand = QT.FindNodes (T.pack "zzz") }
+    let missCmd = QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcCommand = QT.FindNodes (T.pack "zzz") }
     (code2, out2, _) <- withCaptured dir (\hO hE -> runQueryCmd hO hE missCmd)
     code2 @?= ExitSuccess
     out2 @?= renderResult (runQuery g (qcCommand missCmd))
     -- LoadFileMissing → exit 1,訊息含路徑
     let gone = dir </> "nope.json"
     (code3, _, err3) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = gone, qcCommand = QT.RankConnectivity 3 })
+      QueryCmd { qcFile = gone, qcLevel = QT.LevelAll, qcCommand = QT.RankConnectivity 3 })
     code3 @?= ExitFailure 1
     assertHasAll "missing-file stderr" err3 ["query:", takeFileName gone]
     -- LoadParseError → exit 1,訊息指出問題
     let badP = dir </> "bad.json"
     writeUtf8 badP "{"
     (code4, _, err4) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = badP, qcCommand = QT.RankConnectivity 3 })
+      QueryCmd { qcFile = badP, qcLevel = QT.LevelAll, qcCommand = QT.RankConnectivity 3 })
     code4 @?= ExitFailure 1
     assertHasAll "parse-error stderr" err4 ["query:", takeFileName badP]
     -- LoadSchemaError(缺 nodes)→ exit 1
     let schemaP = dir </> "schema.json"
     writeUtf8 schemaP "{\"directed\":true,\"links\":[]}"
     (code5, _, err5) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = schemaP, qcCommand = QT.RankConnectivity 3 })
+      QueryCmd { qcFile = schemaP, qcLevel = QT.LevelAll, qcCommand = QT.RankConnectivity 3 })
     code5 @?= ExitFailure 1
     assertHasAll "schema-error stderr" err5 ["query:", "nodes"]
     -- 未知 relation:exit 0,但 stderr 有通道 5 的提示(驗收標準 8)
@@ -5033,19 +5037,19 @@ testRunQuery = testCase "test_run_query" $
         twoNodes = [jsonNode "A" "A" "src/A.hs", jsonNode "B" "B" "src/B.hs"]
     writeUtf8 relP (fixtureJson twoNodes [jsonLink "A" "B" "foo"])
     (code6, _, err6) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = relP, qcCommand = QT.RankConnectivity 3 })
+      QueryCmd { qcFile = relP, qcLevel = QT.LevelAll, qcCommand = QT.RankConnectivity 3 })
     code6 @?= ExitSuccess
     assertHasAll "unknown-relation stderr" err6
       ["query: unknown relation", "foo", "1", "edges"]
     -- 起點不存在:印提示但仍 exit 0(假設 A4)
     (code7, _, err7) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = out, qcCommand = QT.Reachable (qid "NoSuchNode") QT.Forward })
+      QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcCommand = QT.Reachable (qid "NoSuchNode") QT.Forward Nothing })
     code7 @?= ExitSuccess
     assertHasAll "node-not-found stderr" err7 ["query: node not found: NoSuchNode"]
     -- 回歸(階段二閘門):missingNodeLines 改走 queryGraphHasNode 後行為不變
     -- (a) ShortestPath 兩端都不存在 → 兩條提示,仍 exit 0
     (code7b, _, err7b) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = out
+      QueryCmd { qcFile = out, qcLevel = QT.LevelAll
                , qcCommand = QT.ShortestPath (qid "NoSuchFrom") (qid "NoSuchTo") })
     code7b @?= ExitSuccess
     assertHasAll "both-endpoints-missing stderr" err7b
@@ -5060,14 +5064,14 @@ testRunQuery = testCase "test_run_query" $
     writeUtf8 structP
       (fixtureJson sNodes [jsonLink "A" "B" "imports", jsonLink "A" "Lonely" "contains"])
     (code7c, _, err7c) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = structP
-               , qcCommand = QT.Reachable (qid "Lonely") QT.Forward })
+      QueryCmd { qcFile = structP, qcLevel = QT.LevelAll
+               , qcCommand = QT.Reachable (qid "Lonely") QT.Forward Nothing })
     code7c @?= ExitSuccess
     assertBool ("a structural-only node exists: " <> show err7c)
       (not (hasText "node not found" err7c))
     -- 兩端都存在但不連通:零提示、空結果、exit 0
     (code8, out8, err8) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = relP, qcCommand = QT.ShortestPath (qid "A") (qid "B") })
+      QueryCmd { qcFile = relP, qcLevel = QT.LevelAll, qcCommand = QT.ShortestPath (qid "A") (qid "B") })
     code8 @?= ExitSuccess
     assertBool ("existing endpoints need no hint: " <> show err8)
       (not (hasText "node not found" err8))
@@ -6302,3 +6306,259 @@ testInstancesEndToEnd = testCase "test_instances_end_to_end" $ do
   assertBool ("self-scan instances >= 3, got " <> show (length (instanceFactsOf erSelf)))
     (length (instanceFactsOf erSelf) >= 3)
   [ w | w <- erWarnings erSelf, T.pack "instance" `T.isInfixOf` ewMessage w ] @?= []
+
+--------------------------------------------------------------------------------
+-- extraction/E001 exclude-excluded-component-hie
+--------------------------------------------------------------------------------
+
+extractionE001Tests :: TestTree
+extractionE001Tests = testGroup "extraction/E001 exclude-excluded-component-hie"
+  [ testE001EnumerateSkipsExcluded   -- T1
+  , testE001TestsOnEndToEnd          -- T2
+  , testE001RuleOneMentionsEnumeration  -- T3
+  ]
+
+-- | E001 fixture:library + test-suite,cabal.project 寫 tests: True。
+testsOnFixture :: FilePath
+testsOnFixture = "test/fixtures/tests-on"
+
+-- E001 T1:enumerateHie 依 compExcluded 過濾——被排除 component 的 .hie 不進 HieLayout,
+-- 納入者與佈局認不得者保留;全部納入時四筆都在;順序為碼位序
+testE001EnumerateSkipsExcluded :: TestTree
+testE001EnumerateSkipsExcluded = testCase "test_e001_enumerate_skips_excluded" $ do
+  tmp <- getTemporaryDirectory
+  let root = tmp </> "knot-hs-e001-enumerate"
+  removePathForcibly root
+  let buildDir = root </> ".knot" </> "build"
+      base     = buildDir </> "build" </> "x86_64-windows" </> "ghc-9.14.1" </> "p-0.1.0.0"
+      files    =
+        [ base </> "build" </> "P" </> "Core.hie"                      -- 主 library
+        , base </> "t" </> "p-test" </> "build" </> "Spec.hie"          -- test-suite
+        , base </> "x" </> "p-exe" </> "build" </> "Main.hie"           -- executable
+        , buildDir </> "stray" </> "Weird.hie"                          -- 佈局認不得 → ("","")
+        ]
+  forM_ files $ \f -> createDirectoryIfMissing True (takeDirectory f) >> writeFile f ""
+  let comp nm k ex = ComponentMeta
+        { compName = T.pack nm, compKind = k, compSourceDirs = ["src"]
+        , compModules = [], compMainIs = Nothing, compExcluded = ex }
+      pmWith testExcluded = emptyMeta
+        { pmPackages =
+            [ PackageMeta { pkgName = T.pack "p", pkgCabalFile = "p.cabal"
+                          , pkgComponents =
+                              [ comp "lib:p" MainLibrary False
+                              , comp "exe:p-exe" Executable False
+                              , comp "test:p-test" TestSuite testExcluded ] } ] }
+  rootAbs <- makeAbsolute root
+  hl <- enumerateHie (pmWith True) root rootAbs (rootAbs </> ".knot" </> "build")
+  map fst (BD.hlFiles hl) @?=
+    [ ComponentRef (T.pack "p", T.pack "lib:p")
+    , ComponentRef (T.pack "p", T.pack "exe:p-exe")
+    , ComponentRef (T.empty, T.empty) ]
+  assertBool "test-suite .hie must be filtered out"
+    (not (any ((== "Spec.hie") . takeFileName . snd) (BD.hlFiles hl)))
+  let paths = map snd (BD.hlFiles hl)
+  paths @?= sort paths
+  hlAll <- enumerateHie (pmWith False) root rootAbs (rootAbs </> ".knot" </> "build")
+  length (BD.hlFiles hlAll) @?= 4
+  assertBool "test-suite .hie present when included"
+    (any ((== "Spec.hie") . takeFileName . snd) (BD.hlFiles hlAll))
+  removePathForcibly root
+
+-- E001 T2:tests-on fixture 端到端——includeTests = False 時零警告、FactDecl 只來自 src/;
+-- includeTests = True 時 test 的 FactDecl 出現;切回 False 後索引不再含 test 的 .hie
+testE001TestsOnEndToEnd :: TestTree
+testE001TestsOnEndToEnd = testCase "test_e001_tests_on_end_to_end" $
+  withFixtureScratch testsOnFixture "e001-tests-on" $ \root -> do
+    pmOff <- loadProjectMeta (defOpts root)
+    erOff <- expectRight =<< extract (extOpts root) pmOff
+    erOff `seq` pure ()
+    erWarnings erOff @?= []
+    let declFiles er = nubOrd [ f | FactDecl { fdFile = f } <- erFacts er ]
+    assertBool ("decl files must all be under src/: " <> show (declFiles erOff))
+      (all ("src/" `isPrefixOf`) (declFiles erOff))
+    assertBool "library decls present" (not (null (declFiles erOff)))
+    layoutOff <- expectRight =<< ensureHie (extOpts root) pmOff
+    assertBool "HieLayout must not list the test-suite"
+      (null [ () | (ComponentRef (_, c), _) <- BD.hlFiles layoutOff, T.pack "test:" `T.isPrefixOf` c ])
+    -- includeTests = True:test 的 .hie 進清單、test 的宣告出現
+    pmOn <- loadProjectMeta ((defOpts root) { includeTests = True })
+    erOn <- expectRight =<< extract (extOpts root) pmOn
+    assertBool ("test decls present when included: " <> show (declFiles erOn))
+      (any ("test/" `isPrefixOf`) (declFiles erOn))
+    -- 切回 False:索引裡不再有 test 的 hieFile 列(indexFiles 的清理)
+    layoutBack <- expectRight =<< ensureHie (extOpts root) pmOff
+    h <- expectRight =<< ensureIndex (extOpts root) layoutBack
+    rows <- withConnection (ihDbPath h) $ \conn ->
+      query_ conn (Query (T.pack "SELECT hieFile FROM mods")) :: IO [Only FilePath]
+    assertBool "index sanity: library rows remain" (not (null rows))
+    [ f | Only f <- rows, "ton-test" `isInfixOf` f ] @?= []
+
+-- E001 T3:design.md 規則 1 提到「列舉」與 compExcluded;黃金檔與自掃由既有測試守住
+testE001RuleOneMentionsEnumeration :: TestTree
+testE001RuleOneMentionsEnumeration = testCase "test_e001_rule_one_mentions_enumeration" $ do
+  d <- readUtf8 ".design/subsystems/extraction/design.md"
+  let rule1 = [ ln | ln <- T.lines d, T.pack "1. **納入範圍**" `T.isPrefixOf` ln ]
+  case rule1 of
+    [ln] -> do
+      assertBool "rule 1 mentions enumeration" (T.pack "列舉" `T.isInfixOf` ln)
+      assertBool "rule 1 mentions compExcluded" (T.pack "compExcluded" `T.isInfixOf` ln)
+    other -> assertFailure ("expected exactly one rule-1 line, got " <> show (length other))
+
+--------------------------------------------------------------------------------
+-- export-query/E001 query-depth-and-level
+--------------------------------------------------------------------------------
+
+exportQueryE001Tests :: TestTree
+exportQueryE001Tests = testGroup "export-query/E001 query-depth-and-level"
+  [ testE001RestrictLevel            -- T1
+  , testE001ReachableDepth           -- T2
+  , testE001QueryLevelFlagsParse     -- T3
+  , testE001DocsMentionFlags         -- T4
+  , testE001DefaultOutputUnchanged   -- T5
+  ]
+
+-- | 兩個 module、三個 decl、一條 module→decl 的 calls(frFromDecl = Nothing 的情形)。
+levelFixtureJson :: String
+levelFixtureJson = fixtureJson
+  [ jsonNode "M1" "M1" "src/M1.hs", jsonNode "M2" "M2" "src/M2.hs"
+  , jsonNode "M1.f" "f" "src/M1.hs", jsonNode "M1.g" "g" "src/M1.hs", jsonNode "M2.h" "h" "src/M2.hs" ]
+  [ jsonLink "M1" "M1.f" "contains", jsonLink "M1" "M1.g" "contains", jsonLink "M2" "M2.h" "contains"
+  , jsonLink "M1" "M2" "imports"
+  , jsonLink "M1.f" "M2.h" "calls", jsonLink "M1.g" "M1.f" "calls"
+  , jsonLink "M1" "M1.f" "calls" ]
+
+-- E001 T1:contains 目標 = decl 層;KQ.restrictLevel 的誘導子圖與度數重算;無 contains 的圖退化
+testE001RestrictLevel :: TestTree
+testE001RestrictLevel = testCase "test_e001_restrict_level" $ do
+  g <- expectRight (parseAt "level.json" levelFixtureJson)
+  QT.qgDeclNodes g @?= Set.fromList [qid "M1.f", qid "M1.g", qid "M2.h"]
+  length (QT.qgDepEdges g) @?= 4
+  -- module 層:2 個節點、只剩 imports
+  let gm = KQ.restrictLevel QT.LevelModule g
+  map QT.qnId (QT.qgNodes gm) @?= [qid "M1", qid "M2"]
+  QT.qgForward gm @?= Map.singleton (qid "M1") [qid "M2"]
+  QT.qgOutDeg gm @?= Map.singleton (qid "M1") 1
+  QT.qgInDeg gm  @?= Map.singleton (qid "M2") 1
+  QT.qgDepEdges gm @?= [(qid "M1", qid "M2")]
+  QT.qgDeclNodes gm @?= Set.empty
+  QT.qgNotes gm @?= QT.qgNotes g
+  -- decl 層:3 個節點、decl 間的 calls;module→decl 那條消失
+  let gd = KQ.restrictLevel QT.LevelDecl g
+  map QT.qnId (QT.qgNodes gd) @?= [qid "M1.f", qid "M1.g", qid "M2.h"]
+  QT.qgForward gd @?= Map.fromList [(qid "M1.f", [qid "M2.h"]), (qid "M1.g", [qid "M1.f"])]
+  QT.qgInDeg gd @?= Map.fromList [(qid "M1.f", 1), (qid "M2.h", 1)]
+  assertBool "module→decl edge dropped at decl level" ((qid "M1", qid "M1.f") `notElem` QT.qgDepEdges gd)
+  -- all 恆等
+  KQ.restrictLevel QT.LevelAll g @?= g
+  -- 沒有 contains 的圖(非 knot 產生):decl 空、module 與原圖相等
+  g0 <- expectRight (parseAt "flat.json" (fixtureJson
+          [jsonNode "A" "A" "a.hs", jsonNode "B" "B" "b.hs"] [jsonLink "A" "B" "imports"]))
+  QT.qgDeclNodes g0 @?= Set.empty
+  QT.qgNodes (KQ.restrictLevel QT.LevelDecl g0) @?= []
+  KQ.restrictLevel QT.LevelModule g0 @?= g0
+  -- 決定性:重複收斂結果相同
+  KQ.restrictLevel QT.LevelModule g @?= gm
+
+-- E001 T2:Reachable 的深度上限——截斷而已,規則 5(不含起點、環上真實距離)不變
+testE001ReachableDepth :: TestTree
+testE001ReachableDepth = testCase "test_e001_reachable_depth" $ do
+  chain <- expectRight (parseAt "chain.json" (fixtureJson
+    [jsonNode "A" "A" "a.hs", jsonNode "B" "B" "b.hs", jsonNode "C" "C" "c.hs", jsonNode "D" "D" "d.hs"]
+    [jsonLink "A" "B" "imports", jsonLink "B" "C" "imports", jsonLink "C" "D" "imports"]))
+  let reach g i d l = case runQuery g (QT.Reachable i d l) of
+        QT.ReachableSet rows -> rows
+        other -> error ("not a ReachableSet: " <> show other)
+  reach chain (qid "A") QT.Forward Nothing  @?= [(qid "B", 1), (qid "C", 2), (qid "D", 3)]
+  reach chain (qid "A") QT.Forward (Just 1) @?= [(qid "B", 1)]
+  reach chain (qid "A") QT.Forward (Just 2) @?= [(qid "B", 1), (qid "C", 2)]
+  reach chain (qid "A") QT.Forward (Just 9) @?= reach chain (qid "A") QT.Forward Nothing
+  reach chain (qid "D") QT.Reverse (Just 1) @?= [(qid "C", 1)]
+  cyc <- expectRight (parseAt "cyc.json" (fixtureJson
+    [jsonNode "A" "A" "a.hs", jsonNode "B" "B" "b.hs"]
+    [jsonLink "A" "B" "imports", jsonLink "B" "A" "imports"]))
+  reach cyc (qid "A") QT.Forward (Just 1) @?= [(qid "B", 1)]          -- 起點不入
+  reach cyc (qid "A") QT.Forward (Just 2) @?= [(qid "B", 1), (qid "A", 2)]  -- 環上真實距離
+  reach chain (qid "Nope") QT.Forward (Just 1) @?= []
+
+-- E001 T3:--level / --depth 解析、預設值、非法值;「存在但不在該層」的提示
+testE001QueryLevelFlagsParse :: TestTree
+testE001QueryLevelFlagsParse = testCase "test_e001_query_level_flags_parse" $ do
+  q1 <- expectQueryCmd ["query", "--level", "module", "reachable", "X", "--depth", "2"]
+  qcLevel q1 @?= QT.LevelModule
+  qcCommand q1 @?= QT.Reachable (qid "X") QT.Forward (Just 2)
+  q2 <- expectQueryCmd ["query", "reachable", "X", "--reverse", "--depth", "1"]
+  qcCommand q2 @?= QT.Reachable (qid "X") QT.Reverse (Just 1)
+  q3 <- expectQueryCmd ["query", "--level", "decl", "rank", "--top", "3"]
+  qcLevel q3 @?= QT.LevelDecl
+  q0 <- expectQueryCmd ["query", "reachable", "X"]
+  qcLevel q0 @?= QT.LevelAll
+  qcCommand q0 @?= QT.Reachable (qid "X") QT.Forward Nothing
+  _ <- expectParseFailure ["query", "reachable", "X", "--depth", "0"]
+  _ <- expectParseFailure ["query", "reachable", "X", "--depth", "abc"]
+  _ <- expectParseFailure ["query", "--level", "foo", "find", "x"]
+  -- 存在但不在該層:golden graph.json 只有 module 節點 → --level decl 下 Demo.Core 不在圖上
+  tmp <- getTemporaryDirectory
+  let dir = tmp </> "knot-hs-e001-level-msg"
+  removePathForcibly dir
+  createDirectoryIfMissing True dir
+  (code, out, err) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+    QueryCmd { qcFile = "test/fixtures/golden/graph.json", qcLevel = QT.LevelDecl
+             , qcCommand = QT.Reachable (qid "Demo.Core") QT.Forward Nothing })
+  code @?= ExitSuccess
+  assertHasAll "not-at-level stderr" err ["query: node Demo.Core is not at level decl"]
+  assertBool "stdout still a normal (empty) result" (T.pack "reachable: 0 nodes" `T.isPrefixOf` out)
+  removePathForcibly dir
+
+-- E001 T4:三份文件都提到兩個旗標;design.md 有查詢規則 7、8
+testE001DocsMentionFlags :: TestTree
+testE001DocsMentionFlags = testCase "test_e001_docs_mention_flags" $ do
+  forM_ [".design/subsystems/export-query/design.md", ".design/system.md", "README.md"] $ \p -> do
+    s <- readUtf8 p
+    assertBool (p <> " mentions --depth") (hasText "--depth" s)
+    assertBool (p <> " mentions --level") (hasText "--level" s)
+  d <- readUtf8 ".design/subsystems/export-query/design.md"
+  assertBool "rule 7" (hasText "7. **層" d)
+  assertBool "rule 8" (hasText "8. **深度" d)
+
+-- E001 T5:不帶旗標的四個查詢對 golden graph.json 的輸出與改善前逐字相同(改善前先釘成常數);
+-- knot-hs 自掃上 --depth 1 --level module 與 rank --level module 的驗收
+testE001DefaultOutputUnchanged :: TestTree
+testE001DefaultOutputUnchanged = testCase "test_e001_default_output_unchanged" $ do
+  g <- expectRight =<< loadQueryGraph "test/fixtures/golden/graph.json"
+  let out cmd = T.unpack (renderResult (runQuery g cmd))
+  out (QT.FindNodes (T.pack "Demo")) @?=
+    "found: 2 nodes\n  Demo.Core  Demo.Core  src/Demo/Core.hs\n  Demo.Render  Demo.Render  src/Demo/Render.hs\n"
+  out (QT.Reachable (qid "Demo.Render") QT.Forward Nothing) @?=
+    "reachable: 1 nodes\n  1  Demo.Core\n"
+  out (QT.Reachable (qid "Demo.Core") QT.Reverse Nothing) @?=
+    "reachable: 2 nodes\n  1  Demo.Render\n  1  Main\n"
+  out (QT.ShortestPath (qid "Demo.Render") (qid "Demo.Core")) @?=
+    "path: 1 hops\n  Demo.Render -> Demo.Core\n"
+  out (QT.RankConnectivity 5) @?=
+    "rank: 3 nodes\n  2  Demo.Core  in=2 out=0\n  2  Demo.Render  in=1 out=1\n  2  Main  in=0 out=2\n"
+  -- 自掃:extract → buildGraph → encode → loadQueryGraph → module 層查詢
+  pm <- loadProjectMeta (defOpts ".")
+  er <- expectRight =<< extract (extOpts ".") pm
+  let cg = buildGraph defBuildOpts pm er
+      bytes = BSL.toStrict (BB.toLazyByteString (encodeCodegraph Nothing cg))
+  tmp <- getTemporaryDirectory
+  let gp = tmp </> "knot-hs-e001-self.codegraph.json"
+  BS.writeFile gp bytes
+  gs <- expectRight =<< loadQueryGraph gp
+  let gm = KQ.restrictLevel QT.LevelModule gs
+      ids rows = [ i | (QT.NodeId i, _) <- rows ]
+      reach i d l = case runQuery gm (QT.Reachable i d l) of
+        QT.ReachableSet rows -> ids rows
+        other -> error ("not a ReachableSet: " <> show other)
+  reach (qid "Knot.Extract.Pipeline") QT.Forward (Just 1)
+    @?= map T.pack ["Knot.Extract.BuildDriver", "Knot.Extract.Types", "Knot.Meta.Types"]
+  reach (qid "Knot.Extract.Pipeline") QT.Reverse (Just 1) @?= [T.pack "Knot.Extract"]
+  case runQuery gm (QT.RankConnectivity 2) of
+    QT.Ranking rows -> [ i | (QT.NodeId i, _, _) <- rows ] @?= map T.pack ["Knot.Meta.Types", "Knot.Extract.Types"]
+    other -> assertFailure ("not a Ranking: " <> show other)
+  -- module 層的節點 id 裡沒有 decl 節點(無 `#t`、無 `#i:`、無小寫尾段)
+  forM_ (QT.qgNodes gm) $ \n -> let QT.NodeId i = QT.qnId n in
+    assertBool ("module-level id: " <> T.unpack i)
+      (not (T.pack "#" `T.isInfixOf` i)
+        && maybe False (isUpper . fst) (T.uncons (last (T.splitOn (T.pack ".") i))))
+  removePathForcibly gp

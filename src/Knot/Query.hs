@@ -13,6 +13,7 @@ module Knot.Query
     loadQueryGraph
   , queryGraphNotes
   , queryGraphHasNode
+  , restrictLevel
   , runQuery
   , renderResult
     -- * DTO
@@ -21,6 +22,7 @@ module Knot.Query
   , NodeId (..)
   , QueryCommand (..)
   , Direction (..)
+  , Level (..)
   , QueryResult (..)
   ) where
 
@@ -30,10 +32,11 @@ import qualified Data.Text as T
 import System.IO.Error (isDoesNotExistError)
 
 import Knot.Query.Engine (runQuery)
-import Knot.Query.Load (parseQueryGraph, queryGraphHasNode, queryGraphNotes)
+import Knot.Query.Load (parseQueryGraph, queryGraphHasNode, queryGraphNotes, restrictLevel)
 import Knot.Query.Render (renderResult)
 import Knot.Query.Types
   ( Direction (..)
+  , Level (..)
   , LoadError (..)
   , NodeId (..)
   , QueryCommand (..)

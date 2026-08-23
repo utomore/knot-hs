@@ -49,7 +49,7 @@ import Knot.Query.Types
 runQuery :: QueryGraph -> QueryCommand -> QueryResult
 runQuery g cmd = case cmd of
   FindNodes kw          -> FoundNodes   (findNodes g kw)
-  Reachable start dir   -> ReachableSet (reachableFrom g start dir)
+  Reachable start dir limit -> ReachableSet (reachableFrom g start dir limit)
   ShortestPath from to  -> PathResult   (shortestPath g from to)
   RankConnectivity n    -> Ranking      (rankConnectivity g n)
 
@@ -86,8 +86,8 @@ findNodes g kw =
 -- * 起點在環上時__以真實距離出現__:@start@ 沒有被預先標記,某層的鄰居含它就
 --   以該層距離入表——自環給 1、二元環給 2(規則 5 後半)
 -- * 輸出依 (距離升序, id 升序)(規則 4);__不能__只 'Map.toAscList'(那是純 id 序)
-reachableFrom :: QueryGraph -> NodeId -> Direction -> [(NodeId, Int)]
-reachableFrom g start dir
+reachableFrom :: QueryGraph -> NodeId -> Direction -> Maybe Int -> [(NodeId, Int)]
+reachableFrom g start dir limit
   | not (start `Map.member` qgIndex g) = []
   | otherwise = sortOn (\(i, d) -> (d, i)) (Map.toAscList dist)
  where
@@ -98,7 +98,9 @@ reachableFrom g start dir
   neighbours v = Map.findWithDefault [] v adj
   dist = go Map.empty 1 (neighbours start)
   -- frontier 是本層的發現序;每個節點最多寫入一次,故層數上限為節點數。
+  -- 深度上限(查詢規則 8,E001):超過 limit 的層不展開——只是截斷,規則 5 不變。
   go acc _ [] = acc
+  go acc d _ | maybe False (d >) limit = acc
   go acc d frontier =
     let fresh = freshInOrder (`Map.member` acc) frontier
         acc'  = foldl' (\m v -> Map.insert v d m) acc fresh

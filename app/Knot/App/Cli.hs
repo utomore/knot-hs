@@ -48,6 +48,7 @@ import Options.Applicative
   , long
   , metavar
   , option
+  , showDefaultWith
   , progDesc
   , short
   , showDefault
@@ -65,7 +66,7 @@ import qualified Knot.Export.Types as ET
 import qualified Knot.Extract.Types as XT
 import Knot.Graph.Types (BuildOptions (..))
 import Knot.Meta.Types (MetaOptions (..))
-import Knot.Query (Direction (..), NodeId (..), QueryCommand (..))
+import Knot.Query (Direction (..), Level (..), NodeId (..), QueryCommand (..))
 
 --------------------------------------------------------------------------------
 -- CLI DTO
@@ -99,6 +100,7 @@ data SummaryMode = SummaryMeta | SummaryFacts | SummaryGraph
 -- | @knot query@:圖檔路徑 + 四子命令之一。
 data QueryCmd = QueryCmd
   { qcFile    :: FilePath      -- ^ --graph,預設 "codegraph.json"(假設 A3)
+  , qcLevel   :: Level         -- ^ --level all|module|decl,預設 all(export-query/E001;四子命令共用)
   , qcCommand :: QueryCommand  -- ^ F003 的契約 DTO
   }
   deriving (Eq, Show)
@@ -154,7 +156,31 @@ queryParser = QueryCmd
         (long "graph" <> metavar "FILE"
           <> value "codegraph.json" <> showDefault
           <> help "codegraph.json to query")
+  <*> option levelReader
+        (long "level" <> metavar "all|module|decl"
+          <> value LevelAll <> showDefaultWith levelName
+          <> help "restrict the graph to one level before querying (decl = targets of contains edges)")
   <*> queryCommandParser
+
+-- | @--level@ 的三個取值(export-query/E001)。
+levelReader :: ReadM Level
+levelReader = eitherReader $ \s -> case s of
+  "all"    -> Right LevelAll
+  "module" -> Right LevelModule
+  "decl"   -> Right LevelDecl
+  _        -> Left ("unknown level: " <> s <> " (expected all|module|decl)")
+
+levelName :: Level -> String
+levelName l = case l of
+  LevelAll    -> "all"
+  LevelModule -> "module"
+  LevelDecl   -> "decl"
+
+-- | @--depth N@:必須 ≥ 1(0 與負數沒有意義——規則 5 本來就不含起點)。
+depthReader :: ReadM Int
+depthReader = eitherReader $ \s -> case reads s of
+  [(n, "")] | n >= 1 -> Right n
+  _                  -> Left ("--depth must be a positive integer, got: " <> s)
 
 queryCommandParser :: Parser QueryCommand
 queryCommandParser = hsubparser
@@ -178,6 +204,9 @@ reachableParser = Reachable
   <*> (directionOf <$> switch
         (long "reverse"
           <> help "who depends on it (default: what it depends on)"))
+  <*> optional (option depthReader
+        (long "depth" <> metavar "N"
+          <> help "only nodes within N hops (default: unlimited)"))
  where
   directionOf b = if b then Reverse else Forward
 
