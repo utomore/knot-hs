@@ -3,7 +3,7 @@ id: E001
 type: enhance
 title: exclude-excluded-component-hie
 description: 被排除 component 的 .hie 不進 HieLayout,收掉逐檔 cannot map 警告
-status: open
+status: done
 created: 2026-08-23
 updated: 2026-08-23
 depends-on: []
@@ -142,9 +142,9 @@ build-driver 列舉時依 `compExcluded` 濾掉,不進 `HieLayout`、不索引�
 
 ## TodoList
 
-- [ ] T1: build-driver——`enumerateHie` 依 `compExcluded` 過濾,對不到 component 的檔保留  `dep: -`
-- [ ] T2: fixture `test/fixtures/tests-on/`(library + test-suite,`cabal.project` 寫 `tests: True`)與端到端驗證(`includeTests` 兩態、索引收斂)  `dep: T1`
-- [ ] T3: `design.md` 規則 1 回填;MagicFarmer 實跑 75 → 1 寫進 system.md 進度表  `dep: T1`
+- [x] T1: build-driver——`enumerateHie` 依 `compExcluded` 過濾,對不到 component 的檔保留  `dep: -`
+- [x] T2: fixture `test/fixtures/tests-on/`(library + test-suite,`cabal.project` 寫 `tests: True`)與端到端驗證(`includeTests` 兩態、索引收斂)  `dep: T1`
+- [x] T3: `design.md` 規則 1 回填;MagicFarmer 實跑 75 → 1 寫進 system.md 進度表  `dep: T1`
 
 ## 1-to-1 測試對照表
 
@@ -156,4 +156,17 @@ build-driver 列舉時依 `compExcluded` 濾掉,不進 `HieLayout`、不索引�
 
 ## 實作備註
 
-(撰寫時留空。)
+### 2026-08-23 實作完成
+
+**量化結果**(對照「改善目標」):
+
+| 指標 | 改善前 | 改善後 |
+|---|---|---|
+| MagicFarmer(`cabal.project` 有 `tests: True`)extraction 警告 | 75 則 | **2 則**——兩則都是 `Paths_magic_farmer.hie`(hie-facts 與 F008 的 hie-instances 各一則;設計時估「1 則」是 F008 之前的數字)。autogen module 另案 |
+| 同一次實跑的圖 | — | 非 instance 節點 **1580 = 1580**、依賴類邊 **5063 = 5063**(與 E001 前逐數相同;多出的 188 個 `#i:` 節點是 F008 的 instance 節點,與本文檔無關);warm 1.4 s;標的 `git status` 仍為空 |
+| `tests-on` fixture,`includeTests = False` | — | **0 警告**、`HieLayout` 無 `test:` 項、`FactDecl` 全在 `src/`(T2) |
+| 同 fixture,`includeTests = True` → 切回 False | — | test 的 `FactDecl` 出現;切回後 `hiedb.sqlite` 的 `mods` 不含 `ton-test` 路徑(索引清理既有行為,T2 證實) |
+| 測試 | 152 綠 | **155 綠**(+3);黃金檔 byte 不變 |
+
+**實作取捨**:過濾用 `notElem` 對一個小清單(component 數 × 1),不建 `Set`;
+`componentRefOf` 對不到佈局的 `("","")` 與退回 `lib:<pkg>` 的未知 kind 都不在排除清單內、照保留(T1 以 `stray/Weird.hie` 驗證前者)。未動 `cabalArgs`、hie-index、hie-facts、hie-instances。

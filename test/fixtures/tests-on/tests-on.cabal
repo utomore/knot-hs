@@ -1,0 +1,22 @@
+cabal-version:      3.4
+name:               tests-on
+version:            0.1.0.0
+build-type:         Simple
+
+-- extraction/E001 fixture:library + test-suite,cabal.project 寫 tests: True。
+-- knot 不帶 --include-tests 時 test-suite 仍會被 cabal 建出 .hie,
+-- build-driver 列舉時必須依 compExcluded 濾掉。
+
+library
+    hs-source-dirs:   src
+    exposed-modules:  TOn.Core
+    build-depends:    base
+    default-language: GHC2024
+
+test-suite ton-test
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    TOn.Helper
+    build-depends:    base, tests-on
+    default-language: GHC2024

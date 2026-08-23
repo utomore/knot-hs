@@ -3,7 +3,7 @@ id: E001
 type: enhance
 title: query-depth-and-level
 description: knot query 加 --depth N 與 --level module|decl,reachable 不再只有遞移閉包
-status: open
+status: done
 created: 2026-08-23
 updated: 2026-08-23
 depends-on: []
@@ -174,11 +174,11 @@ knot query reachable ID [--reverse] [--depth N]        N ≥ 1
 
 ## TodoList
 
-- [ ] T1: graph-load——`Level` DTO、`qgDeclNodes` / `qgDepEdges`、`absorb` 記錄 `contains` 目標、`restrictLevel`(誘導子圖 + 度數重算)  `dep: -`
-- [ ] T2: query-engine——`Reachable` 加 `Maybe Int`,`reachableFrom` 深度截斷;`runQuery` 其餘不動  `dep: T1`
-- [ ] T3: cli-assembly——`--level`(全域)與 `--depth`(reachable,≥ 1)解析、`QueryCmd.qcLevel`、`runQueryCmd` 套 `restrictLevel`、`missingNodeLines` 的「不在該層」訊息  `dep: T2`
-- [ ] T4: 文檔——`design.md` DTO / 規則 7、8 / CLI 對映表 / 模組間介面;system.md CLI 頂層契約;README §`knot query`  `dep: T3`
-- [ ] T5: 回歸與量化——既有 F003 / F004 測試改寫 `Reachable` 的第三欄為 `Nothing` 後全綠;預設輸出 byte 不變;knot-hs 自掃上 `reachable Knot.Extract.Pipeline --depth 1 --level module` 與 `rank --level module` 的驗收  `dep: T3`
+- [x] T1: graph-load——`Level` DTO、`qgDeclNodes` / `qgDepEdges`、`absorb` 記錄 `contains` 目標、`restrictLevel`(誘導子圖 + 度數重算)  `dep: -`
+- [x] T2: query-engine——`Reachable` 加 `Maybe Int`,`reachableFrom` 深度截斷;`runQuery` 其餘不動  `dep: T1`
+- [x] T3: cli-assembly——`--level`(全域)與 `--depth`(reachable,≥ 1)解析、`QueryCmd.qcLevel`、`runQueryCmd` 套 `restrictLevel`、`missingNodeLines` 的「不在該層」訊息  `dep: T2`
+- [x] T4: 文檔——`design.md` DTO / 規則 7、8 / CLI 對映表 / 模組間介面;system.md CLI 頂層契約;README §`knot query`  `dep: T3`
+- [x] T5: 回歸與量化——既有 F003 / F004 測試改寫 `Reachable` 的第三欄為 `Nothing` 後全綠;預設輸出 byte 不變;knot-hs 自掃上 `reachable Knot.Extract.Pipeline --depth 1 --level module` 與 `rank --level module` 的驗收  `dep: T3`
 
 ## 1-to-1 測試對照表
 
@@ -192,4 +192,35 @@ knot query reachable ID [--reverse] [--depth N]        N ≥ 1
 
 ## 實作備註
 
-(撰寫時留空。)
+### 2026-08-23 實作完成
+
+**量化結果**(對照「改善目標」,knot-hs 自掃圖):
+
+| 指標 | 改善前 | 改善後 |
+|---|---|---|
+| 「`Pipeline` 直接依賴哪些 module」 | `reachable` 65 節點(≈626 tokens),或兩次呼叫 + shell 過濾 | `reachable Knot.Extract.Pipeline --depth 1 --level module` **一次呼叫**,恰 3 列:`Knot.Extract.BuildDriver`、`Knot.Extract.Types`、`Knot.Meta.Types`(T5) |
+| 「誰直接依賴 `Pipeline`」 | 同上 | `… --reverse --depth 1 --level module` → 恰 `Knot.Extract`(T5) |
+| module hub 排名 | `rank` 回 decl 層 | `rank --level module` 前兩名 `Knot.Meta.Types`、`Knot.Extract.Types`,與掃 `imports` 邊的 fan-in 排名一致(T5;module 層的總度數含 fan-out,`Knot.App.Run` 因 out=12 排進前段,是正確語意) |
+| 非 knot 圖(無 `contains`) | — | `LevelDecl` 空、`LevelModule` 與原圖 `Eq` 相等(T1) |
+| 預設行為 | — | golden `graph.json` 上四個查詢不帶旗標的輸出與改善前**逐字相同**(T5 釘成常數);既有 F003 / F004 測試改寫第三欄為 `Nothing` 後全綠 |
+| `--depth 0` / 非數字 / `--level foo` | — | 解析失敗(T3) |
+| 「存在但不在該層」 | — | `query: node Demo.Core is not at level decl`,exit 0(T3) |
+
+**實作取捨**(Level 3 自主權內):
+
+- 層的判定**只看 `contains`**(`absorb` 的 `RelStructural` 分支多記一個集合),其他結構類
+  relation(`method`、`defines`…)仍靜默丟——dev-flow 其他產生器的結構邊語意不一,
+  不能拿來推層
+- `restrictLevel` 重算鄰接表與度數走**同一個 `addDependency`**(從 `absorb` 抽出),
+  載入與收斂的度數語意(算邊數、不去重)不可能漂移;`qgDepEdges` 為此保留原始清單
+  (含重複、依檔序),`Eq` 比對時 `LevelAll` 恆等、`LevelModule` 對無 `contains` 的圖
+  亦等(T1 證實)
+- `--depth` 以 `eitherReader` 拒絕 ≤ 0 與非整數;`--level` 是 `knot query` 的**全域**
+  選項(與 `--graph` 同層),`QueryCmd` 多一欄 `qcLevel`
+- `missingNodeLines` 改收「完整圖 + 收斂後的圖」兩張,先判「不存在」再判「不在該層」
+- 既有測試:`QT.Reachable` 的 14 處呼叫加 `Nothing`、`QueryCmd` 的 11 處記錄建構加
+  `qcLevel = QT.LevelAll`、F002 T1 的 `QueryGraph` 記錄補兩欄;全部機械性改寫,
+  無斷言變動
+
+**連帶更新**:`design.md`(DTO、規則 7 / 8、CLI 對映表、`restrictLevel`)於設計階段已回填;
+本次把 `system.md` CLI 契約的「設計中」標記拿掉、README §`knot query` 加旗標與三個常用組合。

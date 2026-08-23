@@ -22,6 +22,8 @@ module Knot.Query.Load
   , classifyRelation
   , dependencyRelations
   , structuralRelations
+    -- * E001:層的誘導子圖(Level 2 模組間公開介面,經 "Knot.Query" 匯出)
+  , restrictLevel
   ) where
 
 import Control.Monad (foldM)
@@ -40,7 +42,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 
 import Knot.Query.Types
-  ( LoadError (..)
+  ( Level (..)
+  , LoadError (..)
   , NodeId (..)
   , QueryGraph (..)
   , QueryNode (..)
@@ -168,6 +171,8 @@ parseQueryGraph path bs = do
     , qgOutDeg  = accOutDeg acc
     , qgInDeg   = accInDeg acc
     , qgNotes   = Map.toAscList (accUnknown acc)
+    , qgDeclNodes = accDecl acc
+    , qgDepEdges  = reverse (accEdges acc)   -- 倒序累積 → 回到 links 的檔序
     }
 
 key :: String -> K.Key
@@ -246,20 +251,67 @@ data Acc = Acc
   , accOutDeg  :: !(Map NodeId Int)
   , accInDeg   :: !(Map NodeId Int)
   , accUnknown :: !(Map Text Int)
+  , accDecl    :: !(Set NodeId)          -- ^ E001:@contains@ 邊的目標(decl 層節點)
+  , accEdges   :: ![(NodeId, NodeId)]    -- ^ E001:依賴類邊,倒序累積(收尾時 reverse 回檔序)
   }
 
 emptyAcc :: Acc
-emptyAcc = Acc Map.empty Map.empty Map.empty Map.empty Map.empty
+emptyAcc = Acc Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty []
 
 -- | 自環('A' → 'A')照常進表、in\/out 度各 +1(查詢規則 5 的前提);
--- 結構類靜默排除,未知累加進 'accUnknown'。
+-- 結構類靜默排除——但 @contains@ 的目標記進 'accDecl'(查詢規則 7,E001:
+-- 那是節點「層」的唯一結構證據);未知累加進 'accUnknown'。
 absorb :: Acc -> RawEdge -> Acc
 absorb acc (RawEdge s t rel) = case classifyRelation rel of
-  RelStructural -> acc
+  RelStructural
+    | rel == containsRel -> acc { accDecl = Set.insert t (accDecl acc) }
+    | otherwise          -> acc
   RelUnknown    -> acc { accUnknown = Map.insertWith (+) rel 1 (accUnknown acc) }
-  RelDependency -> acc
-    { accForward = Map.insertWith Set.union s (Set.singleton t) (accForward acc)
-    , accReverse = Map.insertWith Set.union t (Set.singleton s) (accReverse acc)
-    , accOutDeg  = Map.insertWith (+) s 1 (accOutDeg acc)
-    , accInDeg   = Map.insertWith (+) t 1 (accInDeg acc)
-    }
+  RelDependency -> addDependency acc (s, t)
+
+containsRel :: Text
+containsRel = T.pack "contains"
+
+-- | 一條依賴類邊進四張表 + 原始清單(載入與 'restrictLevel' 重算共用同一條路徑,
+-- 度數語意才不會漂移:算邊數、不去重)。
+addDependency :: Acc -> (NodeId, NodeId) -> Acc
+addDependency acc (s, t) = acc
+  { accForward = Map.insertWith Set.union s (Set.singleton t) (accForward acc)
+  , accReverse = Map.insertWith Set.union t (Set.singleton s) (accReverse acc)
+  , accOutDeg  = Map.insertWith (+) s 1 (accOutDeg acc)
+  , accInDeg   = Map.insertWith (+) t 1 (accInDeg acc)
+  , accEdges   = (s, t) : accEdges acc
+  }
+
+--------------------------------------------------------------------------------
+-- 層的誘導子圖(查詢規則 7,E001)
+--------------------------------------------------------------------------------
+
+-- | 把圖收斂為指定層的誘導子圖(Level 2 模組間公開介面)。
+--
+-- * 'LevelAll' 恆等(連 'Eq' 都相等)
+-- * 'LevelModule' 只留__不是__ @contains@ 目標的節點;'LevelDecl' 只留是的
+-- * 邊只留兩端都保留者,鄰接表與度數依留下的邊__重算__(走 'addDependency',
+--   與載入同一條路徑);'qgNotes' 不動(未知 relation 的統計屬整份檔案)
+-- * 決定性:節點序沿用 'qgNodes' 的 id 升序、鄰居仍 'Set.toAscList'
+restrictLevel :: Level -> QueryGraph -> QueryGraph
+restrictLevel LevelAll g = g
+restrictLevel lvl g = g
+  { qgNodes     = nodes
+  , qgIndex     = index
+  , qgForward   = Map.map Set.toAscList (accForward acc)
+  , qgReverse   = Map.map Set.toAscList (accReverse acc)
+  , qgOutDeg    = accOutDeg acc
+  , qgInDeg     = accInDeg acc
+  , qgDeclNodes = Set.filter (`Map.member` index) (qgDeclNodes g)
+  , qgDepEdges  = edges
+  }
+ where
+  isDecl n = qnId n `Set.member` qgDeclNodes g
+  keep n = case lvl of
+    LevelDecl -> isDecl n
+    _         -> not (isDecl n)
+  nodes = filter keep (qgNodes g)
+  index = Map.filter keep (qgIndex g)
+  edges = [ e | e@(s, t) <- qgDepEdges g, Map.member s index, Map.member t index ]
+  acc   = foldl' addDependency emptyAcc edges

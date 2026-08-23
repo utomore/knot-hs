@@ -121,13 +121,28 @@ Usage: knot extract [PATH] [-o|--output FILE] [--include-tests] [--strict]
 讀既有的 `codegraph.json` 回答導航問題,只走依賴類邊(`contains` 這類結構邊不算)。
 
 ```
-knot query find KEYWORD              # id 或 label 含 KEYWORD 的節點(不分大小寫)
-knot query reachable ID [--reverse]  # 從 ID 可達的節點;--reverse 改問「誰依賴它」
-knot query path FROM TO              # 兩點最短路徑
-knot query rank [--top N]            # 連通度排名(預設前 10)
+knot query find KEYWORD                         # id 或 label 含 KEYWORD 的節點(不分大小寫)
+knot query reachable ID [--reverse] [--depth N] # 從 ID 可達的節點;--reverse 改問「誰依賴它」;--depth 只回 N 跳內
+knot query path FROM TO                         # 兩點最短路徑
+knot query rank [--top N]                       # 連通度排名(預設前 10)
 
-  --graph FILE   要查哪份圖(預設 ./codegraph.json,四個子命令共用)
+  --graph FILE                 要查哪份圖(預設 ./codegraph.json,四個子命令共用)
+  --level all|module|decl      先把圖收斂到一層再查(預設 all;四個子命令共用)
 ```
+
+`--level module` 只留 module 節點與它們之間的 `imports` 邊——「誰依賴誰」「哪個 module 是
+hub」這類架構問題用這一層;`--level decl` 只留宣告節點與 `calls` / `uses` / `implements`。
+層由 `contains` 邊推得(宣告節點 = 某條 `contains` 的目標),不靠 id 長相猜。
+常用組合:
+
+```bash
+knot query --level module reachable Knot.Extract.Pipeline --depth 1            # 直接 import 了誰
+knot query --level module reachable Knot.Extract.Pipeline --depth 1 --reverse  # 誰直接 import 它
+knot query --level module rank --top 10                                        # module 層 hub
+```
+
+`--graph` 與 `--level` 是 `knot query` 自己的選項,要寫在子命令**之前**(optparse 的慣例:
+子命令之後的旗標屬於該子命令)。
 
 節點 id 的長相:module 是裸名(`Demo.Core`),值宣告是 `<module>.<occ>`
 (`Demo.Core.render`),型別宣告多一個 `#t`(`Demo.Core.Foo#t`,與建構子 `Demo.Core.Foo`
