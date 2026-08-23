@@ -127,6 +127,8 @@ data LoadError
 ### CLI 子命令對映(承接 system.md 頂層契約)
 
 ```text
+knot --version                                   → 不進本子系統:CLI 組裝層印 `knot <版本> (GHC <版本>)` 即 exit 0(E002)
+knot clean [PATH]                                → 不進本子系統:CLI 組裝層以 extraction 的 `knotDir` 取路徑後 removePathForcibly(E003)
 knot query [--graph FILE] [--level all|module|decl] [--scope product|tests|all] <子命令>
                                                  → 先 restrictLevel,再 restrictScope,再 runQuery(預設 all / product);
                                                    tests-of 略過 restrictScope(規則 10)

@@ -103,6 +103,11 @@ cabal clean && cabal build all --enable-tests --ghc-options=-Werror
 ### CLI 介面(頂層契約)
 
 ```text
+knot --version               印 knot 版本與建置它的 GHC 版本(ADR-001 版本鎖的對帳依據),exit 0(export-query/E002)
+
+knot clean [PATH]            刪掉 <PATH>/.knot 快取目錄(Output 4);只動 .knot/、不碰 codegraph.json、不問確認;
+                             目錄不存在也 exit 0(export-query/E003)
+
 knot extract [PATH]          產出 codegraph.json(需要時自行建置目標專案產 .hie,全自動)
   --output FILE              預設 <PATH>/codegraph.json
   --include-tests            納入 test-suite component(預設排除)

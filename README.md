@@ -56,7 +56,40 @@ cabal install exe:knot
 
 裝到 cabal 的 installdir(用 `cabal path --installdir` 查,Windows 上常見是
 `C:\cabal\bin`),確認它在 `PATH` 上。repo 內的 `cabal.project` 已含 hiedb 在 GHC 9.14
-上需要的 `allow-newer: hie-compat:base, hie-compat:ghc`,不必自己加。
+上需要的 `allow-newer: hie-compat:base, hie-compat:ghc`,不必自己加。裝好後:
+
+```
+$ knot --version
+knot 0.1.0.0 (GHC 9.14.1)
+```
+
+括號裡是**建置這份 knot 的 GHC**——它只掃得了同版 GHC 建的專案(見上面的版本鎖)。
+
+### 更新
+
+```bash
+cd knot-hs
+git pull
+cabal install exe:knot --overwrite-policy=always
+knot --version
+```
+
+`--overwrite-policy=always` 不能省:installdir 已有 `knot` 時 cabal 預設拒絕覆蓋。
+已掃過的專案不必做任何事——`.knot/` 是快取,新版 knot 讀不動時會自己重建;想乾淨重來就
+`knot clean`,下次 `knot extract` 冷跑一次。
+
+### 發版(維護者)
+
+版本號只住在 `knot-hs.cabal` 的 `version`(`--version` 從 cabal 自動產生的 `Paths_knot_hs`
+讀它,不另外抄一份)。發一版的步驟:
+
+1. 改 `knot-hs.cabal` 的 `version`,合進 `main`
+2. `git tag v<版本> && git push origin v<版本>`
+3. `cabal install exe:knot --installdir=<暫存目錄> --install-method=copy --overwrite-policy=always`,
+   把產出的 `knot.exe`(或 `knot`)附到 GitHub Release:
+   `gh release create v<版本> <暫存目錄>/knot.exe --title "knot <版本>" --notes-file <說明>`
+
+附的二進位只對同一個 GHC 版本有意義,Release 說明要寫清楚「built with GHC x.y.z」。
 
 ## 快速上手
 
@@ -145,6 +178,16 @@ knot query --level module rank --top 10                                        #
 
 `--graph`、`--level` 與 `--scope` 是 `knot query` 自己的選項,要寫在子命令**之前**(optparse 的慣例:
 子命令之後的旗標屬於該子命令)。
+
+### `knot clean`
+
+```
+knot clean [PATH]    # 刪掉 <PATH>/.knot(預設 .);只動快取,不碰 codegraph.json
+```
+
+`.knot/` 是可重建的快取(插樁建置的 builddir、`.hie`、hiedb 索引),刪掉只會讓下一次
+`knot extract` 冷跑;所以不問確認,目錄不存在也 exit 0。想乾淨重來、或 `.knot/` 佔太多
+空間(三個 executable 的 monorepo 實測 326 MB)時用它。
 
 #### 測試碼:`--scope` 與 `tests-of`
 

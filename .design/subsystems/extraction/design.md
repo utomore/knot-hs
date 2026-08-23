@@ -31,6 +31,7 @@ code-paths: [src/Knot/Extract, src/Knot/Extract.hs]
 
 ```haskell
 extract :: ExtractOptions -> ProjectMeta -> IO (Either ExtractFailure ExtractResult)
+knotDir :: FilePath -> FilePath   -- <root>/.knot(system.md Output 4 的快取目錄);export-query/E003 的 knot clean 只認這裡,CLI 不自己拼 ".knot"
 ```
 
 ```haskell
