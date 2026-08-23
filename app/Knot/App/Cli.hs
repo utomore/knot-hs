@@ -19,8 +19,10 @@ module Knot.App.Cli
   , ExtractCmd (..)
   , SummaryMode (..)
   , QueryCmd (..)
+  , CleanCmd (..)
     -- * 解析
   , cliParserInfo
+  , versionText
     -- * 旗標 → Options DTO 的純對映
   , toMetaOptions
   , toExtractOptions
@@ -32,6 +34,7 @@ module Knot.App.Cli
 import Control.Applicative (optional)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
+import Data.Version (showVersion)
 import Options.Applicative
   ( Parser
   , ParserInfo
@@ -45,6 +48,7 @@ import Options.Applicative
   , helper
   , hsubparser
   , info
+  , infoOption
   , long
   , metavar
   , option
@@ -60,6 +64,9 @@ import Options.Applicative
   )
 
 import System.FilePath ((</>))
+import System.Info (fullCompilerVersion)
+
+import Paths_knot_hs (version)
 
 import Knot.Export.Types (CommitPolicy (AutoDetect))
 import qualified Knot.Export.Types as ET
@@ -72,10 +79,17 @@ import Knot.Query (Direction (..), Level (..), NodeId (..), QueryCommand (..), S
 -- CLI DTO
 --------------------------------------------------------------------------------
 
--- | knot 的兩個子命令(system.md「CLI 介面(頂層契約)」)。
+-- | knot 的三個子命令(system.md「CLI 介面(頂層契約)」)。
 data Command
   = CmdExtract ExtractCmd
   | CmdQuery QueryCmd
+  | CmdClean CleanCmd
+  deriving (Eq, Show)
+
+-- | @knot clean [PATH]@:刪掉 @\<PATH\>\/.knot@(export-query/E003)。
+newtype CleanCmd = CleanCmd
+  { ccPath :: FilePath   -- ^ 位置參數 PATH,預設 "."
+  }
   deriving (Eq, Show)
 
 -- | @knot extract [PATH]@ 的四個旗標(S5 cli-zero-setup 起:@--backend@ \/
@@ -110,16 +124,28 @@ data QueryCmd = QueryCmd
 -- 解析
 --------------------------------------------------------------------------------
 
--- | 頂層 'ParserInfo'(含 @--help@ 與兩個子命令)。
+-- | 頂層 'ParserInfo'(含 @--help@、@--version@ 與兩個子命令)。
 --
 -- 'hsubparser' 會自動替每個子命令掛上 @--help@;頂層另以 @\<**\> helper@
--- 明確掛一次。
+-- 明確掛一次。@--version@(export-query/E002)只在頂層:印 'versionText' 後 exit 0。
 cliParserInfo :: ParserInfo Command
-cliParserInfo = info (commandParser <**> helper)
+cliParserInfo = info (commandParser <**> helper <**> versionOption)
   ( fullDesc
       <> progDesc "build and query a Haskell code knowledge graph"
       <> header "knot - Haskell code knowledge graph generator"
   )
+ where
+  versionOption = infoOption versionText
+    (long "version" <> help "print version and the GHC it was built with, then exit")
+
+-- | @--version@ 的輸出(單行、無結尾換行由 optparse 補):@knot \<版本\> (GHC \<版本\>)@。
+--
+-- 套件版本來自 cabal 自動產生的 @Paths_knot_hs@;GHC 版本是__建置 knot 的__ GHC
+-- (ADR-001 的版本鎖:這份 knot 只掃得了同版 GHC 建的專案,所以它是使用者最需要
+-- 一眼看到的資訊),不是目標專案的。
+versionText :: String
+versionText =
+  "knot " <> showVersion version <> " (GHC " <> showVersion fullCompilerVersion <> ")"
 
 commandParser :: Parser Command
 commandParser = hsubparser
@@ -129,7 +155,16 @@ commandParser = hsubparser
       <> command "query"
       (info (CmdQuery <$> queryParser)
         (progDesc "query an existing codegraph.json"))
+      <> command "clean"
+      (info (CmdClean <$> cleanParser)
+        (progDesc "delete the .knot cache directory of a project"))
   )
+
+cleanParser :: Parser CleanCmd
+cleanParser = CleanCmd
+  <$> strArgument
+        (metavar "PATH" <> value "." <> showDefault
+          <> help "project root whose .knot/ to delete")
 
 extractParser :: Parser ExtractCmd
 extractParser = ExtractCmd

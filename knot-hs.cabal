@@ -1,6 +1,6 @@
 cabal-version:      3.4
 name:               knot-hs
-version:            0.0.1.0
+version:            0.1.0.0
 synopsis:           Haskell code knowledge graph generator for dev-flow
 build-type:         Simple
 
@@ -86,7 +86,10 @@ executable knot
                       Knot.App.Report
                       Knot.App.Run
                       Knot.App.Summary
+                      Paths_knot_hs
+    autogen-modules:  Paths_knot_hs
     build-depends:    base ^>=4.22
+                    , directory
                     , filepath
                     , knot-hs
                     , optparse-applicative ^>=0.19
@@ -102,6 +105,8 @@ test-suite knot-test
                       Knot.App.Report
                       Knot.App.Run
                       Knot.App.Summary
+                      Paths_knot_hs
+    autogen-modules:  Paths_knot_hs
     build-depends:    base ^>=4.22
                     , aeson ^>=2.3
                     , bytestring

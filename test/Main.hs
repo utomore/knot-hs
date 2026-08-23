@@ -16,7 +16,7 @@ import Data.Char (isAlphaNum, isDigit, isSpace, isUpper)
 import Data.Containers.ListUtils (nubOrd)
 import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
-import Data.List (find, intercalate, isInfixOf, isPrefixOf, sort, sortOn)
+import Data.List (find, intercalate, isInfixOf, isPrefixOf, isSuffixOf, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
@@ -72,12 +72,14 @@ import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 import Test.Tasty.Hedgehog (testProperty)
 
 import Knot.App.Cli
-  ( Command (..)
+  ( CleanCmd (..)
+  , Command (..)
   , ExtractCmd (..)
   , QueryCmd (..)
   , SummaryMode (..)
   , cliParserInfo
   , defaultOutputPath
+  , versionText
   , toBuildOptions
   , toExportOptions
   , toExtractOptions
@@ -92,7 +94,7 @@ import Knot.App.Report
   , metaNoteLines
   , queryNoteLines
   )
-import Knot.App.Run (prepareHandles, runCommand, runExtractCmd, runExtractCmdWith, runQueryCmd)
+import Knot.App.Run (prepareHandles, runCleanCmd, runCommand, runExtractCmd, runExtractCmdWith, runQueryCmd)
 import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummary)
 import Knot.Export (writeCodegraph)
 import Knot.Export.Commit (detectCommit)
@@ -311,6 +313,8 @@ tests = testGroup "knot-hs"
   , globalB002Tests
   , globalE006Tests
   , globalE007Tests
+  , exportQueryE002Tests
+  , exportQueryE003Tests
   ]
 
 f001Tests :: TestTree
@@ -4659,14 +4663,14 @@ expectExtractCmd argv = do
   c <- expectParse argv
   case c of
     CmdExtract e -> pure e
-    CmdQuery _   -> assertFailure ("expected CmdExtract for " <> show argv)
+    _            -> assertFailure ("expected CmdExtract for " <> show argv)
 
 expectQueryCmd :: [String] -> IO QueryCmd
 expectQueryCmd argv = do
   c <- expectParse argv
   case c of
-    CmdQuery q   -> pure q
-    CmdExtract _ -> assertFailure ("expected CmdQuery for " <> show argv)
+    CmdQuery q -> pure q
+    _          -> assertFailure ("expected CmdQuery for " <> show argv)
 
 -- | 五個欄位皆為預設的 'ExtractCmd'(測試各自只改需要的欄位)。
 baseExtractCmd :: ExtractCmd
@@ -7053,3 +7057,99 @@ testE007DocsMentionScope = testCase "test_e007_docs_mention_scope" $ do
   assertBool "system.md nodes[] component" (hasText "選填 `component`" sysd)
   adr <- readUtf8 ".design/adr/ADR-008-node-component-field.md"
   assertBool "ADR-008 accepted" (hasText "status: accepted" adr)
+
+--------------------------------------------------------------------------------
+-- export-query/E002 version-flag
+--------------------------------------------------------------------------------
+
+exportQueryE002Tests :: TestTree
+exportQueryE002Tests = testGroup "export-query/E002 version-flag"
+  [ testE002VersionFlag          -- T1
+  , testE002DocsMentionVersion   -- T2
+  ]
+
+-- E002 T1:--version 是頂層 abort option——exit 0、輸出 = versionText;
+-- 數字來自 Paths_knot_hs(0.1.0.0)、GHC 版本來自 System.Info;子命令之後不接受
+testE002VersionFlag :: TestTree
+testE002VersionFlag = testCase "test_e002_version_flag" $ do
+  assertBool ("versionText prefix: " <> versionText) ("knot 0.1.0.0 (GHC " `isPrefixOf` versionText)
+  assertBool ("versionText suffix: " <> versionText) (")" `isSuffixOf` versionText)
+  (msg, code) <- expectParseFailure ["--version"]
+  code @?= ExitSuccess
+  assertBool ("--version output: " <> msg) (versionText `isPrefixOf` msg)
+  -- abort 先於子命令解析:後面跟著什麼都不影響
+  (msg2, code2) <- expectParseFailure ["--version", "extract"]
+  code2 @?= ExitSuccess
+  assertBool ("--version extract output: " <> msg2) (versionText `isPrefixOf` msg2)
+  -- 只在頂層:子命令之後是未知旗標
+  (_, code3) <- expectParseFailure ["query", "--version"]
+  assertBool "query --version must fail" (code3 /= ExitSuccess)
+
+-- E002 T2:Level 1 CLI 契約、export-query CLI 對映與 README 都提到 --version;README 有更新與發版流程
+testE002DocsMentionVersion :: TestTree
+testE002DocsMentionVersion = testCase "test_e002_docs_mention_version" $ do
+  forM_ [".design/system.md", ".design/subsystems/export-query/design.md", "README.md"] $ \p -> do
+    s <- readUtf8 p
+    assertBool (p <> " mentions --version") (hasText "--version" s)
+  r <- readUtf8 "README.md"
+  assertBool "README: overwrite policy" (hasText "--overwrite-policy=always" r)
+  assertBool "README: knot --version example" (hasText "knot --version" r)
+  assertBool "README: release section" (hasText "### 發版" r)
+  c <- readUtf8 "knot-hs.cabal"
+  assertBool "cabal version 0.1.0.0" (hasText "version:            0.1.0.0" c)
+
+--------------------------------------------------------------------------------
+-- export-query/E003 clean-command
+--------------------------------------------------------------------------------
+
+exportQueryE003Tests :: TestTree
+exportQueryE003Tests = testGroup "export-query/E003 clean-command"
+  [ testE003CleanParse         -- T1
+  , testE003CleanRemovesKnot   -- T2
+  , testE003DocsMentionClean   -- T3
+  ]
+
+-- E003 T1:`clean` 子命令與 PATH 位置參數(預設 ".")
+testE003CleanParse :: TestTree
+testE003CleanParse = testCase "test_e003_clean_parse" $ do
+  c1 <- expectParse ["clean"]
+  c1 @?= CmdClean CleanCmd { ccPath = "." }
+  c2 <- expectParse ["clean", "proj"]
+  c2 @?= CmdClean CleanCmd { ccPath = "proj" }
+  _ <- expectParseFailure ["clean", "a", "b"]
+  pure ()
+
+-- E003 T2:刪掉 <PATH>/.knot 整棵、codegraph.json 不動、exit 0;不存在時 exit 0 並說明
+testE003CleanRemovesKnot :: TestTree
+testE003CleanRemovesKnot = testCase "test_e003_clean_removes_knot" $ do
+  tmp <- getTemporaryDirectory
+  let dir  = tmp </> "knot-hs-e003-clean"
+      root = dir </> "proj"
+      knot = root </> ".knot"
+  removePathForcibly dir
+  createDirectoryIfMissing True (knot </> "build" </> "deep")
+  writeUtf8 (knot </> "build" </> "deep" </> "x.hie") "x"
+  writeUtf8 (knot </> "hiedb.sqlite") "x"
+  writeUtf8 (knot </> ".gitignore") "*"
+  writeUtf8 (root </> "codegraph.json") "{}"
+  (code, out, err) <- withCaptured dir (\hO hE -> runCommand hO hE (CmdClean CleanCmd { ccPath = root }))
+  code @?= ExitSuccess
+  err @?= T.empty
+  out @?= T.pack ("removed " <> knot <> "\n")
+  doesDirectoryExist knot >>= (@?= False)
+  doesFileExist (root </> "codegraph.json") >>= (@?= True)
+  -- 再清一次:沒東西可清不是錯
+  (code2, out2, err2) <- withCaptured dir (\hO hE -> runCleanCmd hO hE CleanCmd { ccPath = root })
+  code2 @?= ExitSuccess
+  err2 @?= T.empty
+  out2 @?= T.pack ("nothing to clean: " <> knot <> " does not exist\n")
+  removePathForcibly dir
+
+-- E003 T3:三份文件提到 knot clean;extraction 契約列出 knotDir
+testE003DocsMentionClean :: TestTree
+testE003DocsMentionClean = testCase "test_e003_docs_mention_clean" $ do
+  forM_ [".design/system.md", ".design/subsystems/export-query/design.md", "README.md"] $ \p -> do
+    s <- readUtf8 p
+    assertBool (p <> " mentions knot clean") (hasText "knot clean" s)
+  x <- readUtf8 ".design/subsystems/extraction/design.md"
+  assertBool "extraction contract lists knotDir" (hasText "knotDir :: FilePath -> FilePath" x)

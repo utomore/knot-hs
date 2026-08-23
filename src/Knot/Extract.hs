@@ -3,9 +3,11 @@
 -- Level 2 契約:@.design/subsystems/extraction/design.md@「對外契約」。
 module Knot.Extract
   ( extract
+    -- * 快取目錄(export-query/E003:@knot clean@ 的唯一依據)
+  , knotDir
   ) where
 
-import Knot.Extract.BuildDriver (ensureHie)
+import Knot.Extract.BuildDriver (ensureHie, knotDir)
 import Knot.Extract.HieIndex (IndexHandle, ensureIndex)
 import Knot.Extract.HieInstances (readInstanceFacts)
 import Knot.Extract.HiedbFacts (readIndexFacts)

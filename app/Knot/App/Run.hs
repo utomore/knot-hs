@@ -16,6 +16,7 @@ module Knot.App.Run
   , runExtractCmd
   , runExtractCmdWith
   , runQueryCmd
+  , runCleanCmd
   , prepareHandles
   ) where
 
@@ -23,11 +24,13 @@ import Control.Exception (IOException, try)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import System.Directory (doesDirectoryExist, removePathForcibly)
 import System.Exit (ExitCode (..))
 import System.IO (Handle, hSetEncoding, utf8)
 
 import Knot.App.Cli
-  ( Command (..)
+  ( CleanCmd (..)
+  , Command (..)
   , ExtractCmd (..)
   , QueryCmd (..)
   , SummaryMode (..)
@@ -48,7 +51,7 @@ import Knot.App.Report
 import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummary)
 import Knot.Export (writeCodegraph)
 import Knot.Export.Types (ExportReport (..))
-import Knot.Extract (extract)
+import Knot.Extract (extract, knotDir)
 import Knot.Extract.Types (ExtractFailure, ExtractResult (..))
 import qualified Knot.Extract.Types as XT
 import Knot.Graph (buildGraph)
@@ -76,6 +79,39 @@ runCommand :: Handle -> Handle -> Command -> IO ExitCode
 runCommand hOut hErr cmd = case cmd of
   CmdExtract c -> runExtractCmd hOut hErr c
   CmdQuery   c -> runQueryCmd hOut hErr c
+  CmdClean   c -> runCleanCmd hOut hErr c
+
+--------------------------------------------------------------------------------
+-- clean
+--------------------------------------------------------------------------------
+
+-- | 刪掉 @\<PATH\>\/.knot@(export-query/E003)。路徑由 extraction 的 'knotDir' 給,
+-- CLI 層不自己拼 @".knot"@。
+--
+-- * 目錄在 → 整棵刪掉、stdout 一行 @removed \<path\>@、exit 0
+-- * 目錄不在 → stdout 一行 @nothing to clean: \<path\> does not exist@、exit 0
+--   (清一個乾淨的專案不是錯)
+-- * 刪到一半失敗('IOException',例如檔案被鎖住)→ stderr @clean: …@、exit 1
+--
+-- __只動 @.knot/@__:@codegraph.json@ 是輸出不是快取,不碰。不問確認——它是可重建的
+-- 快取,與 @cabal clean@ 同性質(system.md Output 4)。
+runCleanCmd :: Handle -> Handle -> CleanCmd -> IO ExitCode
+runCleanCmd hOut hErr cmd = do
+  let dir = knotDir (ccPath cmd)
+  exists <- doesDirectoryExist dir
+  if not exists
+    then do
+      TIO.hPutStr hOut (T.pack ("nothing to clean: " <> dir <> " does not exist\n"))
+      pure ExitSuccess
+    else do
+      r <- try (removePathForcibly dir)
+      case r of
+        Left e -> do
+          emitNotes hErr [T.pack ("clean: " <> show (e :: IOException))]
+          pure (ExitFailure 1)
+        Right () -> do
+          TIO.hPutStr hOut (T.pack ("removed " <> dir <> "\n"))
+          pure ExitSuccess
 
 --------------------------------------------------------------------------------
 -- extract
