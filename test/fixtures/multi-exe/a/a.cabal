@@ -1,0 +1,19 @@
+cabal-version:      3.4
+name:               a
+version:            0.1.0.0
+build-type:         Simple
+
+-- extraction/B002 fixture:兩個套件各自有一個 executable,兩個 Main;
+-- cabal 以套件目錄為 cwd 呼叫 GHC,.hie 的 hs_src 是 app/Main.hs(套件相對)。
+
+library
+    hs-source-dirs:   src
+    exposed-modules:  A.Lib
+    build-depends:    base
+    default-language: GHC2024
+
+executable a-exe
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    build-depends:    base, a
+    default-language: GHC2024

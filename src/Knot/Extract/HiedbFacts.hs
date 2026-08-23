@@ -33,6 +33,7 @@ module Knot.Extract.HiedbFacts
   , parseOcc
   , declKindOf
   , resolveModuleSource
+  , resolveModuleSourceFor
   , pickFromDecl
   , SourceDecls (..)
   , unavailableSourceDecls
@@ -40,7 +41,7 @@ module Knot.Extract.HiedbFacts
   ) where
 
 import Control.Exception (SomeException, displayException, try)
-import Data.List (minimumBy, sort)
+import Data.List (find, isPrefixOf, isSuffixOf, minimumBy, sort)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Ord (Down (..), comparing)
@@ -48,6 +49,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.Text (Text)
+import System.FilePath (splitDirectories, takeDirectory)
 import Database.SQLite.Simple
   ( Connection
   , Query (..)
@@ -56,6 +58,7 @@ import Database.SQLite.Simple
   )
 import Database.SQLite.Simple.FromRow (FromRow (..), field)
 
+import Knot.Extract.BuildDriver (componentRefOf)
 import Knot.Extract.HieIndex (IndexHandle, hiedbName, ihDbPath, ihNotes)
 import Knot.Extract.Types
   ( DeclKind (..)
@@ -64,7 +67,13 @@ import Knot.Extract.Types
   , NameSpace (..)
   , QualName (..)
   )
-import Knot.Meta.Types (ModuleName (..), ProjectMeta (..), SourceFile (..))
+import Knot.Meta.Types
+  ( ComponentRef (..)
+  , ModuleName (..)
+  , PackageMeta (..)
+  , ProjectMeta (..)
+  , SourceFile (..)
+  )
 
 --------------------------------------------------------------------------------
 -- Level 2 模組介面
@@ -97,7 +106,10 @@ collectFacts pm conn = do
   case modsOutcome of
     Left reason -> pure ([], [queryWarning "mods" reason])
     Right modRows -> do
-      let (modIndex, mapWarnings) = buildModIndex (pmSources pm) modRows
+      -- B002:每列 .hie 的路徑帶著 <pkg>-<ver> 段,解出套件名再對映(monorepo 的
+      -- hs_src 是套件相對路徑,沒有套件名就對不回 pmSources)
+      let pkgOfHie hieFile = packageOfHiePath (map pkgName (pmPackages pm)) (T.unpack hieFile)
+          (modIndex, mapWarnings) = buildModIndex pm pkgOfHie modRows
       declOutcome    <- attempt (query_ conn qDefs :: IO [DefRow])
       refOutcome     <- attempt (query_ conn qRefs :: IO [RefJoinRow])
       srcDeclOutcome <- attempt (query_ conn qDeclOccs :: IO [(Text, Text)])
@@ -242,15 +254,19 @@ data ModEntry = ModEntry
 -- 不是錯誤);對映不到的 module 記一則警告並整批跳過(驗收標準 4)。
 --
 -- 輸入已由 @ORDER BY hieFile@ 定序,故警告順序亦為決定性(規則 8)。
-buildModIndex :: [SourceFile] -> [ModRow] -> (Map Text ModEntry, [ExtractWarning])
-buildModIndex sfs rows = (idx, reverse warns)
+buildModIndex
+  :: ProjectMeta
+  -> (Text -> Maybe Text)   -- ^ hieFile → 套件名(B002;解不出給 Nothing 即退回舊路)
+  -> [ModRow]
+  -> (Map Text ModEntry, [ExtractWarning])
+buildModIndex pm pkgOf rows = (idx, reverse warns)
  where
   (idx, warns) = foldl' step (Map.empty, []) rows
   step acc@(m, ws) r
     | mrIsBoot r = acc
     | otherwise =
         let modName = ModuleName (mrModule r)
-        in case resolveModuleSource sfs modName (mrHsSrc r) of
+        in case resolveModuleSourceFor pm (pkgOf (mrHieFile r)) modName (mrHsSrc r) of
              Just p  -> (Map.insert (mrHieFile r) (ModEntry modName p) m, ws)
              Nothing -> (m, unmapped r : ws)
   unmapped r = ExtractWarning
@@ -258,6 +274,77 @@ buildModIndex sfs rows = (idx, reverse warns)
     , ewMessage = T.pack "cannot map indexed module " <> mrModule r
         <> T.pack " back to pmSources; skipping its decls and refs"
     }
+
+-- | B002:套件感知的對映。多套件專案裡 cabal 以__套件目錄__為 cwd 呼叫 GHC,
+-- @hs_src@ 是 @app\/Main.hs@ 這種套件相對路徑,'resolveModuleSource' 的後綴比對
+-- 方向反了(@hs_src@ 比 @sfPath@ 短)、module 名比對又因多個 @Main@ 歧義——
+-- 先以 @\<套件目錄\>\/\<hs_src\>@ 精確比對:在 'pmSources' 有同名項就定案(納入 →
+-- 'Just';被排除 → 'Nothing',G-B001 不退回猜測);沒有同名項或資訊不足,
+-- 一律退回 'resolveModuleSource',既有行為不變。
+resolveModuleSourceFor
+  :: ProjectMeta
+  -> Maybe Text        -- ^ 套件名(來自 .hie 路徑或 'ComponentRef');Nothing = 不知道
+  -> ModuleName        -- ^ mods.mod
+  -> Maybe Text        -- ^ mods.hs_src
+  -> Maybe FilePath
+resolveModuleSourceFor pm mPkg modName mHsSrc =
+  case mPkg >>= pkgDirOf of
+    Nothing  -> fallback
+    Just dir ->
+      -- 路徑線索優先(與 'resolveModuleSource' 同序):(1) 套件相對 hs_src 精確命中
+      -- (hie-instances 走這條:.hie 自帶 hie_hs_file);(2) hs_src 的後綴命中(單套件、
+      -- 絕對路徑的情形)。命中即定案——被排除回 Nothing(G-B001),不退回猜測。
+      case (mHsSrc >>= exactIn dir) `orElse` (mHsSrc >>= suffixHit) of
+        Just sf -> if sfIncluded sf then Just (sfPath sf) else Nothing
+        -- (3) 沒有路徑線索——hiedb 以 knot 的 cwd(repo 根)stat 套件相對路徑,stat 不到就把
+        --     hs_src 存 NULL(B002 實測:多套件 fixture 四列全 NULL)。改在__該套件目錄內__
+        --     以 module 名唯一比對:同名 Main 在不同套件各歸各家;仍歧義才退回全域舊路
+        Nothing -> case [ sf | sf <- pmSources pm, sfIncluded sf, underDir dir (sfPath sf)
+                             , sfModule sf == Just modName ] of
+                     [sf] -> Just (sfPath sf)
+                     _    -> fallback
+ where
+  fallback = resolveModuleSource (pmSources pm) modName mHsSrc
+  orElse (Just x) _ = Just x
+  orElse Nothing  y = y
+  exactIn dir raw
+    | relativeLike raw = find ((== joinRel dir (slashes raw)) . sfPath) (pmSources pm)
+    | otherwise        = Nothing
+  -- 與 resolveModuleSource 的 longestSuffixMatch 同一條規則(邊界落在 '/' 上、取最長)
+  suffixHit raw =
+    let src  = slashes raw
+        hits = [ sf | sf <- pmSources pm, src == sfPath sf || ("/" <> sfPath sf) `isSuffixOf` src ]
+    in case hits of
+         [] -> Nothing
+         _  -> Just (foldr1 (\a b -> if length (sfPath a) >= length (sfPath b) then a else b) hits)
+  underDir dir p
+    | dir == "." || null dir = True
+    | otherwise              = (slashes (T.pack dir) <> "/") `isPrefixOf` p
+  pkgDirOf name =
+    case [ takeDirectory (pkgCabalFile p) | p <- pmPackages pm, pkgName p == name ] of
+      (d : _) -> Just d
+      []      -> Nothing
+  slashes = T.unpack . T.map (\c -> if c == '\\' then '/' else c)
+  -- 絕對路徑(磁碟機 / 根目錄開頭)不走這條:那是單套件 cwd = repo 根的情形,後綴比對本來就中
+  relativeLike raw = case T.unpack raw of
+    ('/' : _)           -> False
+    (c : ':' : _) | c /= '.' -> False
+    _                   -> True
+  joinRel dir rel
+    | dir == "." || null dir = rel
+    | otherwise              = slashes (T.pack dir) <> "/" <> rel
+
+-- | 從 .hie 路徑取套件名(B002):取 @.knot@ 之後、@build@ 之後的段交給
+-- 'componentRefOf'(它本來就認得 cabal 的 builddir 佈局);認不得回 'Nothing'。
+-- 不做 @makeRelative@——hiedb 存的 @hieFile@ 與 root 的大小寫 \/ 8.3 形式可能不同。
+packageOfHiePath :: [Text] -> FilePath -> Maybe Text
+packageOfHiePath pkgNames path =
+  case dropWhile (/= ".knot") (splitDirectories path) of
+    (".knot" : "build" : rest@(_ : _)) ->
+      case componentRefOf pkgNames rest of
+        ComponentRef (p, _) | not (T.null p) -> Just p
+        _                                    -> Nothing
+    _ -> Nothing
 
 -- | 一列 @mods@ 對應到 'pmSources' 的哪個檔案:先 @hs_src@ 後綴比對,
 -- 再退回 @mod@ ↔ @sfModule@ 唯一比對;都不中回 'Nothing'。

@@ -60,7 +60,7 @@ import Language.Haskell.Syntax.Module.Name (moduleNameString)
 
 import Knot.Extract.BuildDriver (HieLayout (..))
 import Knot.Extract.HieIndex (ownGhcVersion, partitionByGhc)
-import Knot.Extract.HiedbFacts (resolveModuleSource)
+import Knot.Extract.HiedbFacts (resolveModuleSourceFor)
 import Knot.Extract.Types
   ( ExtractOptions (..)
   , ExtractWarning (..)
@@ -68,7 +68,7 @@ import Knot.Extract.Types
   , NameSpace (..)
   , QualName (..)
   )
-import Knot.Meta.Types (ModuleName (..), ProjectMeta (..))
+import Knot.Meta.Types (ComponentRef (..), ModuleName (..), ProjectMeta (..))
 
 -- | 讀 'HieLayout' 裡與 knot 同版 GHC 的每個 @.hie@,產出 'FactInstance'
 -- (Level 2 模組介面,簽名照契約)。__不拋例外__:單檔任何失敗收斂為一則警告。
@@ -80,11 +80,11 @@ readInstanceFacts opts layout pm =
     [] -> pure ([], [])
     matching -> do
       nc <- makeNc
-      results <- mapM (readOne nc . snd) matching
+      results <- mapM (readOne nc) matching
       -- 規則 10:事實全序(Fact 的 Ord);警告依 HieLayout 的檔序(已是碼位序)
       pure (sort (concatMap fst results), concatMap snd results)
  where
-  readOne nc rel = do
+  readOne nc (ComponentRef (pkg, _), rel) = do
     r <- try (readHieFile nc (rootDir opts </> rel))
     case r of
       Left (e :: SomeException) ->
@@ -92,7 +92,9 @@ readInstanceFacts opts layout pm =
       Right hfr ->
         let hf      = hie_file_result hfr
             modName = ModuleName (T.pack (moduleNameString (moduleName (hie_module hf))))
-        in case resolveModuleSource (pmSources pm) modName (Just (T.pack (hie_hs_file hf))) of
+            -- B002:HieLayout 每筆帶 ComponentRef,套件名直接給對映用(monorepo 的 hs_src 是套件相對)
+            mPkg    = if T.null pkg then Nothing else Just pkg
+        in case resolveModuleSourceFor pm mPkg modName (Just (T.pack (hie_hs_file hf))) of
              -- 命中被排除的檔或對不上 → 與 hie-facts 同一條規則(G-B001)整批跳過
              Nothing -> pure ([], [ExtractWarning (T.pack rel)
                                      (T.pack "cannot map indexed module " <> unModule modName

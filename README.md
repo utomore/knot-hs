@@ -244,7 +244,17 @@ graph 層的 module 節點以名字為 id,同名組會以 `<module>@<source_file
 custom `Setup.hs`、複雜 conditional、`build-type: Configure`)沒有實測過。conditional 以
 預設 flag 值與本機平台攤平,非預設 flag 組合的原始碼不會被納入。
 
-### 6. 不做的事
+### 6. Windows 路徑長度(MAX_PATH)
+
+knot 要 GHC 把 `.hie` 寫進 `<root>\.knot\build\build\<arch>\ghc-<ver>\<pkg>-<ver>\<kind>\<comp>\build\<comp>\<comp>-tmp\extra-compilation-artifacts\hie\<Module>.hie`,
+比專案自己的 `dist-newstyle` 長 12 個字元。repo 路徑 ≥ 約 45 字元、套件 / module 名偏長的
+monorepo 可能超過 Windows 預設的 260 字元上限,GHC 會以 `CreateFile` 失敗、knot 回報
+`BuildFailed` 並附一行 `windows MAX_PATH: … N characters` 的提示。解法二選一:把專案放到
+(或 `subst X: <root>` 對映到)較短的路徑;或開啟 Windows 長路徑支援。被排除的 component
+(test-suite、benchmark)自 B001 起一律明確 `--disable-*`,不會再因目標專案自己的
+`tests: True` 被建出來——它們的路徑最長,也最先撞到。
+
+### 7. 不做的事
 
 不做 LLM 語意推測邊、不做社群偵測、不做視覺化、不做多語言(只服務 Haskell)。
 理由見 `.design/system.md`「非目標」。

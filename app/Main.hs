@@ -13,7 +13,9 @@ import System.Exit (exitWith)
 import System.IO (stderr, stdout)
 
 import Knot.App.Cli (cliParserInfo)
-import Knot.App.Run (runCommand)
+import Knot.App.Run (prepareHandles, runCommand)
 
 main :: IO ()
-main = execParser cliParserInfo >>= runCommand stdout stderr >>= exitWith
+main = do
+  prepareHandles stdout stderr   -- export-query/B001:UTF-8,否則 CP950 遇 U+FFFD 即崩潰
+  execParser cliParserInfo >>= runCommand stdout stderr >>= exitWith
