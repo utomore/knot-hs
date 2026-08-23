@@ -92,7 +92,7 @@ moduleOfFile facts = Map.fromListWith min
   [(file, m) | FactModule{fmFile = file, fmModule = m} <- facts]
 
 -- | 非契約面:decl 節點索引,供 edge-derive 把「只有 'QualName'、沒有檔案
--- 線索」的端點換成 'NodeId'('GraphNode' 的五個欄位還原不出
+-- 線索」的端點換成 'NodeId'('GraphNode' 的欄位還原不出
 -- @(module, occ, namespace)@:同檔的 @Foo#t@ 與 @Foo@ 兩個節點的 'gnLabel'
 -- 都是 @Foo@)。
 --
@@ -139,6 +139,8 @@ mintNodes gated = dedupeNodes (modNodes <> declNodes <> instNodes)
   files    = moduleFiles facts
   fileMods = moduleOfFile facts
   internal = gfInternal gated
+  -- G-E007:三種節點都以所屬檔查 owner 表;decl / instance 沿用所屬檔的 component
+  owner file = Map.lookup file (gfOwners gated)
 
   modNodes = [mkModNode m file | FactModule{fmModule = m, fmFile = file} <- facts]
   modIds   = Set.fromList (map gnId modNodes)
@@ -149,6 +151,7 @@ mintNodes gated = dedupeNodes (modNodes <> declNodes <> instNodes)
     , gnLabel = moduleText m
     , gnFile  = file
     , gnLine  = Nothing
+    , gnComponent = owner file
     }
 
   declNodes =
@@ -158,6 +161,7 @@ mintNodes gated = dedupeNodes (modNodes <> declNodes <> instNodes)
         , gnLabel = qnOcc q
         , gnFile  = file
         , gnLine  = Just ln
+        , gnComponent = owner file
         }
     | FactDecl{fdName = q, fdKind = k, fdFile = file, fdLine = ln} <- facts
     , qnModule q `Set.member` internal
@@ -172,6 +176,7 @@ mintNodes gated = dedupeNodes (modNodes <> declNodes <> instNodes)
         , gnLabel = hd
         , gnFile  = file
         , gnLine  = Just ln
+        , gnComponent = owner file
         }
     | FactInstance{fiInstHead = hd, fiInstFile = file, fiInstLine = ln} <- facts
     , Just m <- [Map.lookup file fileMods]

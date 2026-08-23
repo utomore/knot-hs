@@ -57,6 +57,8 @@ data GraphNode = GraphNode
   , gnLabel :: Text              -- ^ 人類可讀名(module 名 / occ 名 / instance 標頭)
   , gnFile  :: FilePath          -- ^ repo 相對、正斜線
   , gnLine  :: Maybe Int         -- ^ 下游 source_location(L\<行\>)的來源
+  , gnComponent :: Maybe Text    -- ^ G-E007:@\<pkgName\>:\<compName\>@(如 @comps:test:comps-test@);
+                                 --   'Nothing' = 檔案不屬於任何 component。下游選填欄位 @component@ 的來源
   }
   deriving (Eq, Show)
 

@@ -92,7 +92,7 @@ cabal clean && cabal build all --enable-tests --ghc-options=-Werror
 ### Output
 
 1. **`codegraph.json`**(預設寫到目標專案根目錄)——唯一的檔案輸出,格式由 dev-flow 定義(→ ADR-003):
-   - `nodes[]`:必要 `id` / `label` / `source_file`(repo 相對路徑、正斜線);選填 `source_location`
+   - `nodes[]`:必要 `id` / `label` / `source_file`(repo 相對路徑、正斜線);選填 `component`(`<pkgName>:<compName>`,檔案所屬的 cabal component,產品優先;G-E007 → ADR-008)、`source_location`
    - `links[]`:必要 `source` / `target`(節點 id)/ `relation`;選填 `confidence`
    - 頂層選填 `directed`、`built_at_commit`
    - relation 依賴類(`imports`、`calls`、`uses`、`implements` 等十種)才算進下游依賴圖;結構類(`contains`、`method`、`defines`、`declares`、`rationale_for`、`part_of` 六種)不算。兩份名單以 ADR-003 為準,並與 `scan-graph.mjs` 的 `DEP_RELATIONS` / `STRUCTURAL_RELATIONS` 逐項對齊
@@ -109,13 +109,15 @@ knot extract [PATH]          產出 codegraph.json(需要時自行建置目標�
   --strict                   任何警告改為 exit 1
   --summary meta|facts|graph 改印該站的摘要到 stdout,不寫 codegraph.json
 
-knot query <find|reachable|path|rank> …   (S4)讀取 codegraph.json 回答導航問題
-  --graph FILE               讀哪份圖,預設 ./codegraph.json(四個子命令共用)
-  --level all|module|decl    查詢的層,預設 all(四個子命令共用;decl 層 = contains 邊的目標,export-query/E001)
+knot query <find|reachable|path|rank|tests-of> …   (S4)讀取 codegraph.json 回答導航問題
+  --graph FILE               讀哪份圖,預設 ./codegraph.json(子命令共用)
+  --level all|module|decl    查詢的層,預設 all(子命令共用;decl 層 = contains 邊的目標,export-query/E001)
+  --scope product|tests|all  查詢的範圍,預設 product(測試節點 = component 為 test:/bench:;tests-of 不受影響,G-E007)
   find <keyword>             關鍵字比對 id 與 label(不分大小寫)
   reachable <id> [--reverse] [--depth N]  可達集合;--reverse 改問「誰依賴它」;--depth 只回 N 跳內,N ≥ 1(E001)
   path <from> <to>           兩點最短路徑
   rank [--top N]             連通度排名,N 預設 10
+  tests-of <id>              哪些測試節點(直接或間接)依賴它;圖無測試節點時提示重跑 extract --include-tests(G-E007)
 ```
 
 **ADR-006 移除的旗標**:`--backend`、`--module-only`、`--hiedir`、`--hiedb`、`--db`。它們全是「有兩個後端、有外部執行檔、有使用者要自己產的檔案」這些實作細節洩漏到介面的結果;那些細節不存在了,旗標也就沒有存在的理由。`.knot/` 固定在目標專案根目錄,不提供改道——它是快取,與 `dist-newstyle` 同性質。
@@ -258,6 +260,6 @@ S1–S4 完成時的唯讀實跑現況(當時以 `--db` 改道專案外;該旗�
 | particle-magic(`596b1f0`,223 `.hs`) | **35.1 s** | **0.7 s** | 1567 / 7027 | exit 0;byte 相同;extraction 0 警告;graph 7 則警告(`Main` 宣告於 5 個來源檔 → 消歧為 `Main@<file>`,`app/Main.hs` 對 `main` 的 3 條引用目標歧義被丟棄——D1 規則的預期行為) |
 | knot-hs 自掃 | — | 2.5 s | 540 / 1991 | E001 後;測試基線 526 不變(測試不含 E001 新增的型別) |
 
-兩個標的的 `FactInstance` 在 F008 前皆為 0。**extraction/E001**(2026-08-23 done):目標專案自己的 `cabal.project` 開了 `tests: True` 時,`.knot/build/` 會出現被排除 component 的 `.hie`,原本 hie-facts 每檔一則「cannot map」警告;build-driver 列舉時依 `compExcluded` 過濾後,MagicFarmer 的 extraction 警告 **75 → 2**(剩下的兩則是 autogen `Paths_magic_farmer`,另案),非 instance 節點 1580、依賴類邊 5063 與修正前逐數相同;F008 後圖另含 188 個 instance 節點。
+兩個標的的 `FactInstance` 在 F008 前皆為 0。**extraction/E001**(2026-08-23 done):目標專案自己的 `cabal.project` 開了 `tests: True` 時,`.knot/build/` 會出現被排除 component 的 `.hie`,原本 hie-facts 每檔一則「cannot map」警告;build-driver 列舉時依 `compExcluded` 過濾後,MagicFarmer 的 extraction 警告 **75 → 2**(剩下的兩則是 autogen `Paths_magic_farmer`;extraction/E002 於同日靜默跳過 autogen module 後 **→ 0**;story-flow 同樣 2 → 0),非 instance 節點 1580、依賴類邊 5063 與修正前逐數相同;F008 後圖另含 188 個 instance 節點。
 
 `knot extract` 的兩層抽取與 `knot query` 四項能力均可用。**`implements` 邊自 2026-08-23 起成立**(`extraction/F008`,S6):明寫的 `instance` 成為 instance 節點並對其 class 發 `implements` 邊;`deriving` 不上圖。五種 relation 至此齊全。

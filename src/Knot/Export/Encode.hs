@@ -88,7 +88,8 @@ encoded = BB.lazyByteString . E.encodingToLazyByteString
 -- 物件層(規則 2、3)
 --------------------------------------------------------------------------------
 
--- | 節點物件(規則 2):@id@ → @label@ → @source_file@ →(@source_location@,
+-- | 節點物件(規則 2):@id@ → @label@ → @source_file@ →(@component@,僅
+-- @gnComponent@ 有值時出現,G-E007 / ADR-008)→(@source_location@,
 -- 僅 @gnLine@ 有值時出現)。@gnFile@ 原樣輸出(project-meta 已保證 repo
 -- 相對 + 正斜線);@gnKind@ 不輸出(契約卡「不輸出 IR 的額外欄位」)。
 nodeObject :: GraphNode -> Builder
@@ -96,7 +97,12 @@ nodeObject n = encoded $ E.pairs $
      kv "id"          (nodeIdText (gnId n))
   <> kv "label"       (gnLabel n)
   <> kv "source_file" (T.pack (gnFile n))
+  <> componentField   (gnComponent n)
   <> sourceLocation   (gnLine n)
+
+-- | @component@ 的兩分支:'Nothing' 時整個鍵不存在(與 'sourceLocation' 同作法)。
+componentField :: Maybe Text -> E.Series
+componentField = maybe mempty (kv "component")
 
 -- | 邊物件(規則 3):@source@ → @target@ → @relation@ → @confidence@ →
 -- (@source_location@,僅 @geLine@ 有值時出現)。

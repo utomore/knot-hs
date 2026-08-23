@@ -1,8 +1,8 @@
 {
   "directed": true,
   "nodes": [
-    {"id":"A.Core","label":"A.Core","source_file":"pkg-a/src/A/Core.hs"},
-    {"id":"Main","label":"Main","source_file":"pkg-b/app/Main.hs"}
+    {"id":"A.Core","label":"A.Core","source_file":"pkg-a/src/A/Core.hs","component":"pkg-a:lib:pkg-a"},
+    {"id":"Main","label":"Main","source_file":"pkg-b/app/Main.hs","component":"pkg-b:exe:pkg-b-exe"}
   ],
   "links": []
 }

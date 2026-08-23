@@ -1,0 +1,16 @@
+cabal-version:      3.4
+name:               autogen
+version:            0.1.0.0
+build-type:         Simple
+
+-- extraction/E002 fixture:library 把 cabal 自動產生的 Paths_autogen 列進
+-- other-modules / autogen-modules 並真的 import 它——GHC 會編它、寫它的 .hie,
+-- 但它不在 pmSources(不是原始碼),knot 必須靜默跳過而不是發警告。
+
+library
+    hs-source-dirs:   src
+    exposed-modules:  Auto.Lib
+    other-modules:    Paths_autogen
+    autogen-modules:  Paths_autogen
+    build-depends:    base
+    default-language: GHC2024

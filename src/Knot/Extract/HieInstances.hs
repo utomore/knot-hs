@@ -60,7 +60,7 @@ import Language.Haskell.Syntax.Module.Name (moduleNameString)
 
 import Knot.Extract.BuildDriver (HieLayout (..))
 import Knot.Extract.HieIndex (ownGhcVersion, partitionByGhc)
-import Knot.Extract.HiedbFacts (resolveModuleSourceFor)
+import Knot.Extract.HiedbFacts (isAutogenModule, resolveModuleSourceFor)
 import Knot.Extract.Types
   ( ExtractOptions (..)
   , ExtractWarning (..)
@@ -94,7 +94,10 @@ readInstanceFacts opts layout pm =
             modName = ModuleName (T.pack (moduleNameString (moduleName (hie_module hf))))
             -- B002:HieLayout 每筆帶 ComponentRef,套件名直接給對映用(monorepo 的 hs_src 是套件相對)
             mPkg    = if T.null pkg then Nothing else Just pkg
-        in case resolveModuleSourceFor pm mPkg modName (Just (T.pack (hie_hs_file hf))) of
+        in if isAutogenModule (pmPackages pm) modName
+             -- E002:Paths_* / PackageInfo_* 不是原始碼,靜默跳過(與 hie-facts 同規則)
+             then pure ([], [])
+           else case resolveModuleSourceFor pm mPkg modName (Just (T.pack (hie_hs_file hf))) of
              -- 命中被排除的檔或對不上 → 與 hie-facts 同一條規則(G-B001)整批跳過
              Nothing -> pure ([], [ExtractWarning (T.pack rel)
                                      (T.pack "cannot map indexed module " <> unModule modName

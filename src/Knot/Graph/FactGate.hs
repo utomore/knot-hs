@@ -9,16 +9,24 @@ module Knot.Graph.FactGate
   , GatedFacts (..)
   ) where
 
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as T
 
 import Knot.Extract.Types (Fact (..))
-import Knot.Meta.Types (ModuleName, ProjectMeta (..), SourceFile (..))
+import Knot.Meta.Types (ComponentRef (..), ModuleName, ProjectMeta (..), SourceFile (..))
 
 data GatedFacts = GatedFacts
   { gfFacts    :: [Fact]          -- ^ 通過過濾的事實
   , gfInternal :: Set ModuleName  -- ^ 內部 module 集合(內外部判定的依據)
   , gfFiltered :: Int             -- ^ 濾除量(進 @gsFilteredGenerated@)
+  , gfOwners   :: Map FilePath Text
+    -- ^ G-E007:檔案 → @\<pkgName\>:\<compName\>@(@sfOwners@ 的__第一個__;
+    -- project-meta 的序是 library → exe → flib → test → bench,故產品優先)。
+    -- 無 owner 的檔不在表內
   }
   deriving (Eq, Show)
 
@@ -51,9 +59,12 @@ gateFacts pm facts = GatedFacts
   { gfFacts    = kept
   , gfInternal = Set.fromList [m | FactModule{fmModule = m} <- kept]
   , gfFiltered = length facts - length kept
+  , gfOwners   = Map.fromList
+      [ (sfPath sf, ownerLabel r) | sf <- pmSources pm, (r : _) <- [sfOwners sf] ]
   }
  where
   srcSet = Set.fromList [sfPath sf | sf <- pmSources pm]
+  ownerLabel (ComponentRef (pkg, comp)) = pkg <> T.pack ":" <> comp
   kept   = filter (not . filteredOut) facts
 
   filteredOut :: Fact -> Bool
