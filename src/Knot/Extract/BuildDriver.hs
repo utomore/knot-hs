@@ -14,6 +14,7 @@
 module Knot.Extract.BuildDriver
   ( -- * Level 2 模組介面
     ensureHie
+  , HieLayout (..)
     -- * 內部純函數與可注入的執行面(非契約面;1-to-1 測試取用)
   , knotDir
   , knotBuildDir
@@ -55,7 +56,7 @@ import System.Process
   , waitForProcess
   )
 
-import Knot.Extract.Types (ExtractFailure (..), ExtractOptions (..), HieLayout (..))
+import Knot.Extract.Types (ExtractFailure (..), ExtractOptions (..))
 import Knot.Meta.Types
   ( ComponentKind (..)
   , ComponentMeta (..)
@@ -176,6 +177,18 @@ stripVersion t = case reverse (T.splitOn (T.pack "-") t) of
   (v : rest@(_ : _)) | T.all (\c -> isDigit c || c == '.') v && not (T.null v)
     -> T.intercalate (T.pack "-") (reverse rest)
   _ -> t
+
+-- | build-driver 的產物:@.knot/build@ 下各 component 輸出目錄裡的 @.hie@。
+-- 路徑 repo 相對、正斜線,依碼位序;每筆附其 component(由 cabal 佈局路徑推得)。
+--
+-- 這是 build-driver → hie-index 的__模組間__介面型別(Level 2「模組間公開介面」),
+-- 不是對外契約,所以定義住在這裡而不在 "Knot.Extract.Types"(G-E006):公開
+-- library 不會 re-export 它,組裝層看不到。
+data HieLayout = HieLayout
+  { hlRoot  :: FilePath                       -- ^ @\<root\>\/.knot\/build@
+  , hlFiles :: [(ComponentRef, FilePath)]
+  }
+  deriving (Eq, Show)
 
 -- | 走訪 builddir 收全部 @.hie@,依 cabal 佈局推 component,產出 'HieLayout'。
 -- 路徑為 repo 相對、正斜線,依碼位序(規則 10 的決定性)。

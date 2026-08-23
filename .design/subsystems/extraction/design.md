@@ -5,7 +5,7 @@ title: extraction
 description: 事實抽取子系統:自驅動插樁建置、內嵌 hiedb,兩層缺一不可
 status: active
 created: 2026-08-20
-updated: 2026-08-22
+updated: 2026-08-23
 parent: system
 related-adr: [ADR-006, ADR-001]
 code-paths: [src/Knot/Extract, src/Knot/Extract.hs]
@@ -117,8 +117,8 @@ data ExtractWarning = ExtractWarning   -- 比照 MetaWarning 模式
 
 ### 抽取規則(契約的一部分)
 
-1. **納入範圍**:只處理 `pmSources` 中 `sfIncluded = True` 的檔案;只建置 `pkgComponents` 中 `compExcluded = False` 的 component。**`.hie` 的清單由 extraction 自己列舉**(`.knot/build/` 各 component 輸出目錄下),不再來自 project-meta
-2. **來源職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強);`FactDecl` / `FactRef` **永遠且只**來自 hie-index + hie-facts;`FactModule` 由 import-scan 產出;無 module 標頭的檔案依 Haskell 語意視為 `Main`(多個 `Main` 以 `fmFile` 區分)
+1. **納入範圍**:只處理 `pmSources` 中 `sfIncluded = True` 的檔案;只建置 `pkgComponents` 中 `compExcluded = False` 的 component。**`.hie` 的清單由 extraction 自己列舉**(`.knot/build/` 各 component 輸出目錄下),不再來自 project-meta。**列舉同樣只取納入的 component**(E001):目標專案自己的 `cabal.project`(`tests: True` 等)可能讓 cabal 建出被排除 component 的 `.hie`,build-driver 列舉時依 `compExcluded` 濾掉——不進 `HieLayout`、不索引、不產生警告;對不到任何 component 的 `.hie` 仍保留,交給規則 9
+2. **來源職責互斥**:`FactImport` **永遠且只**來自 import-scan(字面 import 行,決定性最強);`FactDecl` / `FactRef` **永遠且只**來自 hie-index + hie-facts;`FactInstance` **永遠且只**來自 hie-instances(F008,直接讀 `.hie`,ADR-007);`FactModule` 由 import-scan 產出;無 module 標頭的檔案依 Haskell 語意視為 `Main`(多個 `Main` 以 `fmFile` 區分)
 3. **兩層缺一不可**(取代舊規則 3「auto 合成」):import-scan 與 hie-index 兩者**都必須整體成功**才回 `Right ExtractResult`;任一整體失敗回 `Left ExtractFailure`,**不產出部分事實流**。沒有「只跑其中一個」的模式。**decl 層「成立」的判準是 hie-facts 至少讀出一筆 `FactDecl`**:`ensureIndex` 回 `Right` 只代表索引檔就緒,索引讀不出任何頂層宣告(索引檔壞掉、`mods` / `defs` 查詢失敗、全部 `.hie` 單檔失敗)一律視為 `IndexFailed`,不得以「零 decl 事實 + 警告」的 `Right` 混過去——那正是 ADR-006 要消滅的降級成功(2026-08-22 F007 裁決)
 4. **fromDecl 由 hie-facts 解析**:`FactRef.frFromDecl` 在事實產出時即填好(以 span 包含關係 join 得出);graph-core 不做 span 比對。span 包含是一對多,取 **span 最小(最內層)** 的候選;span 大小相同時依 `(qnSpace, qnOcc)` 字典序破雷。**候選集是該檔全部 `decls` 列,不得以 `is_root` 過濾**——一般頂層函式繫結是 `is_root = 0`,帶著該過濾 `calls` 邊會全空而查詢不報錯(2026-08-21 實測)
 4a. **產生碼只標註、不過濾**(G-E003):`frGenerated` 原樣轉載 hiedb `refs.is_generated`;`fdGenerated` / `frTargetGenerated` 由「該名字在其 module 的 `defs` 有列、`decls` 無列」判定——這是結構事實,不是 `$f` 前綴的名字啟發式。要不要丟棄是 graph-core 規則 3 的決定。`decls` 表整個讀不到或為空時,兩個旗標一律 `False` 並發一則警告;**絕不因為查不到就把全部宣告當成產生碼**
@@ -138,6 +138,7 @@ data ExtractWarning = ExtractWarning   -- 比照 MetaWarning 模式
 | **build-driver**(新) | 對目標專案執行一次插樁建置(`cabal build all`,旗標恆定),維護 `.knot/` 佈局(規則 5、6、7),列舉各 component 輸出目錄下的 `.hie` → `HieLayout` |
 | **hie-index**(原 hiedb-driver) | 列舉 `HieLayout`、GHC 版本檢查(規則 8)、以**內嵌的 hiedb library** 增量建索引 → `IndexHandle` |
 | **hie-facts**(原 hiedb-facts) | 讀索引(mods/decls/defs/refs 表)→ `FactDecl` / `FactRef`,含 fromDecl 解析與產生碼標註(規則 4、4a、9) |
+| **hie-instances**(階段四,F008) | 直接讀 `.hie`(`GHC.Iface.Ext`)的 `ClsInstD` 節點 → `FactInstance`;只讀同版 GHC 的檔(規則 8)、單檔 best-effort(規則 9);`src/` 內**唯一**准 import `GHC.*` 的模組(ADR-007) |
 
 ## 資料流管線(Data Flow Pipeline)
 
@@ -147,6 +148,7 @@ ProjectMeta(+ ExtractOptions)
   → build-driver:  cabal build all(插樁、增量、旗標恆定)→ HieLayout   (建置失敗 → BuildFailed)
   → hie-index:     HieLayout → 版本檢查 → 內嵌 hiedb 增量索引 → IndexHandle (版本不合 → VersionMismatch;索引失敗 → IndexFailed)
   → hie-facts:     IndexHandle → FactDecl / FactRef                      (單 .hie 對映不到 → 警告跳過)
+  → hie-instances: HieLayout → .hie 的 ClsInstD 節點 → FactInstance       (單 .hie 讀不過 / 對映不到 → 警告跳過;F008)
   → fact-pipeline: 兩層皆成立 → Right ExtractResult → 交給 graph-core
                    任一 Left → 原樣往上,不產部分事實流
 ```
@@ -170,7 +172,12 @@ ensureIndex :: ExtractOptions -> HieLayout -> IO (Either ExtractFailure IndexHan
 
 -- hie-facts:從就緒索引讀事實
 readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
+
+-- hie-instances(F008):直接讀 .hie 的 instance 宣告;只產 FactInstance,不拋例外,零 instance 回 ([], [])
+readInstanceFacts :: ExtractOptions -> HieLayout -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 ```
+
+`HieLayout` 的**定義**自 G-E006 起住在 build-driver 模組(`Knot.Extract.BuildDriver`),不在契約模組 `Knot.Extract.Types`——它是模組間介面的型別,不是對外契約。
 
 `IndexHandle` 為「已就緒索引」的不透明參照(內容屬 Level 3)。`ComponentRef` 共用 project-meta 契約的定義。
 
@@ -221,15 +228,15 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 1 | fact-contract | Fact DTO、後端抽象介面、能力分級、auto 選擇與降級合成 | backend-select | - | F001 |
-| 2 | import-scan | T0 後端:import 行解析、module 宣告事實 | import-scan | #1 | F002 |
+| 1 | fact-contract | (S5 前,已由 #7 重構)Fact DTO、後端抽象介面、能力分級、auto 選擇與降級合成——後三者 S5 廢除,只剩 Fact DTO 仍是現行契約 | backend-select(S5 起為 fact-pipeline) | - | F001 |
+| 2 | import-scan | (S5 前,已由 #7 重構)T0 後端:import 行解析、module 宣告事實——「後端」概念 S5 廢除,模組本身仍在 | import-scan | #1 | F002 |
 
 ### 階段二:S3 函式級(已完成)
 
 | # | feature | 一句話說明 | 模組 | 依賴 | doc |
 |---|---------|-----------|------|------|-----|
-| 3 | hiedb-driver | hiedb 探測、相容檢查、index 呼叫、.knot 索引管理 | hiedb-driver | #1 | F003 |
-| 4 | hiedb-facts | 讀 SQLite 出 decl/ref 事實、fromDecl 解析 | hiedb-facts | #3 | F004 |
+| 3 | hiedb-driver | (S5 前,已由 #6 重構)hiedb 探測、相容檢查、index 呼叫、.knot 索引管理——探測與外部執行檔 S5 廢除 | hiedb-driver(S5 起為 hie-index) | #1 | F003 |
+| 4 | hiedb-facts | (S5 前,現行;改名為 hie-facts)讀 SQLite 出 decl/ref 事實、fromDecl 解析 | hiedb-facts(S5 起為 hie-facts) | #3 | F004 |
 
 ### 階段三:S5 零前置重構(ADR-006)
 
@@ -239,9 +246,24 @@ readIndexFacts :: IndexHandle -> ProjectMeta -> IO ([Fact], [ExtractWarning])
 | 6 | hiedb-embed | hiedb 改 library 嵌入、列舉 `HieLayout`、版本檢查改為失敗、增量索引 | hie-index | #5 | F006 |
 | 7 | two-layer-contract | 契約收斂(砍 `BackendChoice` / `CapabilityLevel` / `BackendReport`、加 `ExtractFailure`)、fact-pipeline 全有全無、移除探測與降級 | fact-pipeline、import-scan | #5, #6 | F007 |
 
-(共 7 個 features、3 個階段;階段三全部完成即 S5 在 extraction 側交付。`#5` 與 `#6` 可平行——`HieLayout` 已在契約定義,`#6` 可先以固定佈局測試)
+### 階段四:implements 邊(ADR-007)
+
+| # | feature | 一句話說明 | 模組 | 依賴 | doc |
+|---|---------|-----------|------|------|-----|
+| 8 | hie-instances | 直接讀 `.hie` 的 `ClsInstD` 節點產出 `FactInstance`(標頭原文 + class `QualName`),fact-pipeline 第五站,`ghc` library 成為直接相依 | hie-instances、fact-pipeline | #1, #4, #5, #6, #7, G-E006 | F008 |
+
+(共 8 個 features、4 個階段;階段三全部完成即 S5 在 extraction 側交付;階段四補上 `implements` 邊,graph-core 零修改。`#5` 與 `#6` 可平行——`HieLayout` 已在契約定義,`#6` 可先以固定佈局測試)
 
 ## Feature 契約卡
+
+### hie-instances
+
+- **階段**:階段四
+- **負責模組**:hie-instances(新)、fact-pipeline(加第五站)
+- **實作的 Level 2 介面**:模組介面 `readInstanceFacts`;事實流 DTO `FactInstance` 首次填實(欄位不動);抽取規則 2 新增「`FactInstance` 永遠且只來自 hie-instances」;規則 8、9、10 對本站同樣適用;**對外契約 `extract` 與 `ExtractFailure` 不動**
+- **資料流管線段落**:從 build-driver 的 `HieLayout`(經規則 8 過濾)與 `ProjectMeta` 進,逐檔 `readHieFile` → 走訪 `SourceInfo` 的 `ClsInstD` 節點 → 標頭原文(`hie_hs_src` 切片、空白正規化)+ class `QualName`(標頭子樹最左 `HsTyVar`),出 `[FactInstance]` 併入 `erFacts`
+- **驗收標準**:fixture `test/fixtures/instances/`(可建置,涵蓋單參 / context / 括號型 / 多參數 class / 外部 class / 空 body / 跨行標頭,以及 `deriving` 三種形式)經 `extract` 得到的 `FactInstance` 筆數 = 明寫 instance 數、deriving 零筆、標頭逐字相同;經 `buildGraph` 得 instance 節點與指向本地 class 的 `RImplements` 邊,外部 class 計入 `gsDroppedExternal`;knot-hs 自掃 `FactInstance` ≥ 3 且 0 警告;五份黃金檔 byte 不變;`knot-hs.cabal` 的 `knot-internal` 含 `ghc` 且 `src/` 內只有 `Knot.Extract.HieInstances` import `GHC.*`;閘門 `cabal clean && cabal build all --enable-tests --ghc-options=-Werror` exit 0
+- **明確不做**:不讀 `deriving` 任何形式;不為 `FactInstance` 加產生碼旗標;不解析 instance 方法的引用(`calls` 仍由 hie-facts 負責);不處理 `.hie-boot`;不改 hiedb schema、不 fork hiedb;不讓 `.hie` 的型別出現在任何 Level 2 介面;不新增 `ExtractFailure` 建構子(本站只有單檔警告)
 
 ### build-driver
 

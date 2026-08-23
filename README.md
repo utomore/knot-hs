@@ -1,32 +1,50 @@
 # knot-hs
 
-讀 Haskell 專案的 `.hie` 與 import,產出 [dev-flow](https://github.com/utomore) 相容的
-`codegraph.json` 程式碼知識圖。
+讀 Haskell 專案,產出 [dev-flow](https://github.com/utomore) 相容的 `codegraph.json`
+程式碼知識圖。**一個執行檔、一個命令、零前置**:
+
+```bash
+knot extract .
+```
 
 dev-flow 的 `/arch-audit` 等接點在專案根目錄有 `codegraph.json` 時,能直接算出子系統
-依賴矩陣、循環依賴、跨界引用與架構 hub。但它唯一登記的產生器 graphify **不支援
-Haskell**。knot-hs 填這個洞——而且 Haskell 的原料更好:GHC 的 `.hie` 是型別檢查後、
-名稱全部解析完的**事實**,不是啟發式猜出來的。
+依賴矩陣、循環依賴、跨界引用與架構 hub;`/feature-design`、`/bugfix` 用它定位。但
+dev-flow 唯一登記的產生器 graphify **不支援 Haskell**。knot-hs 填這個洞——而且
+Haskell 的原料更好:GHC 的 `.hie` 是型別檢查後、名稱全部解析完的**事實**,不是啟發式
+猜出來的。
 
-- 決定性輸出:零 API key、零 LLM,同樣輸入同樣結果
-- 對目標專案唯讀(索引快取可用 `--db` 改道到專案外)
-- 兩層圖:module 級依賴 + 函式級呼叫
+- **兩層圖,缺一不可**:module 節點 + `imports` 邊,加上頂層宣告節點 + `calls` / `uses` 邊。
+  任一層拿不到就明確失敗,不產出「只有 module 層」的半成品(理由見 ADR-006)
+- **零前置**:不用裝 hiedb、不用改目標專案的 `.cabal`、不用自己跑 `-fwrite-ide-info`。
+  `.hie` 由 knot 自行驅動插樁建置產生,索引由內嵌的 hiedb library 建
+- **決定性**:零 API key、零 LLM;同樣輸入 byte 級相同的輸出
+- **對目標專案唯讀**:唯一的副作用是根目錄下的 `.knot/` 快取(自帶 `.gitignore`),
+  不碰對方的 `dist-newstyle`、不改任何既有檔案
 
 ## 需求
 
 | 項目 | 版本 / 說明 |
 |---|---|
-| GHC | **9.14.1**(base 4.22) |
+| GHC | **9.14.1**(base 4.22)——見下方版本鎖 |
 | cabal-install | 3.16 以上 |
-| `hiedb` 執行檔 | **選用**。函式級抽取需要;沒有時自動降級為 module 級 |
+| 目標專案 | 必須能 `cabal build all` 成功。這是唯一的前置條件,也是對方專案本來就該滿足的 |
+
+不需要安裝 hiedb(已嵌入),不需要目標專案事先產出 `.hie`。
 
 ### ⚠ GHC 版本鎖(最重要的限制)
 
-`.hie` 的格式綁 GHC 版本,**knot 必須用與目標專案相同的 GHC 編譯**。目前這份原始碼
-鎖 GHC 9.14.1,所以它只掃得了同樣用 9.14.1 建置的專案。要掃別的版本,得用那個版本的
-GHC 重新編譯 knot 一次。
+`.hie` 是 GHC 內部結構的二進位序列化,讀取器在 `ghc` library 裡、精確比對版本。knot
+自己產 `.hie` 又自己讀,**兩端必須同版**:這份原始碼鎖 GHC 9.14.1,所以它只掃得了用
+9.14.1 建置的專案。目標專案若以 `with-compiler` 釘了別的 GHC,knot 會以
+`VersionMismatch` 失敗並印出該用哪個版本重裝:
 
-這是刻意的取捨,理由見 `.design/adr/ADR-001-ghc-version-locked-toolchain.md`。
+```
+extract: .hie files were produced by GHC 9.12.2, but this knot was built with GHC 9.14.1
+extract: install a matching knot: cabal install knot-hs -w ghc-9.12.2
+```
+
+跨版本的正解是每版 GHC 各裝一份 knot。這是刻意的取捨,理由見
+`.design/adr/ADR-001-ghc-version-locked-toolchain.md`。
 
 ## 安裝
 
@@ -37,111 +55,66 @@ cabal install exe:knot
 ```
 
 裝到 cabal 的 installdir(用 `cabal path --installdir` 查,Windows 上常見是
-`C:\cabal\bin`),確認它在 `PATH` 上。
-
-### hiedb(選用,函式級抽取才需要)
-
-```bash
-cabal install hiedb --allow-newer=hie-compat:base
-```
-
-`--allow-newer` 是必要的:hiedb 的 `hie-compat` 相依對 base 設了上界,GHC 9.14 超出
-該範圍,但實測加上這個旗標後完全可用(見 `ADR-002`)。裝好後 knot 會自動從 `PATH`
-找到它,也可以用 `--hiedb PATH` 指定。
-
-## 導入成本(先看這張表)
-
-knot 有**兩層能力,成本差一個數量級**。先決定你要哪一層。
-
-| | module 級 | 函式級(decl) |
-|---|---|---|
-| 產出 | module 節點 + `imports` 邊 | 再加 decl 節點 + `calls` / `uses` 邊 |
-| 夠不夠架構檢測用 | **夠**(依賴矩陣、循環依賴、跨界引用、hub 全在這層) | 加值:定位加速 |
-| 要裝什麼 | knot | knot **+ hiedb**(都是全域裝一次,**不會裝進你的專案**) |
-| 要不要改目標專案 | **不用** | **要**:用 `-fwrite-ide-info` 重建一次 |
-| 首次耗時 | **0.4 秒** | 重建 `.hie` 42 秒 + 抽取 3 秒 |
-| 改一行之後重跑 | **0.4 秒** | 增量重建 19 秒 + 抽取 2.6 秒 |
-| 會寫進目標專案 | `codegraph.json`(`--output` 可改道) | 再加 `.hie/`(`-hiedir` 可改道)、`.knot/`(`--db` 可改道) |
-
-> 數字量自 knot-hs 自身(32 個 `.hs`,Windows / GHC 9.14.1)。那 19 / 42 秒是
-> `cabal build` 的成本,不是 knot 的——**knot 本身從來不超過 3 秒**。
+`C:\cabal\bin`),確認它在 `PATH` 上。repo 內的 `cabal.project` 已含 hiedb 在 GHC 9.14
+上需要的 `allow-newer: hie-compat:base, hie-compat:ghc`,不必自己加。
 
 ## 快速上手
 
-### 只要 module 級依賴圖(零設定、零改動、0.4 秒)
-
 ```bash
 cd /path/to/your-haskell-project
-knot extract . --module-only
-```
-
-產出 `./codegraph.json`。**不需要 `.hie`、不需要 hiedb、不必重建你的專案。**
-`--module-only` 會自動跳過 hiedb 後端(它在這個模式下不可能貢獻任何東西)。
-
-架構檢測要的就是這一層——依賴矩陣、循環依賴、跨界引用、架構 hub 全部只需要
-module 級。**如果你只是要接 dev-flow 的 `/arch-audit`,做到這裡就結束了。**
-
-### 要函式級呼叫圖(需要 `.hie` 與 hiedb)
-
-目標專案得先產出 `.hie`——**這是唯一需要改動目標專案的地方**:
-
-```bash
-cd /path/to/your-haskell-project
-cabal build all --ghc-options="-fwrite-ide-info -hiedir .hie"
 knot extract .
 ```
 
-`--backend auto`(預設)會在 hiedb 可用時輸出兩層圖,不可用時自動降級為 module 級
-並在 stderr 說明,而不是整個失敗。
+產出 `./codegraph.json`。第一次會比較久——knot 要把你的專案完整建一次;之後增量。
+這一行做了四件事:
 
-> **注意**:上面刻意**沒有**加 `--enable-tests`。加了 `exe` 與 `test-suite` 的
-> `Main.hie` 會互相覆蓋,那個 module 的 decl 資料會被跳過(見「已知限制」第 2 項)。
+1. **project-meta**:解析 `.cabal` / `cabal.project`,列出 component 與原始碼檔、判定
+   test-suite / benchmark 的排除(預設排除,`--include-tests` 納入)
+2. **extraction**:對你的專案跑一次 `cabal build all --builddir=.knot/build`(帶
+   `-fwrite-ide-info`),讓每個 component 的 `.hie` 落在 cabal 自己的輸出目錄;再用內嵌的
+   hiedb 建 `.knot/hiedb.sqlite` 索引;同時掃 import 行。兩者都成功才往下
+3. **graph-core**:組出 module 與宣告兩層節點、五種邊,過濾 deriving / TH 產生碼,丟掉指向
+   外部套件的邊並統計
+4. **export**:寫 `codegraph.json`,把丟棄 / 過濾 / 去重的統計印到 stderr
 
-### 掃別人的專案時保持真正唯讀
+`.knot/` 是純快取,第一次建立時自動寫入內容為 `*` 的 `.gitignore`。刪掉只會讓下次變慢。
 
-module 級本來就只寫一個 `codegraph.json`,`--output` 改道即可完全不碰對方專案。
-函式級另外會建 `.hie/` 與 `.knot/`,三者都能改道:
+### 掃別人的專案
+
+`.knot/` 固定在目標專案根目錄、不提供改道(它與 `dist-newstyle` 同性質);
+`codegraph.json` 可用 `--output` 改道:
 
 ```bash
-# module 級:完全不寫入對方專案
-knot extract /path/to/other --module-only --output /tmp/cg.json
-
-# 函式級:三個產物全部改道到專案外
-cabal build all --ghc-options="-fwrite-ide-info -hiedir /tmp/hie"   # 在對方專案跑
-knot extract /path/to/other --hiedir /tmp/hie --db /tmp/idx.sqlite --output /tmp/cg.json
+knot extract /path/to/other --output /tmp/other.json
 ```
 
-**函式級仍然需要在對方專案跑一次 `cabal build`**——`.hie` 是 GHC 編譯期產物,
-沒有繞過的辦法。這是這條路線的固有成本。
+對方專案**不會**被改動:knot 的建置用獨立 builddir,不碰既有的 `dist-newstyle`;
+`.knot/` 自帶 `.gitignore`,`git status` 看不到它。
+
+### 指到哪、建哪
+
+knot 對目標目錄下 `--project-dir=<PATH>`:有 `cabal.project` 就用它,沒有就以該目錄的
+`.cabal` 為隱含專案,**不會往上層找別人的 `cabal.project`**。monorepo 的子套件若依賴
+上層 `cabal.project` 的設定,請指向 monorepo 根。
 
 ## 指令
 
 ### `knot extract`
 
 ```
-Usage: knot extract [PATH] [-o|--output FILE] [--backend auto|imports|hiedb]
-                    [--module-only] [--include-tests] [--hiedir DIR]
-                    [--hiedb PATH] [--db FILE] [--strict]
+Usage: knot extract [PATH] [-o|--output FILE] [--include-tests] [--strict]
                     [--summary meta|facts|graph]
 
   PATH                     要掃的專案根目錄(預設 ".")
   -o,--output FILE         輸出路徑(預設 <PATH>/codegraph.json)
-  --backend auto|imports|hiedb
-                           抽取後端(預設 auto)
-  --module-only            只輸出 module 節點與 imports 邊
   --include-tests          納入 test-suite 與 benchmark component(預設排除)
-  --hiedir DIR             覆寫 .hie 目錄位置
-  --hiedb PATH             覆寫 hiedb 執行檔位置
-  --db FILE                覆寫索引位置(預設 <PATH>/.knot/hiedb.sqlite)
   --strict                 有任何警告就 exit 1
   --summary meta|facts|graph
                            改印該站的唯讀摘要到 stdout,不寫 codegraph.json
 ```
 
-`.hie` 目錄的發現順序:`--hiedir` > `<PATH>/.hie` > 遞迴掃 `dist-newstyle`。
-
-`--summary` 是對帳用的唯讀路徑,分別印出 project-meta(檔案清單與 component 歸屬)、
-extraction(事實流)、graph-core(節點與邊)三站的中間結果。
+`--summary` 是對帳用的唯讀路徑:`meta` 印套件 / component / 檔案清單與歸屬(不跑建置),
+`facts` 印事實筆數(依種類分計),`graph` 印節點與邊的統計。
 
 ### `knot query`
 
@@ -156,6 +129,10 @@ knot query rank [--top N]            # 連通度排名(預設前 10)
   --graph FILE   要查哪份圖(預設 ./codegraph.json,四個子命令共用)
 ```
 
+節點 id 的長相:module 是裸名(`Demo.Core`),值宣告是 `<module>.<occ>`
+(`Demo.Core.render`),型別宣告多一個 `#t`(`Demo.Core.Foo#t`,與建構子 `Demo.Core.Foo`
+不碰撞)。同名 module(多個 executable 各有 `Main`)整組改用 `<module>@<source_file>`。
+
 ## 輸出格式
 
 `codegraph.json` 的欄位規格由 dev-flow 定義(細節見 `.design/adr/ADR-003`):
@@ -165,90 +142,92 @@ knot query rank [--top N]            # 連通度排名(預設前 10)
   "directed": true,
   "built_at_commit": "648009c1b81a",
   "nodes": [
-    {"id":"Demo.Core","label":"Demo.Core","source_file":"src/Demo/Core.hs"}
+    {"id":"Demo.Core","label":"Demo.Core","source_file":"src/Demo/Core.hs"},
+    {"id":"Demo.Core.render","label":"render","source_file":"src/Demo/Core.hs","source_location":"L12"}
   ],
   "links": [
     {"source":"Demo.Render","target":"Demo.Core","relation":"imports",
-     "confidence":"EXTRACTED","source_location":"L3"}
+     "confidence":"EXTRACTED","source_location":"L3"},
+    {"source":"Demo.Core","target":"Demo.Core.render","relation":"contains","confidence":"EXTRACTED"}
   ]
 }
 ```
 
-- knot 產出五種 relation:`imports` / `calls` / `uses` / `implements` / `contains`
+- 五種 relation:`imports` / `calls` / `uses` / `implements`(依賴類,下游算進依賴圖)、
+  `contains`(結構類);`implements` 來自明寫的 `instance` 宣告(見已知限制 2)
 - `confidence` 恆為 `EXTRACTED`——GHC 給的是事實,不是推測
-- 輸出是 **byte 級決定性**的:同一份輸入的序列化結果完全相同(欄位順序、清單順序、
-  換行一律 `\n`)
+- `built_at_commit` 取自目標專案的 `git rev-parse HEAD`(唯讀);不是 git repo 就省略
+- **byte 級決定性**:同一份輸入的序列化結果完全相同(欄位順序、清單順序、換行一律 `\n`)
 
 ## 錯誤處理
 
-best-effort:單一檔案讀不過(壞 `.hie`、版本不合、解析失敗)印警告到 stderr、跳過續跑,
-仍產出部分圖,exit code 仍為 0。`--strict` 讓**任何警告**變成 exit 1。
+分兩層,對應兩種 exit code:
+
+| 情況 | 行為 | exit |
+|---|---|---|
+| **整體失敗**:目標專案建不起來(`BuildFailed`)、`.hie` 的 GHC 版本與 knot 不合(`VersionMismatch`)、索引整體失敗(`IndexFailed`)、納入範圍內零個原始檔(`NoSources`) | 印原因到 stderr,**不寫** `codegraph.json` | **1**,與 `--strict` 無關 |
+| **單檔 best-effort**:個別原始檔解析失敗、個別 `.hie` 對映不到納入範圍內的原始檔(例如模組已刪、舊 `.hie` 還在快取裡) | 警告到 stderr、跳過續跑,仍產圖 | 0;`--strict` 時**任何警告**改為 1 |
+
+沒有「降級」:拿不到 decl 層不會退成 module 級圖。module 級的關聯無法協助寫 code,把它
+當成功回報比明確失敗更糟——下游會拿它當真。
+
+`cabal build` 的輸出會即時轉發到 stderr,建置失敗時尾段進錯誤訊息,你看到的就是 cabal
+看到的。
+
+## 成本
+
+| | 第一次 | 之後(沒改動) | 改一個檔之後 |
+|---|---|---|---|
+| 發生什麼 | 目標專案完整建置進 `.knot/build/` + 全量索引 | cabal 的 up-to-date 檢查 + 索引增量 | 重編那個模組 + 索引該檔 |
+| knot-hs 自身(27 個模組) | 即目標專案的 `cabal build all` 時間 | **2.5 秒**(含 cabal 檢查) | 幾秒 |
+| MagicFarmer(141 個 `.hs`,h-raylib 遊戲) | **66 秒**(刪掉 `.knot/` 後實測) | **1.4 秒** | — |
+| particle-magic(223 個 `.hs`,9 個 component) | **35 秒** | **0.7 秒** | — |
+
+建置時間是 cabal / GHC 的成本,不是 knot 的——抽取與建圖本身在幾秒內。上表兩個
+外部專案的數字量自 2026-08-23(Windows / GHC 9.14.1),cold 與 warm 產出的
+`codegraph.json` byte 相同,標的的 `git status` 前後皆為空。細節見
+`.design/system.md`「開發階段」。
 
 ## 已知限制
 
 ### 1. GHC 版本鎖
 
-見上方「需求」。knot 與目標專案必須同版 GHC。
+見上方「需求」。knot 與目標專案必須同版 GHC,不合時整體失敗。
 
-### 2. 同名 module 的 `.hie` 會互相覆蓋(**已處理**,但要知道它的存在)
+### 2. `implements` 邊只涵蓋明寫的 `instance`
 
-GHC 的 `-hiedir` 依 **module 名**決定輸出路徑,不含 component。當 `executable` 與
-`test-suite` 都有 `Main` 時,兩者都寫 `.hie/Main.hie`,**後編譯的覆蓋先編譯的**
-(誰贏取決於建置順序,不穩定)。
+hiedb 0.8 的索引沒有 instance 表,所以 knot 直接讀 `.hie` 的 AST 取 instance 宣告
+(ADR-007)。每個明寫的 `instance … where` 成為一個 `<module>#i:<標頭原文>` 節點,
+對它的 class 發一條 `implements` 邊(class 在外部套件時無邊,計入丟棄統計)。
+`deriving` 的任何形式(子句、standalone、`anyclass`)在 `.hie` 裡沒有節點,也不會出現
+在圖上——那不是使用者畫的架構線。標頭原文保留使用者寫法(多行收斂為單一空白),
+`instance (Show a) => Foo [a]` 的 context 會留在節點 id 裡。
 
-**knot 現在會偵測並明確丟棄**(G-B001):被覆蓋掉的那份 `.hie` 對映回一個不在納入
-範圍內的原始檔時,整批跳過並印警告,而不是猜一個檔案掛上去:
-
-```
-extract: .hie\Main.hie: cannot map indexed module Main back to pmSources;
-         skipping its decls and refs
-```
-
-- **結果**:那個 module 的 decl 層資料**缺席**(不會錯歸)。修復前是 19 行的
-  `app/Main.hs` 被掛上 302 個節點、行號到 L3789
-- **要完整的 decl 層資料**:讓兩個 component 的 `.hie` 落在不同目錄,或產 `.hie` 時
-  不加 `--enable-tests`(這樣 `Main.hie` 就是 executable 的)
-
-細節見 `.design/bugfixes/G-B001-hie-component-collision.md`。
-
-### 2b. 不要用 `hiedb index <目錄>` 建索引
-
-knot 一律**逐檔**把 `hieFiles` 傳給 hiedb,這是**正確性需求**,不只是為了排除幽靈檔。
-
-實測(G-B002):同一份 `.hie`、同一個 `(hieFile, occ)` 主鍵,兩種呼叫形式寫出不同的
-`defs.sl`——`Knot.Export.Types.rootDir` 逐檔清單給 **19**(正確,該檔 38 行),
-走目錄給 **4492**(那是 `test/Main.hs` 的行號)。走目錄索引時,其他 `.hie` 對同名記錄
-欄位的**使用**會覆蓋掉真正的宣告位置。
-
-若你自己準備 hiedb 索引再用 `--db` 指給 knot,請用逐檔形式。
-細節見 `.design/bugfixes/G-B002-hiedb-dir-index-defs-pollution.md`。
-
-### 3. `implements` 邊尚未實作
-
-hiedb 0.8 的索引 schema 沒有 instance 表(實測八張表:mods / decls / defs / refs /
-exports / imports / typenames / typerefs),class/instance 關係沒有直接的資料來源。
-`Fact` 的建構子已保留,邊的推導待後續 feature。
-
-### 4. 沒列在 `exposed-modules` / `other-modules` / `main-is` 的檔案不屬於任何 component
+### 3. 沒列在 `exposed-modules` / `other-modules` / `main-is` 的檔案不屬於任何 component
 
 knot 判斷「哪個檔屬於哪個 component」看兩件事:檔案落在該 component 的
 `hs-source-dirs` 下,**且** 由路徑推得的 module 名在它的 `exposed-modules` /
-`other-modules` 清單內(或路徑就是它的 `main-is`)。這是 Cabal 本身的語意,
-所以 `hs-source-dirs` 省略(預設 `.`)的 component 也只會認領它真正宣告的 module,
-不會把 test fixture、範例碼、腳本整個 repo 吃進去。
+`other-modules` 清單內(或路徑就是它的 `main-is`)。這是 Cabal 本身的語意,所以
+`hs-source-dirs` 省略(預設 `.`)的 component 也只會認領它真正宣告的 module,不會把
+test fixture、範例碼、腳本整個 repo 吃進去。
 
-代價是 `.cabal` 漏列的 module(cabal 建置時會警告「modules not listed」的那些)
-在 knot 眼裡沒有 owner:module 名退回大寫尾綴法推導,納入與否退回路徑啟發式
-(頂層 `test/`、`tests/`、`bench/` 排除、其餘納入)。要讓它們被正確歸類,補齊
-`other-modules` 即可——這同時也是 cabal 要求的。
+代價是 `.cabal` 漏列的 module(cabal 建置時會警告「modules not listed」的那些)在 knot
+眼裡沒有 owner:module 名退回大寫尾綴法推導,納入與否退回路徑啟發式(頂層 `test/`、
+`tests/`、`bench/` 排除、其餘納入)。補齊 `other-modules` 即可——那同時也是 cabal 的
+要求。(`.design/subsystems/project-meta/enhancements/E001-component-module-list-ownership.md`)
 
-(原本只看目錄前綴的行為與修正過程見
-`.design/subsystems/project-meta/enhancements/E001-component-module-list-ownership.md`。)
+### 4. 同名 module 的 decl 層只有一份
+
+`executable` 與 `test-suite` 各有 `Main` 時,兩者的 `.hie` 落在 cabal 各自的 component
+輸出目錄,**不會**互相覆蓋(這是 S5 之前的缺陷 G-B001 的根因,現已由佈局消除)。但
+graph 層的 module 節點以名字為 id,同名組會以 `<module>@<source_file>` 消歧;`--include-tests`
+時兩個 `Main` 都會出現在圖上。
 
 ### 5. 驗證覆蓋面
 
-目前實跑驗證過三個專案(兩個外部驗收標的 + knot 自己)。更奇特的 cabal 結構
-(Backpack、custom Setup.hs、複雜 conditional)沒有實測過。
+實跑驗證過三個專案(兩個外部驗收標的 + knot 自己)。更奇特的 cabal 結構(Backpack、
+custom `Setup.hs`、複雜 conditional、`build-type: Configure`)沒有實測過。conditional 以
+預設 flag 值與本機平台攤平,非預設 flag 組合的原始碼不會被納入。
 
 ### 6. 不做的事
 
@@ -261,7 +240,7 @@ knot 判斷「哪個檔屬於哪個 component」看兩件事:檔案落在該 com
 # 建置品質閘門(唯一合法的零警告驗收指令,cabal clean 不可省略)
 cabal clean && cabal build all --enable-tests --ghc-options=-Werror
 
-# 測試
+# 測試(144 條;含五份黃金 codegraph.json 的 byte 級回歸與 knot-hs 自掃)
 cabal test --enable-tests
 ```
 
@@ -269,16 +248,26 @@ cabal test --enable-tests
 「乾淨」而實際不然,因為 GHC 的重編檢查不理會警告旗標的變動、增量建置不重印警告。
 詳見 `.design/enhancements/G-E002-wall-clean-build.md`。
 
+### package 佈局
+
+| stanza | 內容 | 誰依賴它 |
+|---|---|---|
+| `library knot-internal`(private) | `src/` 全部模組 | `test-suite knot-test` |
+| `library`(公開) | 只 re-export 四個子系統的進入點與對外 DTO(9 個模組) | `executable knot` |
+
+組裝層碰到非契約模組是編譯錯誤,不是靠自律(ADR-004)。
+
 ### 架構文件
 
-`.design/` 是這個專案的設計樹:
+`.design/` 是這個專案的設計樹,以 dev-flow 的三層階梯法維護:
 
 | 路徑 | 內容 |
 |---|---|
-| `.design/system.md` | Level 1 主架構:系統邊界、對外契約、子系統劃分、通訊拓撲 |
-| `.design/subsystems/<slug>/design.md` | Level 2 子系統架構(四個:project-meta、extraction、graph-core、export-query) |
-| `.design/adr/` | 架構決策紀錄 |
-| `.design/enhancements/`、`.design/bugfixes/` | 優化與缺陷文檔 |
+| `.design/system.md` | Level 1 主架構:系統邊界、對外契約、子系統劃分、通訊拓撲、進度 |
+| `.design/subsystems/<slug>/design.md` | Level 2 子系統架構(project-meta、extraction、graph-core、export-query) |
+| `.design/subsystems/<slug>/features/` | Level 3 feature 設計(含 TodoList 與 1-to-1 測試對照) |
+| `.design/adr/` | 架構決策紀錄(ADR-006 是目前架構的依據) |
+| `.design/enhancements/`、`.design/bugfixes/` | 跨子系統的優化與缺陷文檔 |
 
 ## 授權
 

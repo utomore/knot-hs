@@ -28,8 +28,10 @@ import Data.Text (Text)
 
 import Knot.Extract.Types (DeclKind)
 
--- | 建圖選項。@moduleOnly@ 對應 CLI @--module-only@:只出 module 節點與
--- imports 邊(組裝規則 6)。
+-- | 建圖選項(library 呼叫者用)。@moduleOnly = True@ 只出 module 節點與
+-- imports 邊(組裝規則 6)。CLI 自 S5 起__恆填 'False'__——extraction 兩層缺一
+-- 不可(ADR-006),沒有「只要 module 層」的命令列路徑;欄位保留給直接呼叫
+-- 'Knot.Graph.buildGraph' 的消費端(G-E006)。
 data BuildOptions = BuildOptions
   { moduleOnly :: Bool
   }
