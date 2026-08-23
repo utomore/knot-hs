@@ -54,7 +54,7 @@ data ExportReport = ExportReport
 ### 投影規則(契約的一部分,對齊 ADR-003)
 
 1. **relation 對映**:`RImports → "imports"`、`RCalls → "calls"`、`RUses → "uses"`、`RImplements → "implements"`、`RContains → "contains"`
-2. **節點欄位**:`id`(NodeId 原文)、`label`、`source_file`(`gnFile`,已是 repo 相對正斜線)、`source_location`(`gnLine` 有值時輸出 `L<行>`)
+2. **節點欄位**:`id`(NodeId 原文)、`label`、`source_file`(`gnFile`,已是 repo 相對正斜線)、`component`(`gnComponent` 有值時輸出,G-E007 / ADR-008)、`source_location`(`gnLine` 有值時輸出 `L<行>`);欄位序即此序
 3. **邊欄位**:`source` / `target` / `relation` / `confidence: "EXTRACTED"`(GHC 事實,全部同值);`source_location`(`geLine` 有值時輸出 `L<行>`)——下游 `scan-graph.mjs` 以「邊優先、來源節點 fallback」取循環依賴與跨子系統引用的證據行,S1 的 module 節點 `gnLine` 恆為 `Nothing`,不由邊供給就取不到
 4. **頂層欄位**:`directed: true`;`built_at_commit` 依 `CommitPolicy`
 5. **決定性**:同一 `CodeGraph` 序列化結果 byte 級相同(欄位順序、清單順序固定)
@@ -68,6 +68,8 @@ queryGraphHasNode :: QueryGraph -> NodeId -> Bool                -- 節點存在
 runQuery          :: QueryGraph -> QueryCommand -> QueryResult   -- 純函數
 renderResult      :: QueryResult -> Text                         -- stdout 文字
 restrictLevel     :: Level -> QueryGraph -> QueryGraph         -- E001:收斂為指定層的誘導子圖;LevelAll 為恆等
+restrictScope     :: Scope -> QueryGraph -> QueryGraph         -- G-E007:收斂為指定範圍的誘導子圖;ScopeAll 為恆等
+queryGraphHasTests :: QueryGraph -> Bool                       -- G-E007:圖上是否有任何測試節點(tests-of 空結果的提示依據)
 ```
 
 `queryGraphHasNode` 存在的理由:`runQuery` 對「id 不存在」與「存在但無鄰居」都回空結果,呼叫端無從區分,而 CLI 需要對前者給明確訊息。沒有它,組裝層只能繞過 `QueryGraph` 的抽象直接讀內部欄位——那會讓「內容屬 Level 3」的承諾失效。
@@ -78,10 +80,14 @@ data QueryCommand
   | Reachable NodeId Direction (Maybe Int)   -- 可達集合;第三欄 = 深度上限(E001:CLI --depth N,Nothing = 不限)
   | ShortestPath NodeId NodeId      -- 兩點最短路徑
   | RankConnectivity Int            -- 連通度排名,參數為 top N
+  | TestsOf NodeId                  -- G-E007:哪些測試節點(直接或間接)依賴它;呼叫端須傳 ScopeAll 的圖
 
 data Direction = Forward | Reverse  -- Forward:它依賴誰;Reverse:誰依賴它
 
 data Level = LevelAll | LevelModule | LevelDecl   -- E001:查詢的層。decl 層節點 = 任一 contains 邊的目標;其餘為 module 層
+
+data Scope = ScopeProduct | ScopeTests | ScopeAll -- G-E007:查詢的範圍。測試節點 = component 的 compName 以 test: / bench: 開頭;
+                                                  -- 無 component 欄位一律產品
 
 newtype NodeId = NodeId Text        -- 查詢面自有,與 graph-core 的同名型別無關:
                                     -- graph-load 手上只有 JSON 字串,而 graph-core 的
@@ -96,6 +102,7 @@ data QueryResult
   | ReachableSet [(NodeId, Int)]                   -- 節點與其距離(hop 數)
   | PathResult   (Maybe [NodeId])                  -- Nothing = 不連通
   | Ranking      [(NodeId, Int, Int)]              -- 節點、入度、出度
+  | TestSet      [(NodeId, Int)]                   -- G-E007:測試節點與其距離(hop 數)
 
 data LoadError
   = LoadFileMissing Text            -- 檔案不存在 / 讀不到
@@ -114,18 +121,23 @@ data LoadError
 
 7. **層(E001)**:`restrictLevel` 把圖收斂為指定層的誘導子圖——`LevelModule` 只留非 `contains` 目標的節點、`LevelDecl` 只留 `contains` 目標,邊只留兩端都保留者,度數依留下的邊重算;四個查詢都在收斂後的圖上跑,`LevelAll` 即原圖。沒有 `contains` 邊的圖(非 knot 產生)全部視為 module 層
 8. **深度(E001)**:`Reachable` 的第三欄為深度上限,`Just N` 只回距離 ≤ N 的節點,`Nothing` 不限;規則 5 不變
+9. **範圍(G-E007)**:`restrictScope` 把圖收斂為指定範圍的誘導子圖——`ScopeProduct` 只留非測試節點、`ScopeTests` 只留測試節點,機制與規則 7 相同(兩者可交換);節點的 `component` 欄位缺鍵一律視為產品。`FindNodes` / `Reachable` / `ShortestPath` / `RankConnectivity` 都在收斂後的圖上跑
+10. **`TestsOf`(G-E007)**:自目標**反向**可達、不限深度,只留測試節點,排序同 `Reachable`;必須在 `ScopeAll` 的圖上跑(呼叫端責任,規則 9 的收斂對它不適用),途經的產品節點照常展開但不進結果。圖上沒有任何測試節點時結果必空,CLI 層以 `queryGraphHasTests` 判斷並提示
 
 ### CLI 子命令對映(承接 system.md 頂層契約)
 
 ```text
-knot query [--graph FILE] [--level all|module|decl] <子命令>      → 先 restrictLevel,再 runQuery(E001;預設 all)
+knot query [--graph FILE] [--level all|module|decl] [--scope product|tests|all] <子命令>
+                                                 → 先 restrictLevel,再 restrictScope,再 runQuery(預設 all / product);
+                                                   tests-of 略過 restrictScope(規則 10)
 knot query find <keyword>                        → FindNodes
 knot query reachable <id> [--reverse] [--depth N] → Reachable … (Just N | Nothing);N ≥ 1(E001)
 knot query path <from> <to>                      → ShortestPath
 knot query rank [--top N]                        → RankConnectivity(N 預設 10)
+knot query tests-of <id>                         → TestsOf(G-E007);圖無測試節點時 stderr 提示重跑 knot extract --include-tests
 ```
 
-參數解析屬 CLI 組裝層;本子系統收 `QueryCommand` 與 `Level`。
+參數解析屬 CLI 組裝層;本子系統收 `QueryCommand`、`Level` 與 `Scope`。
 
 ### CLI `extract` 旗標對映與 exit code(承接 system.md 頂層契約,S5 起)
 

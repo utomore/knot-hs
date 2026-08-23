@@ -49,6 +49,8 @@ data GraphNode = GraphNode
   , gnLabel :: Text             -- 人類可讀名(module 名 / occ 名 / instance 標頭)
   , gnFile  :: FilePath         -- repo 相對、正斜線(codegraph 必填欄位的來源)
   , gnLine  :: Maybe Int        -- 下游 source_location(L<行>)的來源
+  , gnComponent :: Maybe Text   -- G-E007:<pkgName>:<compName>(如 comps:test:comps-test);
+                                -- Nothing = 檔案不屬於任何 component。下游選填欄位 component 的來源(ADR-008)
   }
 
 data NodeKind = ModuleNode | DeclNode DeclKind | InstanceNode
@@ -169,6 +171,10 @@ data GatedFacts = GatedFacts
   { gfFacts    :: [Fact]          -- 通過過濾的事實
   , gfInternal :: Set ModuleName  -- 內部 module 集合(內外部判定的依據)
   , gfFiltered :: Int             -- 濾除量(進 gsFilteredGenerated)
+  , gfOwners   :: Map FilePath Text
+                                  -- G-E007:檔案 → <pkgName>:<compName>,取 sfOwners 的第一個
+                                  -- (project-meta 序 library → exe → flib → test → bench,產品優先);
+                                  -- 無 owner 的檔不在表內。node-mint 以 gnFile 查表填 gnComponent
   }
 
 -- node-mint:鑄造

@@ -35,6 +35,7 @@ import Knot.Query.Types
   , QueryGraph (..)
   , QueryNode (..)
   , QueryResult (..)
+  , isTestNode
   )
 
 --------------------------------------------------------------------------------
@@ -52,6 +53,7 @@ runQuery g cmd = case cmd of
   Reachable start dir limit -> ReachableSet (reachableFrom g start dir limit)
   ShortestPath from to  -> PathResult   (shortestPath g from to)
   RankConnectivity n    -> Ranking      (rankConnectivity g n)
+  TestsOf target        -> TestSet      (testsOf g target)
 
 -- | 'NodeId' 的內容;'Knot.Query.Types' 只匯出建構子,沒有具名選擇器。
 unNodeId :: NodeId -> Text
@@ -105,6 +107,23 @@ reachableFrom g start dir limit
     let fresh = freshInOrder (`Map.member` acc) frontier
         acc'  = foldl' (\m v -> Map.insert v d m) acc fresh
     in  go acc' (d + 1) (concatMap neighbours fresh)
+
+--------------------------------------------------------------------------------
+-- TestsOf(查詢規則 10,G-E007)
+--------------------------------------------------------------------------------
+
+-- | 哪些測試節點(直接或間接)依賴 @target@:'reachableFrom' 反向、不限深度,
+-- 再只留 'isTestNode' 者;排序沿用 (距離, id)。
+--
+-- 本函數__不做__範圍收斂——呼叫端必須傳 'Knot.Query.Types.ScopeAll' 的圖
+-- (@--scope product@ 的圖上沒有測試節點,結果永遠空);中途經過的產品節點照常
+-- 展開,只是不進結果。目標不存在 → 空集合(與 'reachableFrom' 同)。
+testsOf :: QueryGraph -> NodeId -> [(NodeId, Int)]
+testsOf g target =
+  [ (i, d)
+  | (i, d) <- reachableFrom g target Reverse Nothing
+  , maybe False isTestNode (Map.lookup i (qgIndex g))
+  ]
 
 --------------------------------------------------------------------------------
 -- ShortestPath(查詢規則 6)

@@ -66,7 +66,7 @@ import qualified Knot.Export.Types as ET
 import qualified Knot.Extract.Types as XT
 import Knot.Graph.Types (BuildOptions (..))
 import Knot.Meta.Types (MetaOptions (..))
-import Knot.Query (Direction (..), Level (..), NodeId (..), QueryCommand (..))
+import Knot.Query (Direction (..), Level (..), NodeId (..), QueryCommand (..), Scope (..))
 
 --------------------------------------------------------------------------------
 -- CLI DTO
@@ -97,10 +97,11 @@ data ExtractCmd = ExtractCmd
 data SummaryMode = SummaryMeta | SummaryFacts | SummaryGraph
   deriving (Eq, Show)
 
--- | @knot query@:圖檔路徑 + 四子命令之一。
+-- | @knot query@:圖檔路徑 + 五子命令之一。
 data QueryCmd = QueryCmd
   { qcFile    :: FilePath      -- ^ --graph,預設 "codegraph.json"(假設 A3)
-  , qcLevel   :: Level         -- ^ --level all|module|decl,預設 all(export-query/E001;四子命令共用)
+  , qcLevel   :: Level         -- ^ --level all|module|decl,預設 all(export-query/E001;子命令共用)
+  , qcScope   :: Scope         -- ^ --scope product|tests|all,預設 product(G-E007;@tests-of@ 不受影響)
   , qcCommand :: QueryCommand  -- ^ F003 的契約 DTO
   }
   deriving (Eq, Show)
@@ -160,7 +161,25 @@ queryParser = QueryCmd
         (long "level" <> metavar "all|module|decl"
           <> value LevelAll <> showDefaultWith levelName
           <> help "restrict the graph to one level before querying (decl = targets of contains edges)")
+  <*> option scopeReader
+        (long "scope" <> metavar "product|tests|all"
+          <> value ScopeProduct <> showDefaultWith scopeName
+          <> help "restrict the graph to product or test components before querying (tests-of ignores this)")
   <*> queryCommandParser
+
+-- | @--scope@ 的三個取值(G-E007)。
+scopeReader :: ReadM Scope
+scopeReader = eitherReader $ \s -> case s of
+  "product" -> Right ScopeProduct
+  "tests"   -> Right ScopeTests
+  "all"     -> Right ScopeAll
+  _         -> Left ("unknown scope: " <> s <> " (expected product|tests|all)")
+
+scopeName :: Scope -> String
+scopeName s = case s of
+  ScopeProduct -> "product"
+  ScopeTests   -> "tests"
+  ScopeAll     -> "all"
 
 -- | @--level@ 的三個取值(export-query/E001)。
 levelReader :: ReadM Level
@@ -192,7 +211,12 @@ queryCommandParser = hsubparser
       (info pathParser (progDesc "shortest path from FROM to TO"))
       <> command "rank"
       (info rankParser (progDesc "nodes ranked by connectivity"))
+      <> command "tests-of"
+      (info testsOfParser (progDesc "test nodes that (directly or indirectly) depend on ID"))
   )
+
+testsOfParser :: Parser QueryCommand
+testsOfParser = TestsOf <$> nodeIdArgument "ID" "product node id"
 
 findParser :: Parser QueryCommand
 findParser = FindNodes . T.pack

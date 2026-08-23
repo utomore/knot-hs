@@ -15,6 +15,7 @@ module Knot.Query.Types
   , QueryCommand (..)
   , Direction (..)
   , Level (..)
+  , Scope (..)
   , QueryResult (..)
   , NodeId (..)
     -- | 契約是**抽象型別本身**;七個欄位選擇器屬 Level 3,只給 graph-load 與
@@ -23,11 +24,14 @@ module Knot.Query.Types
   , QueryGraph (..)
     -- * 非契約面(F003 取用)
   , QueryNode (..)
+  , isTestNode
+  , inScope
   ) where
 
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
+import qualified Data.Text as T
 
 -- | 查詢面的節點 id(F002 假設 A1;該假設已於 @design.md@ 補上契約定義後消解,
 -- G-E004 據此把它從非契約面升為對外契約)。'Ord' 是 'Map' 鍵與「同值按 id 字典序」
@@ -35,14 +39,33 @@ import Data.Text (Text)
 newtype NodeId = NodeId Text
   deriving (Eq, Ord, Show)
 
--- | 載入後的節點。三個欄位恰為 @F003@ 的 @FoundNodes [(NodeId, Text, FilePath)]@
--- 所需(@codegraph.json@ 的 @id@ \/ @label@ \/ @source_file@)。
+-- | 載入後的節點。前三個欄位恰為 @F003@ 的 @FoundNodes [(NodeId, Text, FilePath)]@
+-- 所需(@codegraph.json@ 的 @id@ \/ @label@ \/ @source_file@);第四個是 G-E007 的
+-- 選填 @component@。
 data QueryNode = QueryNode
   { qnId    :: NodeId
   , qnLabel :: Text        -- ^ @FindNodes@ 的比對對象之一
   , qnFile  :: FilePath    -- ^ @source_file@,已是 repo 相對正斜線
+  , qnComponent :: Maybe Text
+    -- ^ @component@(@\<pkgName\>:\<compName\>@,ADR-008);缺鍵為 'Nothing'
   }
   deriving (Eq, Show)
+
+-- | 節點是否屬測試(G-E007):@component@ 的 compName(第一個 @:@ 之後)以
+-- @test:@ 或 @bench:@ 開頭。'Nothing' 與其他一律不是。
+isTestNode :: QueryNode -> Bool
+isTestNode n = case qnComponent n of
+  Nothing -> False
+  Just c  ->
+    let comp = T.drop 1 (T.dropWhile (/= ':') c)
+    in  T.pack "test:" `T.isPrefixOf` comp || T.pack "bench:" `T.isPrefixOf` comp
+
+-- | 節點是否落在指定 'Scope' 內('restrictScope' 與 1-to-1 測試共用)。
+inScope :: Scope -> QueryNode -> Bool
+inScope s n = case s of
+  ScopeAll     -> True
+  ScopeTests   -> isTestNode n
+  ScopeProduct -> not (isTestNode n)
 
 -- | 從 @codegraph.json@ 載入的查詢用圖(Level 2 契約的抽象 DTO)。
 --
@@ -73,6 +96,12 @@ data QueryGraph = QueryGraph
 data Level = LevelAll | LevelModule | LevelDecl
   deriving (Eq, Show)
 
+-- | 查詢的範圍(G-E007,Level 2 契約原文)。'restrictScope' 據此收斂為誘導子圖;
+-- 'ScopeAll' 為恆等。測試節點的判準見 'isTestNode';沒有 @component@ 欄位的圖
+-- (非 knot 產生、或 knot 在無 @.cabal@ 的專案上產生)全部視為產品。
+data Scope = ScopeProduct | ScopeTests | ScopeAll
+  deriving (Eq, Show)
+
 -- | 從 @codegraph.json@ 載入失敗的三種原因(Level 2 契約原文)。
 --
 -- 三者一律__中止載入__,不產出部分圖(子系統的錯誤策略:'LoadError' 屬
@@ -92,6 +121,8 @@ data QueryCommand
                                     -- (查詢規則 8,E001):@Just n@ 只回距離 ≤ n,@Nothing@ 不限
   | ShortestPath NodeId NodeId      -- ^ 兩點最短路徑,多解取字典序最小(查詢規則 6)
   | RankConnectivity Int            -- ^ 連通度排名,參數為 top N
+  | TestsOf NodeId                  -- ^ G-E007:哪些測試節點(直接或間接)依賴它——反向可達、
+                                    -- 不限深度、只留 'isTestNode' 者;呼叫端須傳 'ScopeAll' 的圖
   deriving (Eq, Show)
 
 -- | 'Forward':它依賴誰(走 'qgForward');'Reverse':誰依賴它(走 'qgReverse')。
@@ -105,4 +136,5 @@ data QueryResult
   | ReachableSet [(NodeId, Int)]             -- ^ 節點與 hop 距離(≥ 1);依 (距離, id) 升序
   | PathResult   (Maybe [NodeId])            -- ^ 含起點與終點;'Nothing' = 不連通
   | Ranking      [(NodeId, Int, Int)]        -- ^ 節點、入度、出度;依 (總度數降序, id 升序)
+  | TestSet      [(NodeId, Int)]             -- ^ G-E007:測試節點與 hop 距離;依 (距離, id) 升序
   deriving (Eq, Show)

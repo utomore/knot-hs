@@ -36,6 +36,7 @@ import Knot.Query.Types (NodeId (..), QueryResult (..))
 -- > PathResult (Just p)  → "path: <hops> hops"     + 單列 "  <id> -> <id> -> …"
 -- > PathResult Nothing   → "path: not connected"   (無明細行)
 -- > Ranking rows         → "rank: <n> nodes"       + 每列 "  <total>  <id>  in=<i> out=<o>"
+-- > TestSet rows         → "tests-of: <n> nodes"   + 每列 "  <dist>  <id>"(G-E007,明細同 ReachableSet)
 renderResult :: QueryResult -> Text
 renderResult result = case result of
   FoundNodes rows ->
@@ -57,6 +58,9 @@ renderResult result = case result of
       [ row [num (inD + outD), nodeText i, degrees inD outD]
       | (i, inD, outD) <- rows
       ]
+  TestSet rows ->
+    block (countLine "tests-of" rows)
+      [ row [num d, nodeText i] | (i, d) <- rows ]
  where
   hops p = max 0 (length p - 1)
   degrees inD outD =

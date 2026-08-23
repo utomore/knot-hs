@@ -1,9 +1,9 @@
 {
   "directed": true,
   "nodes": [
-    {"id":"Demo.Core","label":"Demo.Core","source_file":"src/Demo/Core.hs"},
-    {"id":"Demo.Render","label":"Demo.Render","source_file":"src/Demo/Render.hs"},
-    {"id":"Main","label":"Main","source_file":"app/Main.hs"}
+    {"id":"Demo.Core","label":"Demo.Core","source_file":"src/Demo/Core.hs","component":"graph:lib:graph"},
+    {"id":"Demo.Render","label":"Demo.Render","source_file":"src/Demo/Render.hs","component":"graph:lib:graph"},
+    {"id":"Main","label":"Main","source_file":"app/Main.hs","component":"graph:exe:graph-exe"}
   ],
   "links": [
     {"source":"Demo.Render","target":"Demo.Core","relation":"imports","confidence":"EXTRACTED","source_location":"L3"},

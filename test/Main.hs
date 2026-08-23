@@ -35,6 +35,7 @@ import System.Directory
   , makeAbsolute
   , removePathForcibly
   )
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, takeExtension, takeFileName, (</>))
 import GHC.Clock (getMonotonicTime)
@@ -309,6 +310,7 @@ tests = testGroup "knot-hs"
   , globalE004Tests
   , globalB002Tests
   , globalE006Tests
+  , globalE007Tests
   ]
 
 f001Tests :: TestTree
@@ -2141,7 +2143,8 @@ testGraphTypesConstruct = testCase "test_graph_types_construct" $ do
   moduleOnly defBuildOpts @?= False
   let node = GraphNode
         { gnId = nid "Demo.Core", gnKind = ModuleNode
-        , gnLabel = T.pack "Demo.Core", gnFile = "src/Demo/Core.hs", gnLine = Nothing }
+        , gnLabel = T.pack "Demo.Core", gnFile = "src/Demo/Core.hs", gnLine = Nothing
+        , gnComponent = Nothing }
   gnId node    @?= nid "Demo.Core"
   gnKind node  @?= ModuleNode
   gnLabel node @?= T.pack "Demo.Core"
@@ -2558,9 +2561,9 @@ testRenderGraphSummary = testCase "test_render_graph_summary" $ do
   let g = CodeGraph
         { cgNodes =
             [ GraphNode (nid "Demo.Core") ModuleNode (T.pack "Demo.Core")
-                "src/Demo/Core.hs" Nothing
+                "src/Demo/Core.hs" Nothing Nothing
             , GraphNode (nid "Main@app/Main.hs") ModuleNode (T.pack "Main")
-                "app/Main.hs" (Just 1)
+                "app/Main.hs" (Just 1) Nothing
             ]
         , cgEdges =
             [GraphEdge (nid "Main@app/Main.hs") (nid "Demo.Core") RImports (Just 6)]
@@ -3581,7 +3584,7 @@ exportQueryF001Tests = testGroup "export-query/F001 json-export"
 
 -- | 手寫節點 / 邊 / 圖的測試捷徑。
 xNode :: String -> String -> FilePath -> Maybe Int -> GraphNode
-xNode i lbl f ln = GraphNode (nid i) ModuleNode (T.pack lbl) f ln
+xNode i lbl f ln = GraphNode (nid i) ModuleNode (T.pack lbl) f ln Nothing
 
 xEdge :: String -> String -> Relation -> Maybe Int -> GraphEdge
 xEdge s t r ln = GraphEdge (nid s) (nid t) r ln
@@ -3701,7 +3704,7 @@ testEncodeNodeEdge = testCase "test_encode_node_edge" $ do
   -- escaping:雙引號、反斜線、控制字元、非 ASCII 原樣 UTF-8
   let ge = graphWith
         [ GraphNode (NodeId (T.pack "q\"id")) ModuleNode
-            (T.pack "say \"hi\"\\p\n\1055\28450") "src/\28450.hs" Nothing
+            (T.pack "say \"hi\"\\p\n\1055\28450") "src/\28450.hs" Nothing Nothing
         ] []
   elemLines (encodeText Nothing ge) @?= [T.pack
     ("{\"id\":\"q\\\"id\",\"label\":\"say \\\"hi\\\"\\\\p\\n\1055\28450\""
@@ -3913,6 +3916,7 @@ testQueryTypesConstruct = testCase "test_query_types_construct" $ do
         { QT.qnId    = qid "A"
         , QT.qnLabel = T.pack "Demo.A"
         , QT.qnFile  = "src/Demo/A.hs"
+        , QT.qnComponent = Nothing
         }
   QT.qnId node    @?= qid "A"
   QT.qnLabel node @?= T.pack "Demo.A"
@@ -4788,7 +4792,7 @@ testCliToplevelParse = testCase "test_cli_toplevel_parse" $ do
       (_, c) <- expectParseFailure argv
       assertBool (show argv <> " --help should exit 0") (c == ExitSuccess))
   -- 四個 CLI DTO 各建一值並比對 Eq
-  let q = QueryCmd { qcFile = "g.json", qcLevel = QT.LevelAll, qcCommand = QT.FindNodes (T.pack "Demo") }
+  let q = QueryCmd { qcFile = "g.json", qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = QT.FindNodes (T.pack "Demo") }
   CmdExtract baseExtractCmd @?= CmdExtract baseExtractCmd
   CmdQuery q @?= CmdQuery q
   assertBool "CmdExtract /= CmdQuery" (CmdExtract baseExtractCmd /= CmdQuery q)
@@ -5013,34 +5017,34 @@ testRunQuery = testCase "test_run_query" $
       Right x -> pure x
       Left e  -> assertFailure ("fixture graph should load: " <> show e)
     -- 命中:stdout 等於 renderResult,exit 0
-    let findCmd = QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcCommand = QT.FindNodes (T.pack "Demo") }
+    let findCmd = QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = QT.FindNodes (T.pack "Demo") }
     (code1, out1, _) <- withCaptured dir (\hO hE -> runQueryCmd hO hE findCmd)
     code1 @?= ExitSuccess
     out1 @?= renderResult (runQuery g (qcCommand findCmd))
     assertBool ("a hit should list nodes: " <> show out1) (T.length out1 > 0)
     -- 查無結果:一樣 exit 0(驗收標準 6)
-    let missCmd = QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcCommand = QT.FindNodes (T.pack "zzz") }
+    let missCmd = QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = QT.FindNodes (T.pack "zzz") }
     (code2, out2, _) <- withCaptured dir (\hO hE -> runQueryCmd hO hE missCmd)
     code2 @?= ExitSuccess
     out2 @?= renderResult (runQuery g (qcCommand missCmd))
     -- LoadFileMissing → exit 1,訊息含路徑
     let gone = dir </> "nope.json"
     (code3, _, err3) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = gone, qcLevel = QT.LevelAll, qcCommand = QT.RankConnectivity 3 })
+      QueryCmd { qcFile = gone, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = QT.RankConnectivity 3 })
     code3 @?= ExitFailure 1
     assertHasAll "missing-file stderr" err3 ["query:", takeFileName gone]
     -- LoadParseError → exit 1,訊息指出問題
     let badP = dir </> "bad.json"
     writeUtf8 badP "{"
     (code4, _, err4) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = badP, qcLevel = QT.LevelAll, qcCommand = QT.RankConnectivity 3 })
+      QueryCmd { qcFile = badP, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = QT.RankConnectivity 3 })
     code4 @?= ExitFailure 1
     assertHasAll "parse-error stderr" err4 ["query:", takeFileName badP]
     -- LoadSchemaError(缺 nodes)→ exit 1
     let schemaP = dir </> "schema.json"
     writeUtf8 schemaP "{\"directed\":true,\"links\":[]}"
     (code5, _, err5) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = schemaP, qcLevel = QT.LevelAll, qcCommand = QT.RankConnectivity 3 })
+      QueryCmd { qcFile = schemaP, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = QT.RankConnectivity 3 })
     code5 @?= ExitFailure 1
     assertHasAll "schema-error stderr" err5 ["query:", "nodes"]
     -- 未知 relation:exit 0,但 stderr 有通道 5 的提示(驗收標準 8)
@@ -5048,19 +5052,19 @@ testRunQuery = testCase "test_run_query" $
         twoNodes = [jsonNode "A" "A" "src/A.hs", jsonNode "B" "B" "src/B.hs"]
     writeUtf8 relP (fixtureJson twoNodes [jsonLink "A" "B" "foo"])
     (code6, _, err6) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = relP, qcLevel = QT.LevelAll, qcCommand = QT.RankConnectivity 3 })
+      QueryCmd { qcFile = relP, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = QT.RankConnectivity 3 })
     code6 @?= ExitSuccess
     assertHasAll "unknown-relation stderr" err6
       ["query: unknown relation", "foo", "1", "edges"]
     -- 起點不存在:印提示但仍 exit 0(假設 A4)
     (code7, _, err7) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcCommand = QT.Reachable (qid "NoSuchNode") QT.Forward Nothing })
+      QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = QT.Reachable (qid "NoSuchNode") QT.Forward Nothing })
     code7 @?= ExitSuccess
     assertHasAll "node-not-found stderr" err7 ["query: node not found: NoSuchNode"]
     -- 回歸(階段二閘門):missingNodeLines 改走 queryGraphHasNode 後行為不變
     -- (a) ShortestPath 兩端都不存在 → 兩條提示,仍 exit 0
     (code7b, _, err7b) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = out, qcLevel = QT.LevelAll
+      QueryCmd { qcFile = out, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct
                , qcCommand = QT.ShortestPath (qid "NoSuchFrom") (qid "NoSuchTo") })
     code7b @?= ExitSuccess
     assertHasAll "both-endpoints-missing stderr" err7b
@@ -5075,14 +5079,14 @@ testRunQuery = testCase "test_run_query" $
     writeUtf8 structP
       (fixtureJson sNodes [jsonLink "A" "B" "imports", jsonLink "A" "Lonely" "contains"])
     (code7c, _, err7c) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = structP, qcLevel = QT.LevelAll
+      QueryCmd { qcFile = structP, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct
                , qcCommand = QT.Reachable (qid "Lonely") QT.Forward Nothing })
     code7c @?= ExitSuccess
     assertBool ("a structural-only node exists: " <> show err7c)
       (not (hasText "node not found" err7c))
     -- 兩端都存在但不連通:零提示、空結果、exit 0
     (code8, out8, err8) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-      QueryCmd { qcFile = relP, qcLevel = QT.LevelAll, qcCommand = QT.ShortestPath (qid "A") (qid "B") })
+      QueryCmd { qcFile = relP, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = QT.ShortestPath (qid "A") (qid "B") })
     code8 @?= ExitSuccess
     assertBool ("existing endpoints need no hint: " <> show err8)
       (not (hasText "node not found" err8))
@@ -5503,13 +5507,18 @@ testCodegraphOutputUnchanged = testCase "test_codegraph_output_unchanged" $
     er <- moduleLayer root pm
     let g       = buildGraph defBuildOpts pm er
         encoded = BSL.toStrict (BB.toLazyByteString (encodeCodegraph Nothing g))
-    expected <- BS.readFile golden
-    assertBool
-      (name <> ": codegraph bytes drifted from " <> golden
-        <> " (expected " <> show (BS.length expected) <> " bytes, got "
-        <> show (BS.length encoded) <> ")\n--- got ---\n"
-        <> T.unpack (TE.decodeUtf8 encoded))
-      (encoded == expected)
+    -- 黃金檔更新模式(G-E007 起):刻意的格式擴充才用,重產後以 git diff 逐檔審視
+    regen <- lookupEnv "KNOT_REGEN_GOLDEN"
+    if regen == Just "1"
+      then BS.writeFile golden encoded
+      else do
+        expected <- BS.readFile golden
+        assertBool
+          (name <> ": codegraph bytes drifted from " <> golden
+            <> " (expected " <> show (BS.length expected) <> " bytes, got "
+            <> show (BS.length encoded) <> ")\n--- got ---\n"
+            <> T.unpack (TE.decodeUtf8 encoded))
+          (encoded == expected)
 
 --------------------------------------------------------------------------------
 -- G-E004 契約標籤對帳與 ModuleName 的傳遞型 re-export
@@ -6515,7 +6524,7 @@ testE001QueryLevelFlagsParse = testCase "test_e001_query_level_flags_parse" $ do
   removePathForcibly dir
   createDirectoryIfMissing True dir
   (code, out, err) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
-    QueryCmd { qcFile = "test/fixtures/golden/graph.json", qcLevel = QT.LevelDecl
+    QueryCmd { qcFile = "test/fixtures/golden/graph.json", qcLevel = QT.LevelDecl, qcScope = QT.ScopeProduct
              , qcCommand = QT.Reachable (qid "Demo.Core") QT.Forward Nothing })
   code @?= ExitSuccess
   assertHasAll "not-at-level stderr" err ["query: node Demo.Core is not at level decl"]
@@ -6826,3 +6835,221 @@ testE002AutogenEndToEnd = testCase "test_e002_autogen_end_to_end" $ do
       (any (\f -> case f of FactDecl { fdName = q } -> qnOcc q == T.pack "banner"; _ -> False) (erFacts er))
   d <- readUtf8 ".design/subsystems/extraction/design.md"
   assertBool "rule 9 mentions autogen" (hasText "autogen" d)
+
+--------------------------------------------------------------------------------
+-- global/G-E007 test-layer
+--------------------------------------------------------------------------------
+
+globalE007Tests :: TestTree
+globalE007Tests = testGroup "global/G-E007 test-layer"
+  [ testE007NodeComponent        -- T1
+  , testE007EncodeComponent      -- T2
+  , testE007ScopeAndTestsOf      -- T3
+  , testE007ScopeFlagsParse      -- T4
+  , testE007TestsOnEndToEnd      -- T5
+  , testE007DocsMentionScope     -- T5
+  ]
+
+-- G-E007 T1:comps fixture(includeTests)各檔的 component(產品優先、decl 沿用所屬檔);
+-- gfOwners 每檔一筆;no-cabal 全 Nothing
+testE007NodeComponent :: TestTree
+testE007NodeComponent = testCase "test_e007_node_component" $ do
+  pm <- loadProjectMeta ((defOpts compsFixture) { includeTests = True })
+  er <- moduleLayer compsFixture pm
+  let cg = buildGraph defBuildOpts pm er
+      compOf file = nubOrd [ gnComponent n | n <- cgNodes cg, gnFile n == file ]
+  compOf "app/Main.hs"          @?= [Just (T.pack "comps:exe:comps-exe")]
+  compOf "test/Spec.hs"         @?= [Just (T.pack "comps:test:comps-test")]
+  compOf "bench/Bench.hs"       @?= [Just (T.pack "comps:bench:comps-bench")]
+  compOf "src/Comps/Core.hs"    @?= [Just (T.pack "comps:lib:comps")]
+  compOf "src/sub/Comps/Sub.hs" @?= [Just (T.pack "comps:lib:sub")]
+  compOf "examples/Demo.hs"     @?= [Nothing]
+  let gated = gateFacts pm (erFacts er)
+  Map.lookup "app/Main.hs" (gfOwners gated) @?= Just (T.pack "comps:exe:comps-exe")
+  Map.member "examples/Demo.hs" (gfOwners gated) @?= False
+  -- decl 節點沿用所屬檔:手寫一筆 src/Comps/Core.hs 的 FactDecl
+  let decl = FactDecl { fdName = qn "Comps.Core" "core" ValueNs, fdKind = ValueDecl
+                      , fdFile = "src/Comps/Core.hs", fdLine = 3, fdGenerated = False }
+      gated' = gateFacts pm (erFacts er <> [decl])
+  [ gnComponent n | n <- mintNodes gated', gnFile n == "src/Comps/Core.hs", gnKind n /= ModuleNode ]
+    @?= [Just (T.pack "comps:lib:comps")]
+  pmN <- loadProjectMeta (defOpts "test/fixtures/no-cabal")
+  erN <- moduleLayer "test/fixtures/no-cabal" pmN
+  let cgN = buildGraph defBuildOpts pmN erN
+  assertBool "no-cabal nodes exist" (not (null (cgNodes cgN)))
+  nubOrd (map gnComponent (cgNodes cgN)) @?= [Nothing]
+  Map.null (gfOwners (gateFacts pmN (erFacts erN))) @?= True
+
+-- G-E007 T2:有 / 無 component 的節點 JSON 逐字;欄位序 source_file → component → source_location
+testE007EncodeComponent :: TestTree
+testE007EncodeComponent = testCase "test_e007_encode_component" $ do
+  let withC = (xNode "Main@app/Main.hs" "Main" "app/Main.hs" (Just 3))
+                { gnComponent = Just (T.pack "comps:exe:comps-exe") }
+      noC   = xNode "Demo" "Demo" "examples/Demo.hs" Nothing
+      cg    = CodeGraph { cgNodes = [withC, noC], cgEdges = [], cgStats = zeroStats, cgWarnings = [] }
+      out   = T.unpack (TE.decodeUtf8 (BSL.toStrict (BB.toLazyByteString (encodeCodegraph Nothing cg))))
+  assertBool ("field order source_file -> component -> source_location, got: " <> out)
+    ("{\"id\":\"Main@app/Main.hs\",\"label\":\"Main\",\"source_file\":\"app/Main.hs\",\"component\":\"comps:exe:comps-exe\",\"source_location\":\"L3\"}"
+      `isInfixOf` out)
+  assertBool ("no component key when Nothing, got: " <> out)
+    ("{\"id\":\"Demo\",\"label\":\"Demo\",\"source_file\":\"examples/Demo.hs\"}" `isInfixOf` out)
+
+jsonNodeC :: String -> String -> String -> String -> String
+jsonNodeC i l f c = concat
+  [ "{\"id\":\"", i, "\",\"label\":\"", l, "\",\"source_file\":\"", f
+  , "\",\"component\":\"", c, "\"}" ]
+
+-- | 產品 P1 / P2、測試 T1(test:)/ T2(bench:)、無 component 的 M;
+-- T1 calls P1、T2 calls T1、P2 imports P1、M imports P2。
+scopeFixtureJson :: String
+scopeFixtureJson = fixtureJson
+  [ jsonNodeC "P1" "P1" "src/P1.hs" "pkg:lib:pkg", jsonNodeC "P2" "P2" "src/P2.hs" "pkg:lib:pkg"
+  , jsonNodeC "T1" "T1" "test/T1.hs" "pkg:test:pkg-test"
+  , jsonNodeC "T2" "T2" "bench/T2.hs" "pkg:bench:pkg-bench"
+  , jsonNode "M" "M" "src/M.hs" ]
+  [ jsonLink "T1" "P1" "calls", jsonLink "T2" "T1" "calls"
+  , jsonLink "P2" "P1" "imports", jsonLink "M" "P2" "imports" ]
+
+-- G-E007 T3:qnComponent 解析、restrictScope 三態、TestsOf / TestSet、render;無 component 全產品
+testE007ScopeAndTestsOf :: TestTree
+testE007ScopeAndTestsOf = testCase "test_e007_scope_and_tests_of" $ do
+  g <- loadFixture scopeFixtureJson
+  let ids = map QT.qnId . QT.qgNodes
+      compOf i = QT.qnComponent =<< Map.lookup i (QT.qgIndex g)
+  compOf (qid "T1") @?= Just (T.pack "pkg:test:pkg-test")
+  compOf (qid "M")  @?= Nothing
+  map QT.isTestNode (QT.qgNodes g) @?= [False, False, False, True, True]   -- id 升序 M P1 P2 T1 T2
+  ids (KQ.restrictScope QT.ScopeProduct g) @?= map qid ["M", "P1", "P2"]
+  ids (KQ.restrictScope QT.ScopeTests g)   @?= map qid ["T1", "T2"]
+  KQ.restrictScope QT.ScopeAll g @?= g
+  -- 度數依留下的邊重算:T1→P1 在產品圖上消失
+  Map.lookup (qid "P1") (QT.qgInDeg g) @?= Just 2
+  Map.lookup (qid "P1") (QT.qgInDeg (KQ.restrictScope QT.ScopeProduct g)) @?= Just 1
+  -- 與 restrictLevel 可交換
+  KQ.restrictScope QT.ScopeTests (KQ.restrictLevel QT.LevelModule g)
+    @?= KQ.restrictLevel QT.LevelModule (KQ.restrictScope QT.ScopeTests g)
+  KQ.queryGraphHasTests g @?= True
+  KQ.queryGraphHasTests (KQ.restrictScope QT.ScopeProduct g) @?= False
+  -- TestsOf:反向、不限深度、只留測試節點;途經的產品節點不入列;目標不存在 → 空
+  runQuery g (QT.TestsOf (qid "P1"))   @?= QT.TestSet [(qid "T1", 1), (qid "T2", 2)]
+  runQuery g (QT.TestsOf (qid "M"))    @?= QT.TestSet []
+  runQuery g (QT.TestsOf (qid "Nope")) @?= QT.TestSet []
+  runQuery (KQ.restrictScope QT.ScopeProduct g) (QT.TestsOf (qid "P1")) @?= QT.TestSet []
+  renderResult (QT.TestSet [(qid "T1", 1), (qid "T2", 2)])
+    @?= T.pack "tests-of: 2 nodes\n  1  T1\n  2  T2\n"
+  renderResult (QT.TestSet []) @?= T.pack "tests-of: 0 nodes\n"
+  -- 無 component 的圖:ScopeProduct 恆等、ScopeTests 空圖
+  g0 <- loadFixture levelFixtureJson
+  KQ.restrictScope QT.ScopeProduct g0 @?= g0
+  QT.qgNodes (KQ.restrictScope QT.ScopeTests g0) @?= []
+  KQ.queryGraphHasTests g0 @?= False
+  -- component 有鍵但不是字串 → 壞檔
+  case parseAt "bad.json"
+         (fixtureJson ["{\"id\":\"A\",\"label\":\"A\",\"source_file\":\"a.hs\",\"component\":1}"] []) of
+    Left (QT.LoadSchemaError msg) ->
+      assertBool (show msg) (hasText "nodes[0]: field \"component\" is not a string" msg)
+    other -> assertFailure ("expected LoadSchemaError, got " <> show other)
+
+-- G-E007 T4:--scope 三值與預設、tests-of 子命令、壞值失敗;無測試節點的提示、不在 scope 的提示、
+-- tests-of 不受 --scope 影響
+testE007ScopeFlagsParse :: TestTree
+testE007ScopeFlagsParse = testCase "test_e007_scope_flags_parse" $ do
+  q1 <- expectQueryCmd ["query", "--scope", "tests", "rank", "--top", "3"]
+  qcScope q1 @?= QT.ScopeTests
+  qcCommand q1 @?= QT.RankConnectivity 3
+  q2 <- expectQueryCmd ["query", "tests-of", "X"]
+  qcScope q2 @?= QT.ScopeProduct
+  qcCommand q2 @?= QT.TestsOf (qid "X")
+  q3 <- expectQueryCmd ["query", "--scope", "all", "--level", "decl", "find", "x"]
+  qcScope q3 @?= QT.ScopeAll
+  qcLevel q3 @?= QT.LevelDecl
+  _ <- expectParseFailure ["query", "--scope", "foo", "find", "x"]
+  _ <- expectParseFailure ["query", "tests-of"]
+  tmp <- getTemporaryDirectory
+  let dir = tmp </> "knot-hs-e007-scope-msg"
+  removePathForcibly dir
+  createDirectoryIfMissing True dir
+  -- (a) 無測試節點的圖上跑 tests-of:提示、仍 exit 0、stdout 是正常的空結果
+  (code, out, err) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+    QueryCmd { qcFile = "test/fixtures/golden/graph.json", qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct
+             , qcCommand = QT.TestsOf (qid "Demo.Core") })
+  code @?= ExitSuccess
+  assertHasAll "no-tests hint" err
+    ["query: graph has no test components; rerun knot extract --include-tests"]
+  assertBool "stdout is an empty tests-of result" (T.pack "tests-of: 0 nodes" `T.isPrefixOf` out)
+  -- (b) 節點在、但被 --scope 收斂掉
+  writeUtf8 (dir </> "scoped.json") scopeFixtureJson
+  (code2, out2, err2) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+    QueryCmd { qcFile = dir </> "scoped.json", qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct
+             , qcCommand = QT.Reachable (qid "T1") QT.Forward Nothing })
+  code2 @?= ExitSuccess
+  assertHasAll "not-in-scope stderr" err2 ["query: node T1 is not in scope product"]
+  assertBool "empty result" (T.pack "reachable: 0 nodes" `T.isPrefixOf` out2)
+  -- (c) tests-of 在預設 --scope product 下照樣找得到測試(規則 10)
+  (code3, out3, err3) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+    QueryCmd { qcFile = dir </> "scoped.json", qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct
+             , qcCommand = QT.TestsOf (qid "P1") })
+  code3 @?= ExitSuccess
+  err3 @?= T.empty
+  out3 @?= T.pack "tests-of: 2 nodes\n  1  T1\n  2  T2\n"
+  removePathForcibly dir
+
+-- G-E007 T5:tests-on 端到端——includeTests 圖上 tests-of TOn.Core.core 指回兩個測試節點;
+-- --scope product 的輸出與不帶 includeTests 抽取的圖逐字相同;灌水對照
+testE007TestsOnEndToEnd :: TestTree
+testE007TestsOnEndToEnd = testCase "test_e007_tests_on_end_to_end" $
+  withFixtureScratch testsOnFixture "e007-tests-on" $ \root -> do
+    let bytes cg = T.unpack (TE.decodeUtf8 (BSL.toStrict (BB.toLazyByteString (encodeCodegraph Nothing cg))))
+    pmOn <- loadProjectMeta ((defOpts root) { includeTests = True })
+    erOn <- expectRight =<< extract (extOpts root) pmOn
+    let cgOn = buildGraph defBuildOpts pmOn erOn
+    nubOrd [ gnComponent n | n <- cgNodes cgOn, "test/" `isPrefixOf` gnFile n ]
+      @?= [Just (T.pack "tests-on:test:ton-test")]
+    nubOrd [ gnComponent n | n <- cgNodes cgOn, "src/" `isPrefixOf` gnFile n ]
+      @?= [Just (T.pack "tests-on:lib:tests-on")]
+    gOn <- expectRight (parseAt "on.json" (bytes cgOn))
+    -- 四個測試節點:TOn.Helper 的 import 清單直接點名 core(module → decl 邊,距離 1)、
+    -- helper 呼叫 core(1);Main 與 Main.main 經 helper 到達(2)。全 level 的圖上 module 節點也算
+    let expected = [ (qid "TOn.Helper", 1), (qid "TOn.Helper.helper", 1)
+                   , (qid "Main", 2), (qid "Main.main", 2) ]
+    runQuery gOn (QT.TestsOf (qid "TOn.Core.core")) @?= QT.TestSet expected
+    -- --level decl 下只剩兩個 decl 節點
+    runQuery (KQ.restrictLevel QT.LevelDecl gOn) (QT.TestsOf (qid "TOn.Core.core"))
+      @?= QT.TestSet [(qid "TOn.Helper.helper", 1), (qid "Main.main", 2)]
+    -- 灌水對照:同一題在 ScopeAll 與 ScopeProduct 的答案
+    let gProd = KQ.restrictScope QT.ScopeProduct gOn
+    -- 反向可達多一個 TOn.Core(export 清單點名 core 的 module → decl 邊,產品節點);
+    -- tests-of 把它濾掉,--scope product 則只剩它
+    runQuery gOn (QT.Reachable (qid "TOn.Core.core") QT.Reverse Nothing)
+      @?= QT.ReachableSet ((qid "TOn.Core", 1) : expected)
+    runQuery gProd (QT.Reachable (qid "TOn.Core.core") QT.Reverse Nothing)
+      @?= QT.ReachableSet [(qid "TOn.Core", 1)]
+    -- --scope product 的圖 = 不帶 includeTests 抽取的圖(四個查詢逐字相同)
+    pmOff <- loadProjectMeta (defOpts root)
+    erOff <- expectRight =<< extract (extOpts root) pmOff
+    gOff <- expectRight (parseAt "off.json" (bytes (buildGraph defBuildOpts pmOff erOff)))
+    let render g cmd = renderResult (runQuery g cmd)
+    forM_ [ QT.RankConnectivity 10, QT.FindNodes (T.pack "core")
+          , QT.Reachable (qid "TOn.Core") QT.Reverse Nothing
+          , QT.ShortestPath (qid "TOn.Core") (qid "TOn.Core.core") ] $ \cmd ->
+      render gProd cmd @?= render gOff cmd
+    map QT.qnId (QT.qgNodes gProd) @?= map QT.qnId (QT.qgNodes gOff)
+
+-- G-E007 T5:文件——三份提到 --scope 與 tests-of;export-query 規則 9、10;graph-core 的兩個新欄位;ADR-008 accepted
+testE007DocsMentionScope :: TestTree
+testE007DocsMentionScope = testCase "test_e007_docs_mention_scope" $ do
+  forM_ [".design/subsystems/export-query/design.md", ".design/system.md", "README.md"] $ \p -> do
+    s <- readUtf8 p
+    assertBool (p <> " mentions --scope") (hasText "--scope" s)
+    assertBool (p <> " mentions tests-of") (hasText "tests-of" s)
+  d <- readUtf8 ".design/subsystems/export-query/design.md"
+  assertBool "rule 9"  (hasText "9. **範圍" d)
+  assertBool "rule 10" (hasText "10. **`TestsOf`" d)
+  assertBool "node field component" (hasText "`component`(`gnComponent`" d)
+  gc <- readUtf8 ".design/subsystems/graph-core/design.md"
+  assertBool "gnComponent" (hasText "gnComponent :: Maybe Text" gc)
+  assertBool "gfOwners"    (hasText "gfOwners   :: Map FilePath Text" gc)
+  sysd <- readUtf8 ".design/system.md"
+  assertBool "system.md nodes[] component" (hasText "選填 `component`" sysd)
+  adr <- readUtf8 ".design/adr/ADR-008-node-component-field.md"
+  assertBool "ADR-008 accepted" (hasText "status: accepted" adr)

@@ -125,9 +125,11 @@ knot query find KEYWORD                         # id 或 label 含 KEYWORD 的�
 knot query reachable ID [--reverse] [--depth N] # 從 ID 可達的節點;--reverse 改問「誰依賴它」;--depth 只回 N 跳內
 knot query path FROM TO                         # 兩點最短路徑
 knot query rank [--top N]                       # 連通度排名(預設前 10)
+knot query tests-of ID                          # 哪些測試(直接或間接)依賴 ID
 
-  --graph FILE                 要查哪份圖(預設 ./codegraph.json,四個子命令共用)
-  --level all|module|decl      先把圖收斂到一層再查(預設 all;四個子命令共用)
+  --graph FILE                 要查哪份圖(預設 ./codegraph.json,子命令共用)
+  --level all|module|decl      先把圖收斂到一層再查(預設 all;子命令共用)
+  --scope product|tests|all    先把圖收斂到產品碼或測試碼再查(預設 product;tests-of 不受影響)
 ```
 
 `--level module` 只留 module 節點與它們之間的 `imports` 邊——「誰依賴誰」「哪個 module 是
@@ -141,8 +143,24 @@ knot query --level module reachable Knot.Extract.Pipeline --depth 1 --reverse  #
 knot query --level module rank --top 10                                        # module 層 hub
 ```
 
-`--graph` 與 `--level` 是 `knot query` 自己的選項,要寫在子命令**之前**(optparse 的慣例:
+`--graph`、`--level` 與 `--scope` 是 `knot query` 自己的選項,要寫在子命令**之前**(optparse 的慣例:
 子命令之後的旗標屬於該子命令)。
+
+#### 測試碼:`--scope` 與 `tests-of`
+
+`knot extract --include-tests` 會把 test-suite / benchmark 也建起來納入圖中,每個節點以
+選填欄位 `component`(`<套件>:<component>`,如 `knot-hs:test:knot-test`)標記所屬。查詢時
+**預設 `--scope product`**:測試節點被收斂掉,`rank` / `reachable` 不會被「什麼都 import」
+的測試檔灌水——輸出與不帶 `--include-tests` 的圖相同。`--scope tests` 只看測試碼,
+`--scope all` 兩者都看。
+
+```bash
+knot query tests-of Knot.Query.Load.restrictLevel   # 改它會壞哪些測試(反向可達、只留測試節點)
+knot query --scope tests rank --top 5                # 測試碼自己的 hub
+```
+
+`tests-of` 永遠在整張圖上找(不受 `--scope` 影響);圖裡沒有任何測試節點時會在 stderr
+提示重跑 `knot extract --include-tests`。
 
 節點 id 的長相:module 是裸名(`Demo.Core`),值宣告是 `<module>.<occ>`
 (`Demo.Core.render`),型別宣告多一個 `#t`(`Demo.Core.Foo#t`,與建構子 `Demo.Core.Foo`

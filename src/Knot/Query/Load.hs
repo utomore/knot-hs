@@ -16,14 +16,17 @@ module Knot.Query.Load
   ( -- * 對外契約
     queryGraphNotes
   , queryGraphHasNode
+  , queryGraphHasTests
     -- * 非契約面(1-to-1 測試與 F003 取用)
   , parseQueryGraph
   , RelationClass (..)
   , classifyRelation
   , dependencyRelations
   , structuralRelations
-    -- * E001:層的誘導子圖(Level 2 模組間公開介面,經 "Knot.Query" 匯出)
-  , restrictLevel
+    -- * 誘導子圖(Level 2 模組間公開介面,經 "Knot.Query" 匯出)
+  , restrictLevel   -- E001:層
+  , restrictScope   -- G-E007:範圍
+  , restrictNodes   -- 兩者共用的機制(非契約面)
   ) where
 
 import Control.Monad (foldM)
@@ -47,6 +50,9 @@ import Knot.Query.Types
   , NodeId (..)
   , QueryGraph (..)
   , QueryNode (..)
+  , Scope (..)
+  , inScope
+  , isTestNode
   )
 
 --------------------------------------------------------------------------------
@@ -109,6 +115,12 @@ queryGraphNotes = qgNotes
 -- __全部__節點(查詢規則 3),連只被結構類邊(如 @contains@)連到的也在內。
 queryGraphHasNode :: QueryGraph -> NodeId -> Bool
 queryGraphHasNode g nid = Map.member nid (qgIndex g)
+
+-- | 圖上是否有任何測試節點(G-E007)。與 'queryGraphHasNode' 同一個理由存在:
+-- @tests-of@ 回空集合時,CLI 要能分辨「沒有測試依賴它」與「這張圖根本沒建測試」
+-- (後者該提示重跑 @knot extract --include-tests@),而不必讀 'QueryGraph' 內部欄位。
+queryGraphHasTests :: QueryGraph -> Bool
+queryGraphHasTests = any isTestNode . qgNodes
 
 --------------------------------------------------------------------------------
 -- 錯誤訊息
@@ -185,7 +197,8 @@ requiredString path locus obj k = case KM.lookup (key k) obj of
   Just _          -> schemaErr path [locus, "field " ++ show k ++ " is not a string"]
   Nothing         -> schemaErr path [locus, "missing required field " ++ show k]
 
--- | 步驟 4:@id@ \/ @label@ \/ @source_file@ 三鍵;其餘欄位(@source_location@ 等)
+-- | 步驟 4:@id@ \/ @label@ \/ @source_file@ 三鍵必要;@component@ 選填(G-E007,
+-- 缺鍵 = 'Nothing',有鍵就必須是字串);其餘欄位(@source_location@ 等)
 -- 一律忽略(ADR-003:多餘欄位可安全擴充)。
 parseNode :: FilePath -> Int -> Value -> Either LoadError QueryNode
 parseNode path i v = case v of
@@ -193,10 +206,19 @@ parseNode path i v = case v of
     nid   <- requiredString path locus o "id"
     label <- requiredString path locus o "label"
     file  <- requiredString path locus o "source_file"
-    pure QueryNode { qnId = NodeId nid, qnLabel = label, qnFile = T.unpack file }
+    comp  <- optionalString path locus o "component"
+    pure QueryNode
+      { qnId = NodeId nid, qnLabel = label, qnFile = T.unpack file, qnComponent = comp }
   _ -> schemaErr path [locus, "element is not a JSON object"]
  where
   locus = "nodes[" ++ show i ++ "]"
+
+-- | 物件的選填字串欄位:缺鍵合法,有鍵但不是字串是壞檔。
+optionalString :: FilePath -> String -> KM.KeyMap Value -> String -> Either LoadError (Maybe Text)
+optionalString path locus obj k = case KM.lookup (key k) obj of
+  Nothing         -> Right Nothing
+  Just (String t) -> Right (Just t)
+  Just _          -> schemaErr path [locus, "field " ++ show k ++ " is not a string"]
 
 -- | 步驟 5:重複 id 是壞檔(不做「後者覆蓋」,假設 A3)。
 buildIndex :: FilePath -> [(Int, QueryNode)] -> Either LoadError (Map NodeId QueryNode)
@@ -284,19 +306,18 @@ addDependency acc (s, t) = acc
   }
 
 --------------------------------------------------------------------------------
--- 層的誘導子圖(查詢規則 7,E001)
+-- 誘導子圖(查詢規則 7 的層,E001;規則 9 的範圍,G-E007)
 --------------------------------------------------------------------------------
 
--- | 把圖收斂為指定層的誘導子圖(Level 2 模組間公開介面)。
+-- | 以節點述詞收斂為誘導子圖('restrictLevel' 與 'restrictScope' 共用的機制)。
 --
--- * 'LevelAll' 恆等(連 'Eq' 都相等)
--- * 'LevelModule' 只留__不是__ @contains@ 目標的節點;'LevelDecl' 只留是的
 -- * 邊只留兩端都保留者,鄰接表與度數依留下的邊__重算__(走 'addDependency',
 --   與載入同一條路徑);'qgNotes' 不動(未知 relation 的統計屬整份檔案)
 -- * 決定性:節點序沿用 'qgNodes' 的 id 升序、鄰居仍 'Set.toAscList'
-restrictLevel :: Level -> QueryGraph -> QueryGraph
-restrictLevel LevelAll g = g
-restrictLevel lvl g = g
+-- * 兩次收斂可交換:@restrictScope s . restrictLevel l@ 與反之結果相同
+--   (都是「兩述詞的交集」的誘導子圖)
+restrictNodes :: (QueryNode -> Bool) -> QueryGraph -> QueryGraph
+restrictNodes keep g = g
   { qgNodes     = nodes
   , qgIndex     = index
   , qgForward   = Map.map Set.toAscList (accForward acc)
@@ -307,11 +328,29 @@ restrictLevel lvl g = g
   , qgDepEdges  = edges
   }
  where
-  isDecl n = qnId n `Set.member` qgDeclNodes g
-  keep n = case lvl of
-    LevelDecl -> isDecl n
-    _         -> not (isDecl n)
   nodes = filter keep (qgNodes g)
   index = Map.filter keep (qgIndex g)
   edges = [ e | e@(s, t) <- qgDepEdges g, Map.member s index, Map.member t index ]
   acc   = foldl' addDependency emptyAcc edges
+
+-- | 把圖收斂為指定層的誘導子圖(Level 2 模組間公開介面,E001)。
+--
+-- * 'LevelAll' 恆等(連 'Eq' 都相等)
+-- * 'LevelModule' 只留__不是__ @contains@ 目標的節點;'LevelDecl' 只留是的
+restrictLevel :: Level -> QueryGraph -> QueryGraph
+restrictLevel LevelAll g = g
+restrictLevel lvl g = restrictNodes keep g
+ where
+  isDecl n = qnId n `Set.member` qgDeclNodes g
+  keep n = case lvl of
+    LevelDecl -> isDecl n
+    _         -> not (isDecl n)
+
+-- | 把圖收斂為指定範圍的誘導子圖(Level 2 模組間公開介面,G-E007)。
+--
+-- * 'ScopeAll' 恆等(連 'Eq' 都相等)
+-- * 'ScopeProduct' 只留非測試節點、'ScopeTests' 只留測試節點('isTestNode')
+-- * 沒有 @component@ 欄位的圖:'ScopeProduct' 恆等、'ScopeTests' 空圖
+restrictScope :: Scope -> QueryGraph -> QueryGraph
+restrictScope ScopeAll g = g
+restrictScope s g = restrictNodes (inScope s) g

@@ -61,10 +61,13 @@ import Knot.Query
   , NodeId (..)
   , QueryCommand (..)
   , QueryGraph
+  , Scope (..)
   , loadQueryGraph
   , queryGraphHasNode
+  , queryGraphHasTests
   , renderResult
   , restrictLevel
+  , restrictScope
   , runQuery
   )
 
@@ -166,10 +169,16 @@ runQueryCmd hOut hErr cmd = do
       emitNotes hErr [T.pack "query: " <> loadErrorText e]
       pure (ExitFailure 1)
     Right g0 -> do
-      -- E001:先依 --level 收斂為誘導子圖,四個查詢都在收斂後的圖上跑(查詢規則 7)
-      let g = restrictLevel (qcLevel cmd) g0
+      -- E001:先依 --level 收斂為誘導子圖(查詢規則 7);G-E007:再依 --scope 收斂
+      -- (規則 9)——但 tests-of 永遠在 ScopeAll 的圖上跑(規則 10),否則結果恆空
+      let gl = restrictLevel (qcLevel cmd) g0
+          g  = case qcCommand cmd of
+                 TestsOf _ -> gl
+                 _         -> restrictScope (qcScope cmd) gl
       emitNotes hErr (queryNoteLines g0)
-      emitNotes hErr (missingNodeLines (qcLevel cmd) g0 g (qcCommand cmd))
+      emitNotes hErr (missingNodeLines (qcLevel cmd) g0 gl (qcCommand cmd))
+      emitNotes hErr (scopeMissingLines (qcScope cmd) gl g (qcCommand cmd))
+      emitNotes hErr (noTestsLines g0 (qcCommand cmd))
       TIO.hPutStr hOut (renderResult (runQuery g (qcCommand cmd)))
       -- 查無結果也是 0(空結果是正常結果,不是載入失敗)
       pure ExitSuccess
@@ -206,15 +215,42 @@ missingNodeLines lvl full restricted cmd = concat
       -- E001:節點在,但被 --level 收斂掉了——不能靜默回空,否則分不出「不存在」與「不在該層」
       then [T.concat [T.pack "query: node ", t, T.pack " is not at level ", levelText lvl]]
     else []
-  | nid@(NodeId t) <- endpoints
+  | nid@(NodeId t) <- commandEndpoints cmd
   ]
  where
-  endpoints = case cmd of
-    Reachable start _ _  -> [start]
-    ShortestPath from to -> [from, to]
-    FindNodes _          -> []
-    RankConnectivity _   -> []
   levelText l = T.pack $ case l of
     LevelAll    -> "all"
     LevelModule -> "module"
     LevelDecl   -> "decl"
+
+-- | 節點在層內、卻被 @--scope@ 收斂掉時的提示(G-E007)。第一個圖是 @--level@ 後、
+-- 第二個是再經 @--scope@ 後的圖;兩者相同(@tests-of@ 或 @--scope all@)時恆空。
+scopeMissingLines :: Scope -> QueryGraph -> QueryGraph -> QueryCommand -> [Text]
+scopeMissingLines scope levelled scoped cmd =
+  [ T.concat [T.pack "query: node ", t, T.pack " is not in scope ", scopeText scope]
+  | nid@(NodeId t) <- commandEndpoints cmd
+  , queryGraphHasNode levelled nid
+  , not (queryGraphHasNode scoped nid)
+  ]
+ where
+  scopeText s = T.pack $ case s of
+    ScopeProduct -> "product"
+    ScopeTests   -> "tests"
+    ScopeAll     -> "all"
+
+-- | @tests-of@ 跑在一張沒有任何測試節點的圖上時的提示(G-E007):結果必然是空的,
+-- 但原因是「沒建測試」而不是「沒有測試依賴它」,不提示使用者會誤判。
+noTestsLines :: QueryGraph -> QueryCommand -> [Text]
+noTestsLines full cmd = case cmd of
+  TestsOf _ | not (queryGraphHasTests full) ->
+    [T.pack "query: graph has no test components; rerun knot extract --include-tests"]
+  _ -> []
+
+-- | 各指令的端點(存在性提示的對象)。
+commandEndpoints :: QueryCommand -> [NodeId]
+commandEndpoints cmd = case cmd of
+  Reachable start _ _  -> [start]
+  ShortestPath from to -> [from, to]
+  TestsOf target       -> [target]
+  FindNodes _          -> []
+  RankConnectivity _   -> []

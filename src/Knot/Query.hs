@@ -13,7 +13,9 @@ module Knot.Query
     loadQueryGraph
   , queryGraphNotes
   , queryGraphHasNode
+  , queryGraphHasTests
   , restrictLevel
+  , restrictScope
   , runQuery
   , renderResult
     -- * DTO
@@ -23,6 +25,7 @@ module Knot.Query
   , QueryCommand (..)
   , Direction (..)
   , Level (..)
+  , Scope (..)
   , QueryResult (..)
   ) where
 
@@ -32,7 +35,14 @@ import qualified Data.Text as T
 import System.IO.Error (isDoesNotExistError)
 
 import Knot.Query.Engine (runQuery)
-import Knot.Query.Load (parseQueryGraph, queryGraphHasNode, queryGraphNotes, restrictLevel)
+import Knot.Query.Load
+  ( parseQueryGraph
+  , queryGraphHasNode
+  , queryGraphHasTests
+  , queryGraphNotes
+  , restrictLevel
+  , restrictScope
+  )
 import Knot.Query.Render (renderResult)
 import Knot.Query.Types
   ( Direction (..)
@@ -42,6 +52,7 @@ import Knot.Query.Types
   , QueryCommand (..)
   , QueryGraph
   , QueryResult (..)
+  , Scope (..)
   )
 
 -- | 讀 @codegraph.json@ 並組成查詢用圖(Level 2 契約原文簽名)。
