@@ -24,6 +24,7 @@ module Knot.Extract.BuildDriver
   , enumerateHie
   , componentRefOf
   , failedUnitOf
+  , maxPathHint
   ) where
 
 import Control.Exception (IOException, displayException, try)
@@ -93,8 +94,11 @@ cabalArgs rootAbs buildDirAbs pm =
   , "--builddir=" <> buildDirAbs
   , "--ghc-options=-fwrite-ide-info"
   ]
-  <> [ "--enable-tests"      | included TestSuite ]
-  <> [ "--enable-benchmarks" | included Benchmark ]
+  -- B001:沒納入的一律__明確__ --disable-*,否則目標專案自己的 cabal.project
+  -- (tests: True)會讓 cabal 照建被排除的 test-suite——多花時間,而且它們的
+  -- .hie 路徑最長(<pkg>-test 重複四次),最先撞 Windows MAX_PATH。
+  <> [ if included TestSuite then "--enable-tests"      else "--disable-tests" ]
+  <> [ if included Benchmark then "--enable-benchmarks" else "--disable-benchmarks" ]
  where
   included k = or
     [ compKind c == k && not (compExcluded c)
@@ -136,7 +140,7 @@ runCabalWith exe rootAbs args = do
         ExitFailure c -> do
           let tlText = map (TE.decodeUtf8With lenientDecode) tl
               detail = T.intercalate (T.pack "\n")
-                         (T.pack ("cabal exited with " <> show c) : tlText)
+                         (T.pack ("cabal exited with " <> show c) : tlText <> maxPathHint tlText)
           pure (Left (BuildFailed (failedUnitOf tlText) detail))
  where
   -- 逐行轉發到本程序的 stderr,同時保留最後 tailLines 行(累積為正序清單)
@@ -152,6 +156,29 @@ runCabalWith exe rootAbs args = do
 
 tailLines :: Int
 tailLines = 40
+
+-- | B001:cabal 尾段出現 @CreateFile \"\<path\>\"@ 且 @\<path\>@ ≥ 'maxPathWarnAt' 字元時,
+-- 附一行 Windows MAX_PATH 的提示(長度、260 的上限、兩個解法)。純函數,不判 OS:
+-- 非 Windows 不會有 @CreateFile@ 字樣。沒命中回 @[]@。
+maxPathHint :: [Text] -> [Text]
+maxPathHint ls =
+  case [ n | l <- ls, Just n <- [createFilePathLen l], n >= maxPathWarnAt ] of
+    []      -> []
+    (n : _) ->
+      [ T.pack ("windows MAX_PATH: a path in this build is " <> show n
+               <> " characters (limit 260 unless long paths are enabled); move the project to a shorter path"
+               <> " (e.g. subst X: <root>) or enable Windows long paths, then run knot extract again") ]
+ where
+  createFilePathLen l =
+    case T.breakOn (T.pack "CreateFile \"") l of
+      (_, rest) | T.null rest -> Nothing
+                | otherwise   ->
+                    let p = T.takeWhile (/= '"') (T.drop (T.length (T.pack "CreateFile \"")) rest)
+                    in Just (T.length (T.replace (T.pack "\\\\") (T.pack "\\") p))
+
+-- | 提示門檻:離 260 只剩十幾個字元就值得說——module 再深一層就撞到。
+maxPathWarnAt :: Int
+maxPathWarnAt = 248
 
 -- | 盡力從 cabal 的輸出尾段解析失敗單元:
 -- @Failed to build exe:knot from knot-hs-0.0.1.0.@ → @knot-hs:exe:knot@。

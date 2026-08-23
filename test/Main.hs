@@ -41,13 +41,17 @@ import GHC.Clock (getMonotonicTime)
 import System.IO
   ( Handle
   , IOMode (WriteMode)
+  , hClose
   , hSetEncoding
   , hSetNewlineMode
+  , latin1
   , noNewlineTranslation
+  , openFile
   , utf8
   , withFile
   )
 import System.Process (readProcessWithExitCode)
+import Control.Exception (IOException, try)
 
 -- extraction/F004 T10:驗收標準 3 的「逐筆對帳」要獨立開 DB 查 refs 表。
 import Database.SQLite.Simple (Only (..), Query (..), execute_, query_, withConnection)
@@ -87,7 +91,7 @@ import Knot.App.Report
   , metaNoteLines
   , queryNoteLines
   )
-import Knot.App.Run (runCommand, runExtractCmd, runExtractCmdWith, runQueryCmd)
+import Knot.App.Run (prepareHandles, runCommand, runExtractCmd, runExtractCmdWith, runQueryCmd)
 import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummary)
 import Knot.Export (writeCodegraph)
 import Knot.Export.Commit (detectCommit)
@@ -110,6 +114,7 @@ import Knot.Extract.BuildDriver
   , failedUnitOf
   , knotBuildDir
   , knotDir
+  , maxPathHint
   , prepareKnotDir
   , runCabalWith
   )
@@ -138,6 +143,7 @@ import Knot.Extract.HiedbFacts
   , pickFromDecl
   , readIndexFacts
   , resolveModuleSource
+  , resolveModuleSourceFor
   , unavailableSourceDecls
   )
 import Knot.Extract.ImportScan
@@ -285,6 +291,9 @@ tests = testGroup "knot-hs"
   , extractionF008Tests
   , extractionE001Tests
   , exportQueryE001Tests
+  , extractionB001Tests
+  , extractionB002Tests
+  , exportQueryB001Tests
   , graphCoreF001Tests
   , graphCoreF002Tests
   , graphCoreF003Tests
@@ -5780,8 +5789,10 @@ testCabalInvocation :: TestTree
 testCabalInvocation = testCase "test_cabal_invocation" $ do
   -- (a) argv:基本四段;納入的 test / bench 才帶 --enable-*
   -- F006 加 --project-dir:cabal 只認指定的根目錄,不往上找別人的 cabal.project
+  -- B001:未納入的 test / bench 明確 --disable-*(目標專案自己的 tests: True 才壓得住)
   cabalArgs "/r" "/bd" (metaWithComponents [(MainLibrary, False), (Executable, False)])
-    @?= ["build", "all", "--project-dir=/r", "--builddir=/bd", "--ghc-options=-fwrite-ide-info"]
+    @?= [ "build", "all", "--project-dir=/r", "--builddir=/bd", "--ghc-options=-fwrite-ide-info"
+        , "--disable-tests", "--disable-benchmarks" ]
   let withTests = cabalArgs "/r" "/bd" (metaWithComponents [(TestSuite, False)])
       withBench = cabalArgs "/r" "/bd" (metaWithComponents [(Benchmark, False)])
       excluded  = cabalArgs "/r" "/bd" (metaWithComponents [(TestSuite, True), (Benchmark, True)])
@@ -6562,3 +6573,191 @@ testE001DefaultOutputUnchanged = testCase "test_e001_default_output_unchanged" $
       (not (T.pack "#" `T.isInfixOf` i)
         && maybe False (isUpper . fst) (T.uncons (last (T.splitOn (T.pack ".") i))))
   removePathForcibly gp
+
+--------------------------------------------------------------------------------
+-- extraction/B001 windows-max-path-hie
+--------------------------------------------------------------------------------
+
+extractionB001Tests :: TestTree
+extractionB001Tests = testGroup "extraction/B001 windows-max-path-hie"
+  [ testB001CabalArgsDisableExcluded   -- T1
+  , testB001MaxPathHint                -- T2
+  , testB001DocsMentionMaxPath         -- T3
+  ]
+
+-- B001 T1:未納入的 test / bench 明確 --disable-*;納入者 --enable-* 且無對應 --disable-*
+testB001CabalArgsDisableExcluded :: TestTree
+testB001CabalArgsDisableExcluded = testCase "test_b001_cabal_args_disable_excluded" $ do
+  let none     = cabalArgs "/r" "/bd" (metaWithComponents [(MainLibrary, False)])
+      excluded = cabalArgs "/r" "/bd" (metaWithComponents [(TestSuite, True), (Benchmark, True)])
+      onlyT    = cabalArgs "/r" "/bd" (metaWithComponents [(TestSuite, False), (Benchmark, True)])
+      both     = cabalArgs "/r" "/bd" (metaWithComponents [(TestSuite, False), (Benchmark, False)])
+  forM_ [none, excluded] $ \argv -> do
+    assertBool "--disable-tests when no test-suite included"      ("--disable-tests" `elem` argv)
+    assertBool "--disable-benchmarks when no benchmark included"  ("--disable-benchmarks" `elem` argv)
+    assertBool "no --enable-* without included components"
+      (not (any (`elem` argv) ["--enable-tests", "--enable-benchmarks"]))
+  assertBool "included test-suite → --enable-tests"        ("--enable-tests" `elem` onlyT)
+  assertBool "…and no --disable-tests"                     ("--disable-tests" `notElem` onlyT)
+  assertBool "excluded benchmark → --disable-benchmarks"   ("--disable-benchmarks" `elem` onlyT)
+  assertBool "both included → both --enable-*"
+    (all (`elem` both) ["--enable-tests", "--enable-benchmarks"]
+      && not (any (`elem` both) ["--disable-tests", "--disable-benchmarks"]))
+
+-- B001 T2:尾段含 ≥ 248 字元的 CreateFile 路徑 → 一行提示(長度、260、subst);否則無
+testB001MaxPathHint :: TestTree
+testB001MaxPathHint = testCase "test_b001_max_path_hint" $ do
+  let longPath  = "C:\\" <> concat (replicate 25 "segment12\\") <> "CabalSpec.hie"   -- 3 + 250 + 13
+      n         = length longPath
+      ghcLine p = T.pack ("      CreateFile \"" <> concatMap (\c -> if c == '\\' then "\\\\" else [c]) p <> "\"")
+      hint      = maxPathHint [T.pack "<no location info>: error:", ghcLine longPath]
+  assertBool ("fixture sanity: long path is " <> show n) (n >= 248)
+  case hint of
+    [h] -> do
+      assertBool "mentions the length"  (T.pack (show n) `T.isInfixOf` h)
+      assertBool "mentions the 260 limit" (T.pack "260" `T.isInfixOf` h)
+      assertBool "suggests subst"       (T.pack "subst" `T.isInfixOf` h)
+      assertBool "prefixed for grep"    (T.pack "windows MAX_PATH" `T.isPrefixOf` h)
+    other -> assertFailure ("expected exactly one hint, got " <> show other)
+  maxPathHint [ghcLine "C:\\short\\Foo.hie"] @?= []
+  maxPathHint [T.pack "Failed to build exe:knot from knot-hs-0.1.0.0."] @?= []
+  maxPathHint [] @?= []
+
+-- B001 T3:README 已知限制含 MAX_PATH;design.md 規則 5 含 --disable-tests
+testB001DocsMentionMaxPath :: TestTree
+testB001DocsMentionMaxPath = testCase "test_b001_docs_mention_max_path" $ do
+  r <- readUtf8 "README.md"
+  assertBool "README mentions MAX_PATH" (hasText "MAX_PATH" r)
+  d <- readUtf8 ".design/subsystems/extraction/design.md"
+  assertBool "rule 5 mentions --disable-tests" (hasText "--disable-tests" d)
+
+--------------------------------------------------------------------------------
+-- extraction/B002 monorepo-main-source-mapping
+--------------------------------------------------------------------------------
+
+extractionB002Tests :: TestTree
+extractionB002Tests = testGroup "extraction/B002 monorepo-main-source-mapping"
+  [ testB002ResolveForPackage      -- T1
+  , testB002InstancesUsePackage    -- T2
+  , testB002MultiExeEndToEnd       -- T3
+  ]
+
+multiExeFixture :: FilePath
+multiExeFixture = "test/fixtures/multi-exe"
+
+-- | 兩套件、兩個 app/Main.hs 的 ProjectMeta(B002 T1 用;不跑 cabal)
+multiExeMeta :: ProjectMeta
+multiExeMeta = emptyMeta
+  { pmPackages =
+      [ PackageMeta { pkgName = T.pack "a", pkgCabalFile = "a/a.cabal", pkgComponents = [] }
+      , PackageMeta { pkgName = T.pack "b", pkgCabalFile = "b/b.cabal", pkgComponents = [] }
+      , PackageMeta { pkgName = T.pack "root", pkgCabalFile = "root.cabal", pkgComponents = [] } ]
+  , pmSources =
+      [ SourceFile "a/app/Main.hs" (Just (mn "Main")) [] True
+      , SourceFile "b/app/Main.hs" (Just (mn "Main")) [] True
+      , SourceFile "a/src/A/Lib.hs" (Just (mn "A.Lib")) [] True
+      , SourceFile "b/test/Spec.hs" (Just (mn "Main")) [] False
+      , SourceFile "app/Main.hs" (Just (mn "Main")) [] True ] }
+
+-- B002 T1:套件相對 hs_src + 套件名 → <pkgDir>/<hs_src>;同一 hs_src 各歸各套件;
+-- 命中被排除檔 → Nothing(不退回);絕對 / 無套件名 / 根套件 → 與 resolveModuleSource 同
+testB002ResolveForPackage :: TestTree
+testB002ResolveForPackage = testCase "test_b002_resolve_for_package" $ do
+  let pm  = multiExeMeta
+      res pkg src = resolveModuleSourceFor pm (T.pack <$> pkg) (mn "Main") (T.pack <$> src)
+  res (Just "a") (Just "app\\Main.hs")  @?= Just "a/app/Main.hs"
+  res (Just "b") (Just "app/Main.hs")   @?= Just "b/app/Main.hs"
+  res (Just "b") (Just "test/Spec.hs")  @?= Nothing                 -- 存在但被排除:G-B001,不退回
+  res (Just "root") (Just "app/Main.hs") @?= Just "app/Main.hs"     -- 根套件目錄 "."
+  -- 沒有套件名 → 舊行為:hs_src 與根套件的 app/Main.hs 逐字相等就命中(舊路的 src == rel)
+  res Nothing (Just "app/Main.hs") @?= resolveModuleSource (pmSources pm) (mn "Main") (Just (T.pack "app/Main.hs"))
+  res Nothing (Just "app/Main.hs") @?= Just "app/Main.hs"
+  -- 沒有套件名、hs_src 對不上任何檔 → 三個 Main 歧義 → Nothing
+  res Nothing (Just "nowhere/Main.hs") @?= Nothing
+  -- 絕對路徑不走套件目錄:退回後綴比對(這裡可命中 a/app/Main.hs)
+  res (Just "b") (Just "C:/work/repo/a/app/Main.hs") @?= Just "a/app/Main.hs"
+  -- 不存在的套件名 → 退回
+  res (Just "zzz") (Just "src/A/Lib.hs") @?= resolveModuleSource (pmSources pm) (mn "Main") (Just (T.pack "src/A/Lib.hs"))
+  -- library module 仍走得通(套件相對 + 套件名)
+  resolveModuleSourceFor pm (Just (T.pack "a")) (mn "A.Lib") (Just (T.pack "src/A/Lib.hs")) @?= Just "a/src/A/Lib.hs"
+  -- hs_src 為 NULL(hiedb 從 repo 根 stat 不到套件相對路徑時就存 NULL):在套件目錄內以 module 名唯一比對
+  res (Just "a") Nothing @?= Just "a/app/Main.hs"
+  res (Just "b") Nothing @?= Just "b/app/Main.hs"      -- b/test/Spec.hs 也是 Main 但被排除,不算
+  res Nothing   Nothing @?= Nothing                    -- 沒有套件名 → 全域三個 Main 歧義
+  res (Just "root") Nothing @?= Nothing                -- 根套件目錄 "." 涵蓋全部 → 仍歧義 → 退回 → Nothing
+
+-- B002 T2:hie-instances 以 HieLayout 的 ComponentRef 套件名對映——兩個 exe 的 .hie 零 cannot map
+testB002InstancesUsePackage :: TestTree
+testB002InstancesUsePackage = testCase "test_b002_instances_use_package" $
+  withFixtureScratch multiExeFixture "b002-instances" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    layout <- expectRight =<< ensureHie (extOpts root) pm
+    assertBool "fixture sanity: two exe .hie files"
+      (length [ () | (ComponentRef (_, c), _) <- BD.hlFiles layout, T.pack "exe:" `T.isPrefixOf` c ] >= 2)
+    (fs, ws) <- readInstanceFacts (extOpts root) layout pm
+    fs @?= []                                            -- fixture 沒有 instance
+    [ w | w <- ws, T.pack "cannot map" `T.isInfixOf` ewMessage w ] @?= []
+
+-- B002 T3:端到端——零 cannot map、兩個 main 的 FactDecl 都在、圖上有 Main@…main 節點與 calls 邊
+testB002MultiExeEndToEnd :: TestTree
+testB002MultiExeEndToEnd = testCase "test_b002_multi_exe_end_to_end" $
+  withFixtureScratch multiExeFixture "b002-e2e" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    er <- expectRight =<< extract (extOpts root) pm
+    [ w | w <- erWarnings er, T.pack "cannot map" `T.isInfixOf` ewMessage w ] @?= []
+    let mains = sort [ f | FactDecl { fdFile = f, fdName = q } <- erFacts er, qnOcc q == T.pack "main" ]
+    mains @?= ["a/app/Main.hs", "b/app/Main.hs"]
+    let g = buildGraph defBuildOpts pm er
+        ids = [ t | NodeId t <- map gnId (cgNodes g) ]
+    assertBool "main decl node for a" (T.pack "Main@a/app/Main.hs.main" `elem` ids)
+    assertBool "main decl node for b" (T.pack "Main@b/app/Main.hs.main" `elem` ids)
+    assertBool "a's main calls A.Lib.greet"
+      (any (\e -> geSource e == NodeId (T.pack "Main@a/app/Main.hs.main")
+               && geTarget e == NodeId (T.pack "A.Lib.greet")
+               && geRelation e == RCalls) (cgEdges g))
+
+--------------------------------------------------------------------------------
+-- export-query/B001 stderr-utf8-encoding
+--------------------------------------------------------------------------------
+
+exportQueryB001Tests :: TestTree
+exportQueryB001Tests = testGroup "export-query/B001 stderr-utf8-encoding"
+  [ testB001HandlesEncodeReplacementChar ]   -- T1
+
+-- B001 T1:latin1 的 handle 印 U+FFFD 會拋;prepareHandles 之後同一內容印得出、讀回是 UTF-8
+testB001HandlesEncodeReplacementChar :: TestTree
+testB001HandlesEncodeReplacementChar = testCase "test_b001_handles_encode_replacement_char" $ do
+  tmp <- getTemporaryDirectory
+  let dir = tmp </> "knot-hs-b001-encoding"
+  removePathForcibly dir
+  createDirectoryIfMissing True dir
+  let p1 = dir </> "latin1.txt"
+      p2 = dir </> "utf8.txt"
+      payload = [T.pack "extract:   CreateFile \"C:\\x\\\65533.hie\""]
+  -- (a) 重現:latin1 編不了 U+FFFD
+  h1 <- openFile p1 WriteMode
+  hSetEncoding h1 latin1
+  r1 <- try (emitNotes h1 payload >> hClose h1)
+  _  <- try (hClose h1) :: IO (Either IOException ())   -- 例外後 handle 仍開著,關掉才刪得了檔
+  case r1 of
+    Left (_ :: IOException) -> pure ()
+    Right ()                -> assertFailure "latin1 handle should fail to encode U+FFFD"
+  -- (b) 修法:prepareHandles 之後同樣內容印得出
+  h2 <- openFile p2 WriteMode
+  hSetEncoding h2 latin1              -- 先弄成壞的預設,再交給 prepareHandles
+  prepareHandles h2 h2
+  r2 <- try (emitNotes h2 payload >> hClose h2)
+  case r2 of
+    Left (e :: IOException) -> assertFailure ("prepared handle failed: " <> show e)
+    Right ()                -> pure ()
+  bytes <- BS.readFile p2
+  assertBool "written as UTF-8 containing U+FFFD"
+    (T.pack "\65533" `T.isInfixOf` TE.decodeUtf8 bytes)
+  -- (c) 完整的 BuildFailed 報告也印得出
+  h3 <- openFile (dir </> "report.txt") WriteMode
+  prepareHandles h3 h3
+  r3 <- try (emitNotes h3 (extractFailureLines (XT.BuildFailed (T.pack "p:test:p-test") (T.unlines payload))) >> hClose h3)
+  case r3 of
+    Left (e :: IOException) -> assertFailure ("BuildFailed report failed: " <> show e)
+    Right ()                -> pure ()
+  removePathForcibly dir

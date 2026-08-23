@@ -16,6 +16,7 @@ module Knot.App.Run
   , runExtractCmd
   , runExtractCmdWith
   , runQueryCmd
+  , prepareHandles
   ) where
 
 import Control.Exception (IOException, try)
@@ -23,7 +24,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Exit (ExitCode (..))
-import System.IO (Handle)
+import System.IO (Handle, hSetEncoding, utf8)
 
 import Knot.App.Cli
   ( Command (..)
@@ -178,6 +179,16 @@ loadErrorText e = case e of
   LoadFileMissing t -> t
   LoadParseError  t -> t
   LoadSchemaError t -> t
+
+-- | 把輸出 handle 設成 UTF-8(export-query/B001)。GHC 在 Windows 對非 console 的
+-- handle 預設用系統 ANSI code page(zh-TW 是 CP950),U+FFFD 這類字元一印就拋
+-- @hPutChar: invalid argument@——而 build-driver 對 cabal 輸出做 lenient 解碼時
+-- 正好會產生 U+FFFD。UTF-8 編得了所有字元,也是 codegraph.json 與文件的編碼。
+-- 放在這裡而不是 "Main":Main 因模組名衝突不進 test-suite,這樣才測得到。
+prepareHandles :: Handle -> Handle -> IO ()
+prepareHandles hOut hErr = do
+  hSetEncoding hOut utf8
+  hSetEncoding hErr utf8
 
 -- | 起點/終點不存在時的提示(落實 F003 假設 A1 的建議)。
 --
