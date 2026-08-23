@@ -144,6 +144,7 @@ import Knot.Extract.HiedbFacts
   , readIndexFacts
   , resolveModuleSource
   , resolveModuleSourceFor
+  , isAutogenModule
   , unavailableSourceDecls
   )
 import Knot.Extract.ImportScan
@@ -294,6 +295,7 @@ tests = testGroup "knot-hs"
   , extractionB001Tests
   , extractionB002Tests
   , exportQueryB001Tests
+  , extractionE002Tests
   , graphCoreF001Tests
   , graphCoreF002Tests
   , graphCoreF003Tests
@@ -6761,3 +6763,66 @@ testB001HandlesEncodeReplacementChar = testCase "test_b001_handles_encode_replac
     Left (e :: IOException) -> assertFailure ("BuildFailed report failed: " <> show e)
     Right ()                -> pure ()
   removePathForcibly dir
+
+--------------------------------------------------------------------------------
+-- extraction/E002 skip-autogen-modules
+--------------------------------------------------------------------------------
+
+extractionE002Tests :: TestTree
+extractionE002Tests = testGroup "extraction/E002 skip-autogen-modules"
+  [ testE002IsAutogenModule      -- T1
+  , testE002InstancesSkipAutogen -- T2
+  , testE002AutogenEndToEnd      -- T3
+  ]
+
+autogenFixture :: FilePath
+autogenFixture = "test/fixtures/autogen"
+
+-- E002 T1:只認本專案套件名衍生的 Paths_* / PackageInfo_*(- → _);其餘一律 False
+testE002IsAutogenModule :: TestTree
+testE002IsAutogenModule = testCase "test_e002_is_autogen_module" $ do
+  let pkg n = PackageMeta { pkgName = T.pack n, pkgCabalFile = n <> ".cabal", pkgComponents = [] }
+      pkgs  = [pkg "story-flow", pkg "knot-hs"]
+      is    = isAutogenModule pkgs . mn
+  is "Paths_story_flow"       @?= True
+  is "PackageInfo_story_flow" @?= True
+  is "Paths_knot_hs"          @?= True
+  is "Paths_other"            @?= False   -- 不是本專案的套件
+  is "Paths_Foo"              @?= False   -- 使用者自取的名字
+  is "StoryFlow.Paths"        @?= False
+  is "Paths_story-flow"       @?= False   -- 沒換底線就不是 cabal 產的
+  isAutogenModule [] (mn "Paths_story_flow") @?= False
+
+-- E002 T2:hie-instances 對 autogen 的 .hie 零警告、零事實
+testE002InstancesSkipAutogen :: TestTree
+testE002InstancesSkipAutogen = testCase "test_e002_instances_skip_autogen" $
+  withFixtureScratch autogenFixture "e002-instances" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    layout <- expectRight =<< ensureHie (extOpts root) pm
+    assertBool "fixture sanity: Paths_autogen.hie was produced"
+      (any ((== "Paths_autogen.hie") . takeFileName . snd) (BD.hlFiles layout))
+    (fs, ws) <- readInstanceFacts (extOpts root) layout pm
+    fs @?= []
+    ws @?= []
+
+-- E002 T3:端到端——零警告、無 Paths_autogen 的事實、使用者 module 的宣告正常;規則 9 提到 autogen
+testE002AutogenEndToEnd :: TestTree
+testE002AutogenEndToEnd = testCase "test_e002_autogen_end_to_end" $ do
+  withFixtureScratch autogenFixture "e002-e2e" $ \root -> do
+    pm <- loadProjectMeta (defOpts root)
+    er <- expectRight =<< extract (extOpts root) pm
+    erWarnings er @?= []
+    let mentionsPaths f = case f of
+          FactModule { fmModule = ModuleName m } -> T.pack "Paths_" `T.isPrefixOf` m
+          FactDecl { fdName = q }                -> T.pack "Paths_" `T.isPrefixOf` unMod (qnModule q)
+          FactImport { fiTo = ModuleName m }     -> T.pack "Paths_" `T.isPrefixOf` m
+          _                                      -> False
+        unMod (ModuleName m) = m
+    -- import-scan 仍會看到 Auto.Lib 對 Paths_autogen 的字面 import(那是規則 2 的 module 層事實,
+    -- graph-core 會把指向外部 module 的 imports 邊丟棄);decl 層不得有 Paths_autogen 的任何宣告
+    [ f | f@FactDecl{} <- erFacts er, mentionsPaths f ] @?= []
+    [ f | f@FactModule{} <- erFacts er, mentionsPaths f ] @?= []
+    assertBool "user module decls present"
+      (any (\f -> case f of FactDecl { fdName = q } -> qnOcc q == T.pack "banner"; _ -> False) (erFacts er))
+  d <- readUtf8 ".design/subsystems/extraction/design.md"
+  assertBool "rule 9 mentions autogen" (hasText "autogen" d)

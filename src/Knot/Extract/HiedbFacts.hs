@@ -34,6 +34,7 @@ module Knot.Extract.HiedbFacts
   , declKindOf
   , resolveModuleSource
   , resolveModuleSourceFor
+  , isAutogenModule
   , pickFromDecl
   , SourceDecls (..)
   , unavailableSourceDecls
@@ -264,16 +265,30 @@ buildModIndex pm pkgOf rows = (idx, reverse warns)
   (idx, warns) = foldl' step (Map.empty, []) rows
   step acc@(m, ws) r
     | mrIsBoot r = acc
+    -- E002:cabal autogen module(Paths_* / PackageInfo_*)不是原始碼,比照 .hs-boot 靜默略過
+    | isAutogenModule (pmPackages pm) modName = acc
     | otherwise =
-        let modName = ModuleName (mrModule r)
-        in case resolveModuleSourceFor pm (pkgOf (mrHieFile r)) modName (mrHsSrc r) of
+        case resolveModuleSourceFor pm (pkgOf (mrHieFile r)) modName (mrHsSrc r) of
              Just p  -> (Map.insert (mrHieFile r) (ModEntry modName p) m, ws)
              Nothing -> (m, unmapped r : ws)
+   where
+    modName = ModuleName (mrModule r)
   unmapped r = ExtractWarning
     { ewSource  = mrHieFile r
     , ewMessage = T.pack "cannot map indexed module " <> mrModule r
         <> T.pack " back to pmSources; skipping its decls and refs"
     }
+
+-- | E002:cabal 自動產生的 module——@Paths_\<pkg\>@、@PackageInfo_\<pkg\>@(套件名的
+-- @-@ 換成 @_@)。它們的 @.hs@ 在 cabal 的 @autogen\/@ 目錄、不在 @hs-source-dirs@,
+-- 所以永遠不在 @pmSources@;這是設計使然,不是對映失敗(規則 9 的例外)。
+-- 只認__本專案__套件名衍生的名字:使用者自己取的 @Paths_Foo@ 不算。
+isAutogenModule :: [PackageMeta] -> ModuleName -> Bool
+isAutogenModule pkgs (ModuleName m) = any isGenFor pkgs
+ where
+  isGenFor p =
+    let slug = T.map (\c -> if c == '-' then '_' else c) (pkgName p)
+    in m == T.pack "Paths_" <> slug || m == T.pack "PackageInfo_" <> slug
 
 -- | B002:套件感知的對映。多套件專案裡 cabal 以__套件目錄__為 cwd 呼叫 GHC,
 -- @hs_src@ 是 @app\/Main.hs@ 這種套件相對路徑,'resolveModuleSource' 的後綴比對

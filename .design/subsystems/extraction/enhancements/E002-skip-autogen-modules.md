@@ -3,7 +3,7 @@ id: E002
 type: enhance
 title: skip-autogen-modules
 description: cabal 自動產生的 Paths_* / PackageInfo_* module 靜默跳過,不再逐站發 cannot map 警告
-status: open
+status: done
 created: 2026-08-23
 updated: 2026-08-23
 depends-on: []
@@ -106,9 +106,9 @@ isAutogenModule pkgs (ModuleName m) =
 
 ## TodoList
 
-- [ ] T1: `isAutogenModule` + `buildModIndex` 靜默略過  `dep: -`
-- [ ] T2: hie-instances 靜默略過  `dep: T1`
-- [ ] T3: fixture `test/fixtures/autogen/` 端到端、規則 9 回填、story-flow / MagicFarmer 實跑 2 → 0 寫進 system.md  `dep: T2`
+- [x] T1: `isAutogenModule` + `buildModIndex` 靜默略過  `dep: -`
+- [x] T2: hie-instances 靜默略過  `dep: T1`
+- [x] T3: fixture `test/fixtures/autogen/` 端到端、規則 9 回填、story-flow / MagicFarmer 實跑 2 → 0 寫進 system.md  `dep: T2`
 
 ## 1-to-1 測試對照表
 
@@ -120,4 +120,19 @@ isAutogenModule pkgs (ModuleName m) =
 
 ## 實作備註
 
-(撰寫時留空。)
+### 2026-08-23 實作完成
+
+**量化結果**(對照「改善目標」):
+
+| 指標 | 改善前 | 改善後 |
+|---|---|---|
+| story-flow `knot extract` extraction 警告 | 2 | **0**;1768 節點 / 8054 邊不變;warm 1.33 s |
+| MagicFarmer | 2 | **0**;1768 節點 / 6765 邊不變(39.8 s 是 B001 的 `--disable-tests` 讓 cabal 重新設定一次的代價,非本文檔) |
+| `autogen` fixture | 2 則 `cannot map` | **0**;無 `Paths_autogen` 的 `FactDecl` / `FactModule`;`Auto.Lib.banner` 正常(T3) |
+| 測試 | 167 綠 | 167 + 3 綠;黃金檔 byte 不變 |
+
+**實作取捨**:`isAutogenModule` 只看 module 名是否等於「`Paths_` / `PackageInfo_` + 本專案
+套件名(`-`→`_`)」,不碰檔案系統、不看 `.cabal` 的 `autogen-modules` 欄——cabal 不管有沒有
+列都會產生這兩個 module,列了才會編,而編了就一定是這個名字。import-scan 對 `Paths_*` 的
+字面 `import` 仍照規則 2 產出 `FactImport`(目標是外部 module,graph-core 丟棄並計入
+`gsDroppedExternal`),與現行一致,T3 只斷言 decl 層與 `FactModule` 零筆。
