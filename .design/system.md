@@ -5,7 +5,7 @@ title: knot-hs
 description: 讀 Haskell 專案的 .hie 與 import 產出 dev-flow 相容程式碼知識圖
 status: active
 created: 2026-08-20
-updated: 2026-08-23
+updated: 2026-08-26
 subsystems: [project-meta, extraction, graph-core, export-query]
 ---
 
@@ -97,7 +97,7 @@ cabal clean && cabal build all --enable-tests --ghc-options=-Werror
    - 頂層選填 `directed`、`built_at_commit`
    - relation 依賴類(`imports`、`calls`、`uses`、`implements` 等十種)才算進下游依賴圖;結構類(`contains`、`method`、`defines`、`declares`、`rationale_for`、`part_of` 六種)不算。兩份名單以 ADR-003 為準,並與 `scan-graph.mjs` 的 `DEP_RELATIONS` / `STRUCTURAL_RELATIONS` 逐項對齊
 2. 查詢結果(S4):stdout 文字輸出
-3. 警告與錯誤:stderr;有警告仍 exit 0,`--strict` 時**任何警告** exit 1。**兩層任一層整體拿不到則 exit 1**,這不是警告、不受 `--strict` 影響(→ ADR-006)
+3. 警告與錯誤:stderr;有警告仍 exit 0,`--strict` 時**任何警告** exit 1。**兩層任一層整體拿不到則 exit 1**,這不是警告、不受 `--strict` 影響(→ ADR-006)。`knot query` 的**新鮮度提示**(G-E008)是這條之外的第三類:它既不是警告也不是錯誤,**任何情況下都不影響 exit code**,`query` 也沒有 `--strict`
 4. **`.knot/` 快取目錄**(目標專案根目錄下,唯一允許的副作用):插樁建置的 builddir、產出的 `.hie`、hiedb 索引。純快取,刪掉只會讓下次變慢;內容格式屬 Level 2/3 自主權,不是契約
 
 ### CLI 介面(頂層契約)
@@ -110,7 +110,8 @@ knot clean [PATH]            刪掉 <PATH>/.knot 快取目錄(Output 4);只動 .
 
 knot extract [PATH]          產出 codegraph.json(需要時自行建置目標專案產 .hie,全自動)
   --output FILE              預設 <PATH>/codegraph.json
-  --include-tests            納入 test-suite component(預設排除)
+  --include-tests            納入 test-suite 與 benchmark component;**這是預設**(G-E008 起)
+  --exclude-tests            反過來排除它們;與 --include-tests 互斥,同時給是錯誤(G-E008)
   --strict                   任何警告改為 exit 1
   --summary meta|facts|graph 改印該站的摘要到 stdout,不寫 codegraph.json
 
@@ -118,11 +119,14 @@ knot query <find|reachable|path|rank|tests-of> …   (S4)讀取 codegraph.json �
   --graph FILE               讀哪份圖,預設 ./codegraph.json(子命令共用)
   --level all|module|decl    查詢的層,預設 all(子命令共用;decl 層 = contains 邊的目標,export-query/E001)
   --scope product|tests|all  查詢的範圍,預設 product(測試節點 = component 為 test:/bench:;tests-of 不受影響,G-E007)
+                             範圍在此收斂即可——抽取期恆納入測試層(G-E008),不必為了換範圍重跑 extract
+  (每個子命令載入圖之後,先比對圖的 built_at_commit 與目標專案當前 HEAD 與工作區,
+   不新鮮就在 stderr 給一行提示;純提示,不影響 exit code,無從判斷時不出聲,G-E008)
   find <keyword>             關鍵字比對 id 與 label(不分大小寫)
   reachable <id> [--reverse] [--depth N]  可達集合;--reverse 改問「誰依賴它」;--depth 只回 N 跳內,N ≥ 1(E001)
   path <from> <to>           兩點最短路徑
   rank [--top N]             連通度排名,N 預設 10
-  tests-of <id>              哪些測試節點(直接或間接)依賴它;圖無測試節點時提示重跑 extract --include-tests(G-E007)
+  tests-of <id>              哪些測試節點(直接或間接)依賴它;圖無測試節點時提示重跑 extract 且不要帶 --exclude-tests(G-E007、G-E008)
 ```
 
 **ADR-006 移除的旗標**:`--backend`、`--module-only`、`--hiedir`、`--hiedb`、`--db`。它們全是「有兩個後端、有外部執行檔、有使用者要自己產的檔案」這些實作細節洩漏到介面的結果;那些細節不存在了,旗標也就沒有存在的理由。`.knot/` 固定在目標專案根目錄,不提供改道——它是快取,與 `dist-newstyle` 同性質。

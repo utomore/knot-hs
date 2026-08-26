@@ -26,6 +26,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Directory (doesDirectoryExist, removePathForcibly)
 import System.Exit (ExitCode (..))
+import System.FilePath (takeDirectory)
 import System.IO (Handle, hSetEncoding, utf8)
 
 import Knot.App.Cli
@@ -44,13 +45,14 @@ import Knot.App.Report
   , exportNoteLines
   , extractFailureLines
   , extractNoteLines
+  , freshnessNoteLines
   , graphNoteLines
   , metaNoteLines
   , queryNoteLines
   )
 import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummary)
-import Knot.Export (writeCodegraph)
-import Knot.Export.Types (ExportReport (..))
+import Knot.Export (detectCommit, detectDirtySources, writeCodegraph)
+import Knot.Export.Types (CommitPolicy (AutoDetect), ExportReport (..))
 import Knot.Extract (extract, knotDir)
 import Knot.Extract.Types (ExtractFailure, ExtractResult (..))
 import qualified Knot.Extract.Types as XT
@@ -66,6 +68,7 @@ import Knot.Query
   , QueryGraph
   , Scope (..)
   , loadQueryGraph
+  , queryGraphCommit
   , queryGraphHasNode
   , queryGraphHasTests
   , renderResult
@@ -205,6 +208,16 @@ runQueryCmd hOut hErr cmd = do
       emitNotes hErr [T.pack "query: " <> loadErrorText e]
       pure (ExitFailure 1)
     Right g0 -> do
+      -- G-E008:新鮮度提示先於既有四條(law L11,每個子命令都成立)。git 在
+      -- --graph 指向的檔案所在目錄執行(遷移約束);兩個 commit 不同時髒不髒
+      -- 不影響結論(freshnessNoteLines haddock),省下一次不必要的 git 呼叫
+      let gitDir = takeDirectory (qcFile cmd)
+          mGraphCommit = queryGraphCommit g0
+      mHead <- detectCommit AutoDetect gitDir
+      dirty <- case (mGraphCommit, mHead) of
+        (Just gc, Just hc) | gc == hc -> detectDirtySources gitDir
+        _                             -> pure False
+      emitNotes hErr (freshnessNoteLines mGraphCommit mHead dirty)
       -- E001:先依 --level 收斂為誘導子圖(查詢規則 7);G-E007:再依 --scope 收斂
       -- (規則 9)——但 tests-of 永遠在 ScopeAll 的圖上跑(規則 10),否則結果恆空
       let gl = restrictLevel (qcLevel cmd) g0
@@ -279,7 +292,7 @@ scopeMissingLines scope levelled scoped cmd =
 noTestsLines :: QueryGraph -> QueryCommand -> [Text]
 noTestsLines full cmd = case cmd of
   TestsOf _ | not (queryGraphHasTests full) ->
-    [T.pack "query: graph has no test components; rerun knot extract --include-tests"]
+    [T.pack "query: graph has no test components; rerun knot extract without --exclude-tests"]
   _ -> []
 
 -- | 各指令的端點(存在性提示的對象)。

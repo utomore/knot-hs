@@ -19,7 +19,9 @@ import Data.Text (Text)
 
 data MetaOptions = MetaOptions
   { root           :: FilePath        -- ^ 專案根目錄
-  , includeTests   :: Bool            -- ^ 納入 test-suite 與 benchmark(預設 False)
+  , includeTests   :: Bool            -- ^ 納入 test-suite 與 benchmark。__本欄位沒有預設值__,
+                                      --   呼叫者一律明確給值;CLI 的預設是 'True'
+                                      --   (G-E008,@--exclude-tests@ 才給 'False')
   }
   deriving (Eq, Show)
 

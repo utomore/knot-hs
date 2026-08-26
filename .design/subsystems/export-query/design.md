@@ -5,7 +5,7 @@ title: export-query
 description: 匯出與查詢子系統:codegraph.json 投影與四項導航查詢 CLI
 status: active
 created: 2026-08-20
-updated: 2026-08-23
+updated: 2026-08-26
 parent: system
 related-adr: [ADR-003, ADR-006]
 code-paths: [src/Knot/Export, src/Knot/Export.hs, src/Knot/Query, src/Knot/Query.hs, app]
@@ -29,8 +29,15 @@ code-paths: [src/Knot/Export, src/Knot/Export.hs, src/Knot/Query, src/Knot/Query
 ### 匯出面
 
 ```haskell
-writeCodegraph :: ExportOptions -> CodeGraph -> IO ExportReport
+writeCodegraph     :: ExportOptions -> CodeGraph -> IO ExportReport
+detectCommit       :: CommitPolicy -> FilePath -> IO (Maybe Text)  -- G-E008:目標專案當前 HEAD
+detectDirtySources :: FilePath -> IO Bool                          -- G-E008:工作區有未提交的 .hs 改動嗎
 ```
+
+後兩條原本是 export-writer 的內部細節,**G-E008 提升為契約**:「怎麼問目標專案的 git 現況」
+只能有一處知道,而 `knot query` 的新鮮度提示住在 executable,exe 只依賴公開 library
+(ADR-004),`import` 內部模組是編譯錯誤。兩者的失敗語意一致——**偵測不到就回
+`Nothing` / `False` 且不印任何訊息**,不製造假警報。
 
 ```haskell
 data ExportOptions = ExportOptions
@@ -70,7 +77,13 @@ renderResult      :: QueryResult -> Text                         -- stdout 文�
 restrictLevel     :: Level -> QueryGraph -> QueryGraph         -- E001:收斂為指定層的誘導子圖;LevelAll 為恆等
 restrictScope     :: Scope -> QueryGraph -> QueryGraph         -- G-E007:收斂為指定範圍的誘導子圖;ScopeAll 為恆等
 queryGraphHasTests :: QueryGraph -> Bool                       -- G-E007:圖上是否有任何測試節點(tests-of 空結果的提示依據)
+queryGraphCommit   :: QueryGraph -> Maybe Text                 -- G-E008:圖檔頂層 built_at_commit 的原文;缺鍵為 Nothing
 ```
+
+`queryGraphCommit` 與前兩條同一個理由存在:CLI 要拿它與當前 HEAD 比對,而不必繞過
+`QueryGraph` 的抽象直接讀內部欄位。它**只回報圖自己記了什麼**——查詢面仍然不碰原始碼、
+不跑任何子程序,「唯一的 IO 是讀檔」這條承諾不變;比對與文案是 cli-assembly 的事。
+欄位缺席與型別不對都回 `Nothing`,一律不影響載入成敗(查詢規則 11)。
 
 `queryGraphHasNode` 存在的理由:`runQuery` 對「id 不存在」與「存在但無鄰居」都回空結果,呼叫端無從區分,而 CLI 需要對前者給明確訊息。沒有它,組裝層只能繞過 `QueryGraph` 的抽象直接讀內部欄位——那會讓「內容屬 Level 3」的承諾失效。
 
@@ -123,6 +136,7 @@ data LoadError
 8. **深度(E001)**:`Reachable` 的第三欄為深度上限,`Just N` 只回距離 ≤ N 的節點,`Nothing` 不限;規則 5 不變
 9. **範圍(G-E007)**:`restrictScope` 把圖收斂為指定範圍的誘導子圖——`ScopeProduct` 只留非測試節點、`ScopeTests` 只留測試節點,機制與規則 7 相同(兩者可交換);節點的 `component` 欄位缺鍵一律視為產品。`FindNodes` / `Reachable` / `ShortestPath` / `RankConnectivity` 都在收斂後的圖上跑
 10. **`TestsOf`(G-E007)**:自目標**反向**可達、不限深度,只留測試節點,排序同 `Reachable`;必須在 `ScopeAll` 的圖上跑(呼叫端責任,規則 9 的收斂對它不適用),途經的產品節點照常展開但不進結果。圖上沒有任何測試節點時結果必空,CLI 層以 `queryGraphHasTests` 判斷並提示
+11. **`built_at_commit` 是選填 metadata,不是驗證對象(G-E008)**:頂層有這個鍵且為字串時,原文進 `queryGraphCommit`;**缺鍵與型別不對都是 `Nothing`**,兩者皆**不影響載入成敗**。這一條與規則 2 同精神(認不得的東西排除、不中止),但與 `component` 的處置**刻意不同**——`component` 缺鍵有預設語意(視為產品)、型別不對會改變 `--scope` 的判定,所以是壞檔;`built_at_commit` 只餵 CLI 的新鮮度提示,拿不到就退化成不出聲,沒有理由讓整份圖不能查。查詢面讀的是**任何產生器**產的 `codegraph.json`,對方塞一個同名不同型的欄位不該讓 knot 整份拒收(ADR-003:多餘欄位可安全擴充)
 
 ### CLI 子命令對映(承接 system.md 頂層契約)
 
@@ -136,7 +150,14 @@ knot query find <keyword>                        → FindNodes
 knot query reachable <id> [--reverse] [--depth N] → Reachable … (Just N | Nothing);N ≥ 1(E001)
 knot query path <from> <to>                      → ShortestPath
 knot query rank [--top N]                        → RankConnectivity(N 預設 10)
-knot query tests-of <id>                         → TestsOf(G-E007);圖無測試節點時 stderr 提示重跑 knot extract --include-tests
+knot query tests-of <id>                         → TestsOf(G-E007);圖無測試節點時 stderr 提示重跑 knot extract 且不要帶 --exclude-tests(G-E008)
+
+(五個子命令共通,G-E008)載入成功後、印任何既有提示之前,先做一次新鮮度比對:
+  queryGraphCommit 圖記的 commit  vs  detectCommit AutoDetect(--graph 檔案所在目錄)的 HEAD
+    兩者都有值且不同        → stderr 一行 "graph is stale: built at …, HEAD is …"
+    兩者相同、但 detectDirtySources 為 True → stderr 一行 "graph may be stale: uncommitted Haskell changes …"
+    其餘(相同且乾淨 / 任一偵測不到)     → 零行
+  純提示,**不影響 exit code**;git 在 --graph 檔案的所在目錄執行(無目錄成分時為 ".")
 ```
 
 參數解析屬 CLI 組裝層;本子系統收 `QueryCommand`、`Level` 與 `Scope`。
@@ -149,7 +170,7 @@ cli-assembly 不是 library 契約面,但它承接 system.md「CLI 介面(頂層
 |---|---|---|
 | `[PATH]`(預設 `.`) | `MetaOptions.root`、`ExtractOptions.rootDir`、`ExportOptions.rootDir` | 三個 DTO 的路徑欄位同源 |
 | `--output FILE` | `ExportOptions.outputPath` | 未給時為 `<PATH>/codegraph.json`,預設值由 cli-assembly 算(library 不擁有 CLI 預設值,G-E001) |
-| `--include-tests` | `MetaOptions.includeTests` | 單點落實:project-meta 據此填 `sfIncluded` / `compExcluded`,extraction 只消費判定結果 |
+| `--include-tests` / `--exclude-tests` | `MetaOptions.includeTests` | **G-E008:預設納入**(不帶旗標 = `True`),`--exclude-tests` 給 `False`;兩者互斥,同時給 exit 非 0 且不寫檔。翻轉只在此層——`MetaOptions.includeTests` 本身沒有預設值,library 呼叫者一律明確給值。單點落實:project-meta 據此填 `sfIncluded` / `compExcluded`,extraction 只消費判定結果 |
 | `--strict` | cli-assembly 自己的 exit code 判定 | 見下 |
 | `--summary meta\|facts\|graph` | cli-assembly 自己的輸出模式 | 印該站摘要到 stdout,不寫 `codegraph.json` |
 
@@ -172,11 +193,11 @@ cli-assembly 不是 library 契約面,但它承接 system.md「CLI 介面(頂層
 
 | 模組 | 單一職責 |
 |---|---|
-| **export-writer** | `CodeGraph` → JSON 投影、commit 偵測、寫檔、`ExportReport` 組裝 |
+| **export-writer** | `CodeGraph` → JSON 投影、寫檔、`ExportReport` 組裝;**目標專案 git 現況的唯一知識持有者**(HEAD 是什麼、工作區的 `.hs` 髒不髒;G-E008) |
 | **graph-load** | 讀 `codegraph.json` → 驗證 → `QueryGraph`;未知 relation 的彙整排除 |
 | **query-engine** | 四種查詢演算法(純函數,BFS/度數統計) |
 | **query-render** | `QueryResult` → 人類可讀文字 |
-| **cli-assembly** | (executable,非 library)`knot` 的參數解析與管線組裝:`extract` / `query` 兩個子命令、旗標對映成各子系統的 Options DTO、報告與警告列印、exit code(含 S5 的整體失敗通道:`Left ExtractFailure` → 訊息 + exit 1) |
+| **cli-assembly** | (executable,非 library)`knot` 的參數解析與管線組裝:`extract` / `query` 兩個子命令、旗標對映成各子系統的 Options DTO、報告與警告列印、exit code(含 S5 的整體失敗通道:`Left ExtractFailure` → 訊息 + exit 1);**圖新鮮度的比對與文案**(G-E008:兩個 commit 與髒污旗標 → 最多一行提示,不影響 exit code) |
 
 ## 資料流管線(Data Flow Pipeline)
 

@@ -90,6 +90,7 @@ import Knot.App.Report
   , exportNoteLines
   , extractFailureLines
   , extractNoteLines
+  , freshnessNoteLines
   , graphNoteLines
   , metaNoteLines
   , queryNoteLines
@@ -97,7 +98,7 @@ import Knot.App.Report
 import Knot.App.Run (prepareHandles, runCleanCmd, runCommand, runExtractCmd, runExtractCmdWith, runQueryCmd)
 import Knot.App.Summary (renderFactSummary, renderGraphSummary, renderMetaSummary)
 import Knot.Export (writeCodegraph)
-import Knot.Export.Commit (detectCommit)
+import Knot.Export.Commit (detectCommit, detectDirtySources)
 import Knot.Export.Encode (encodeCodegraph, relationText, statsNotes)
 import Knot.Export.Types
   ( CommitPolicy (..)
@@ -221,6 +222,7 @@ import Knot.Query.Load
   , classifyRelation
   , dependencyRelations
   , parseQueryGraph
+  , queryGraphCommit
   , queryGraphHasNode
   , queryGraphNotes
   , structuralRelations
@@ -298,6 +300,7 @@ tests = testGroup "knot-hs"
   , extractionB001Tests
   , extractionB002Tests
   , exportQueryB001Tests
+  , exportQueryB002Tests
   , extractionE002Tests
   , graphCoreF001Tests
   , graphCoreF002Tests
@@ -315,6 +318,7 @@ tests = testGroup "knot-hs"
   , globalE007Tests
   , exportQueryE002Tests
   , exportQueryE003Tests
+  , globalE008Tests
   ]
 
 f001Tests :: TestTree
@@ -3639,6 +3643,35 @@ gitHeadOf root = do
     ExitSuccess   -> Just (T.strip (T.pack out))
     ExitFailure _ -> Nothing
 
+-- | G-E008:在暫存目錄下跑 @git \<args\>@,cwd 釘在 @dir@。
+gitAt :: FilePath -> [String] -> IO (ExitCode, String, String)
+gitAt dir args = readProcessWithExitCode "git" (["-C", dir] ++ args) ""
+
+-- | G-E008:在暫存目錄下建一個乾淨的 git repo(用於 'detectDirtySources' 與新鮮度
+-- 提示的端到端測試),跑完刪除。簽名不簽章、以固定作者身分建 commit,避免依賴
+-- 執行環境的全域 git 設定。
+withGitRepo :: String -> (FilePath -> IO a) -> IO a
+withGitRepo name act = do
+  tmp <- getTemporaryDirectory
+  let root = tmp </> ("knot-hs-e008-" <> name)
+  removePathForcibly root
+  createDirectoryIfMissing True root
+  _ <- gitAt root ["init", "-q"]
+  _ <- gitAt root ["config", "user.email", "knot-test@example.com"]
+  _ <- gitAt root ["config", "user.name", "knot-test"]
+  _ <- gitAt root ["config", "commit.gpgsign", "false"]
+  r <- act root
+  removePathForcibly root
+  pure r
+
+-- | G-E008:@git add -A && git commit@ 於暫存 repo,失敗就讓測試失敗(而非默默過關)。
+gitCommitAll :: FilePath -> String -> IO ()
+gitCommitAll dir msg = do
+  (c1, _, e1) <- gitAt dir ["add", "-A"]
+  assertBool ("git add failed: " <> e1) (c1 == ExitSuccess)
+  (c2, _, e2) <- gitAt dir ["commit", "-q", "-m", msg]
+  assertBool ("git commit failed: " <> e2) (c2 == ExitSuccess)
+
 -- export-query T1: 三個契約 DTO 的建構與欄位讀取、defaultOutputPath,
 -- 以及 ExportOptions.rootDir 與 ExtractOptions.rootDir 同名的可編譯性(假設 A7)
 testExportTypesConstruct :: TestTree
@@ -3935,6 +3968,7 @@ testQueryTypesConstruct = testCase "test_query_types_construct" $ do
         , QT.qgNotes   = [(T.pack "foo", 2)]
         , QT.qgDeclNodes = Set.empty
         , QT.qgDepEdges  = [(qid "A", qid "A")]
+        , QT.qgCommit    = Nothing   -- G-E008 骨架:欄位機械性對齊,不改本測試的斷言
         }
   QT.qgNodes g   @?= [node]
   QT.qgIndex g   @?= Map.singleton (qid "A") node
@@ -4616,6 +4650,20 @@ queryRelPool :: [String]
 queryRelPool =
   map T.unpack (dependencyRelations <> structuralRelations) <> ["foo"]
 
+-- | G-E008 R3:'genQueryGraphSrc' 的變體,五成機率在頂層插入一個
+-- @built_at_commit@ 字串鍵;回傳插入的值(供斷言 'QT.qgCommit' 原樣帶過)。
+genQueryGraphSrcWithCommit :: Gen (String, Maybe Text)
+genQueryGraphSrcWithCommit = do
+  (src, _ids) <- genQueryGraphSrc
+  mc <- Gen.maybe (T.pack <$> Gen.string (Range.linear 1 16) Gen.hexit)
+  pure (maybe src (`insertCommitKey` src) mc, mc)
+ where
+  -- 'fixtureJson' 恆以這個字面量開頭,插入點固定、不需要通用 JSON 操作。
+  directedPrefix = "{\"directed\":true,"
+  insertCommitKey c s =
+    directedPrefix ++ "\"built_at_commit\":\"" ++ T.unpack c ++ "\","
+      ++ drop (length directedPrefix) s
+
 --------------------------------------------------------------------------------
 -- export-query / F004 cli-wiring
 --------------------------------------------------------------------------------
@@ -4810,17 +4858,19 @@ testCliToplevelParse = testCase "test_cli_toplevel_parse" $ do
 -- 五個舊旗標不在 --help、給了就 exit 非 0(驗收標準 1、2)
 testExtractFlagsParse :: TestTree
 testExtractFlagsParse = testCase "test_extract_flags_parse" $ do
-  -- 全預設
+  -- 全預設(G-E008 L8:--include-tests 的預設翻轉為 True,baseExtractCmd 仍是測試檔
+  -- 手動建構 ExtractCmd 用的具名常數——它自己的 ecIncludeTests 值不代表 CLI 預設)
   d <- expectExtractCmd ["extract"]
-  d @?= baseExtractCmd
+  d @?= baseExtractCmd { ecIncludeTests = True }
   -- 全給定:五個欄位逐一等於預期值
   full <- expectExtractCmd
     [ "extract", "proj", "-o", "x.json", "--include-tests", "--strict", "--summary", "facts" ]
   full @?= fullExtractCmd
-  -- --help 只列剩餘四個旗標
+  -- --help 列出五個旗標(G-E008:新增 --exclude-tests)
   (helpMsg, helpCode) <- expectParseFailure ["extract", "--help"]
   helpCode @?= ExitSuccess
-  assertHasAll "extract help" (T.pack helpMsg) ["--output", "--include-tests", "--strict", "--summary"]
+  assertHasAll "extract help" (T.pack helpMsg)
+    ["--output", "--include-tests", "--exclude-tests", "--strict", "--summary"]
   forM_ retiredFlags $ \flag ->
     assertBool ("--help must not list " <> flag) (not (hasText flag (T.pack helpMsg)))
   -- 五個舊旗標:exit 非 0 且訊息點名該旗標
@@ -6778,6 +6828,48 @@ testB001HandlesEncodeReplacementChar = testCase "test_b001_handles_encode_replac
   removePathForcibly dir
 
 --------------------------------------------------------------------------------
+-- export-query/B002 dirty-sources-misses-index-changes
+--------------------------------------------------------------------------------
+
+exportQueryB002Tests :: TestTree
+exportQueryB002Tests = testGroup "export-query/B002 dirty-sources-misses-index-changes"
+  [ testB002DirtySourcesIndexAndQuotedPaths ]   -- T1
+
+-- B002 T1:三種「該髒卻回 False」的重現。前兩種是 index 側的狀態碼
+-- (@A@ 新增 / @R@ 改名),第三種是 git 對非 ASCII 路徑的引號轉義。
+-- 三者都是未提交的 @.hs@ 改動,圖必然對不上,提示卻沉默。
+testB002DirtySourcesIndexAndQuotedPaths :: TestTree
+testB002DirtySourcesIndexAndQuotedPaths =
+  testCase "test_b002_dirty_sources_index_and_quoted_paths" $
+    withGitRepo "b002" $ \dir -> do
+      writeUtf8 (dir </> "A.hs") "module A where\n"
+      gitCommitAll dir "init"
+      detectDirtySources dir >>= (@?= False)   -- 前提:乾淨
+
+      -- (a) staged 新增的 .hs(git status --porcelain 回 "A  New.hs")
+      writeUtf8 (dir </> "New.hs") "module New where\n"
+      (cAdd, _, eAdd) <- gitAt dir ["add", "New.hs"]
+      assertBool ("git add failed: " <> eAdd) (cAdd == ExitSuccess)
+      dirtyAdd <- detectDirtySources dir
+      assertBool "staged new .hs must count as an uncommitted change" dirtyAdd
+      gitCommitAll dir "add new"
+      detectDirtySources dir >>= (@?= False)
+
+      -- (b) staged 改名(回 "R  New.hs -> Renamed.hs";currentPath 該取新路徑)
+      (cMv, _, eMv) <- gitAt dir ["mv", "New.hs", "Renamed.hs"]
+      assertBool ("git mv failed: " <> eMv) (cMv == ExitSuccess)
+      dirtyMv <- detectDirtySources dir
+      assertBool "staged rename of a .hs must count as an uncommitted change" dirtyMv
+      gitCommitAll dir "rename"
+      detectDirtySources dir >>= (@?= False)
+
+      -- (c) 非 ASCII 檔名的未追蹤 .hs(git 預設 core.quotePath=true 會輸出
+      --     "\344\270\255\346\226\207.hs",前後多一對引號,.hs 後綴比對落空)
+      writeUtf8 (dir </> "\20013\25991.hs") "module Zh where\n"
+      dirtyCjk <- detectDirtySources dir
+      assertBool "untracked .hs with a non-ASCII name must count" dirtyCjk
+
+--------------------------------------------------------------------------------
 -- extraction/E002 skip-autogen-modules
 --------------------------------------------------------------------------------
 
@@ -6978,8 +7070,9 @@ testE007ScopeFlagsParse = testCase "test_e007_scope_flags_parse" $ do
     QueryCmd { qcFile = "test/fixtures/golden/graph.json", qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct
              , qcCommand = QT.TestsOf (qid "Demo.Core") })
   code @?= ExitSuccess
+  -- G-E008 L10:提示改指向已翻轉的預設,不再叫使用者加已成預設的旗標
   assertHasAll "no-tests hint" err
-    ["query: graph has no test components; rerun knot extract --include-tests"]
+    ["query: graph has no test components; rerun knot extract without --exclude-tests"]
   assertBool "stdout is an empty tests-of result" (T.pack "tests-of: 0 nodes" `T.isPrefixOf` out)
   -- (b) 節點在、但被 --scope 收斂掉
   writeUtf8 (dir </> "scoped.json") scopeFixtureJson
@@ -7153,3 +7246,258 @@ testE003DocsMentionClean = testCase "test_e003_docs_mention_clean" $ do
     assertBool (p <> " mentions knot clean") (hasText "knot clean" s)
   x <- readUtf8 ".design/subsystems/extraction/design.md"
   assertBool "extraction contract lists knotDir" (hasText "knotDir :: FilePath -> FilePath" x)
+
+--------------------------------------------------------------------------------
+-- global/G-E008 graph-freshness-and-test-scope
+--------------------------------------------------------------------------------
+
+-- G-E008 · spec 對照
+-- L1  built_at_commit 三段解析(合法字串 / 缺鍵 / 型別不對)      → test_g8_qgcommit_field
+-- L1  queryGraphCommit 契約(回報圖自己記了什麼,等於 qgCommit) → test_g8_query_graph_commit
+-- L2  兩個 commit 都有值且不同 → 恰一行 stale 提示             → test_g8_freshness_note_lines
+-- L3  同 commit、有未提交 .hs 改動 → 恰一行 may-be-stale 提示  → test_g8_freshness_note_lines
+-- L4  任一無從判斷 / 相同且乾淨 → 零行                         → test_g8_freshness_note_lines
+-- L5  sha 一律取前 12 碼、不足 12 原樣輸出                      → test_g8_freshness_note_lines
+-- L6  detectDirtySources:非 repo / 路徑不存在一律 False        → test_g8_detect_dirty_sources
+-- L7  detectDirtySources:只看 .hs、忽略 .gitignore 排除的檔    → test_g8_detect_dirty_sources
+-- L8  --include-tests / --exclude-tests,預設納入              → test_g8_extract_test_flags_default
+-- L9  兩旗標同時給 → exit 非 0、不寫檔                          → test_g8_extract_test_flags_default
+-- L10 無測試節點提示改指向「不要帶 --exclude-tests」            → test_e007_scope_flags_parse(既有測試依 spec 改寫)
+-- L11 新鮮度提示在五個子命令上都成立                             → test_g8_run_query_freshness_all_subcommands
+-- L12 三份文件都提到 --exclude-tests 與新鮮度提示                → test_g8_docs_mention_freshness_and_exclude_tests
+-- R3  restrictLevel/restrictScope 把 qgCommit 原樣帶過           → test_g8_restrict_preserves_commit
+--     (+ property "(e) restrictLevel/restrictScope carry qgCommit unchanged")
+-- R7  --include-tests 單獨給時行為與改動前相同                   → test_g8_extract_test_flags_default
+-- E1  freshnessNoteLines:commit 不同、截斷 12 碼                → test_g8_freshness_note_lines
+-- E2  freshnessNoteLines:同 commit、工作區有 .hs 改動           → test_g8_freshness_note_lines
+-- E3  freshnessNoteLines:圖沒記 commit,無從判斷不出聲          → test_g8_freshness_note_lines
+-- E4  built_at_commit 型別不對:載入成功、queryGraphCommit=Nothing → test_g8_qgcommit_field
+-- E5  knot extract proj(不帶測試旗標)→ includeTests = True     → test_g8_extract_test_flags_default
+-- E6  --include-tests --exclude-tests 同給 → 互斥、不寫檔        → test_g8_extract_test_flags_default
+-- E7  新鮮(commit 相同、工作區乾淨):零誤報                     → test_g8_run_query_freshness_all_subcommands
+globalE008Tests :: TestTree
+globalE008Tests = testGroup "global/G-E008 graph-freshness-and-test-scope"
+  [ testG8QgCommitField
+  , testG8QueryGraphCommit
+  , testG8FreshnessNoteLines
+  , testG8RestrictPreservesCommit
+  , testProperty "(e) restrictLevel/restrictScope carry qgCommit unchanged" $ property $ do
+      (src, mc) <- forAll genQueryGraphSrcWithCommit
+      g <- case parseAt "gen.json" src of
+        Right x  -> pure x
+        Left err -> do
+          annotate ("generated fixture failed to load: " <> show err)
+          failure
+      QT.qgCommit g === mc
+      QT.qgCommit (KQ.restrictLevel QT.LevelModule g)  === QT.qgCommit g
+      QT.qgCommit (KQ.restrictLevel QT.LevelDecl g)    === QT.qgCommit g
+      QT.qgCommit (KQ.restrictScope QT.ScopeProduct g) === QT.qgCommit g
+      QT.qgCommit (KQ.restrictScope QT.ScopeTests g)   === QT.qgCommit g
+  , testG8DetectDirtySources
+  , testG8ExtractTestFlagsDefault
+  , testG8RunQueryFreshnessAllSubcommands
+  , testG8DocsMentionFreshnessAndExcludeTests
+  ]
+
+-- | G-E008 L1:'parseQueryGraph' 建構 'QT.qgCommit' 的三段解析。走 'QT.qgCommit'
+-- 這個公開欄位(而非 'queryGraphCommit')——這條 law 描述的是 parseQueryGraph
+-- 「放進圖裡什麼」,'queryGraphCommit' 只是照 spec 契約回報同一個值的另一個入口
+-- (見 test_g8_query_graph_commit)。
+testG8QgCommitField :: TestTree
+testG8QgCommitField = testCase "test_g8_qgcommit_field" $ do
+  -- 有合法字串:okGraphJson 頂層已含 "built_at_commit": "deadbeef"
+  g1 <- loadFixture okGraphJson
+  QT.qgCommit g1 @?= Just (T.pack "deadbeef")
+  -- 缺鍵:一般 fixtureJson 不帶這個頂層鍵
+  g2 <- loadFixture (fixtureJson [jsonNode "A" "A" "a.hs"] [])
+  QT.qgCommit g2 @?= Nothing
+  -- E4:有鍵但不是字串——視同缺鍵,parseQueryGraph 仍成功載入(R1)
+  case parseAt "bad-commit.json" "{\"nodes\":[],\"built_at_commit\":42}" of
+    Right g3 -> QT.qgCommit g3 @?= Nothing
+    other    -> assertFailure ("expected a successful load, got: " <> show other)
+  -- 有鍵但是 null / 陣列,同樣視同缺鍵
+  case parseAt "bad-commit2.json" "{\"nodes\":[],\"built_at_commit\":null}" of
+    Right g4 -> QT.qgCommit g4 @?= Nothing
+    other    -> assertFailure ("expected a successful load, got: " <> show other)
+  case parseAt "bad-commit3.json" "{\"nodes\":[],\"built_at_commit\":[]}" of
+    Right g5 -> QT.qgCommit g5 @?= Nothing
+    other    -> assertFailure ("expected a successful load, got: " <> show other)
+
+-- | G-E008 L1(契約原文):'queryGraphCommit' 與 'QT.qgCommit' 同一個值——
+-- 它是圖记录的 commit 唯一的公開讀取入口。
+testG8QueryGraphCommit :: TestTree
+testG8QueryGraphCommit = testCase "test_g8_query_graph_commit" $ do
+  g1 <- loadFixture okGraphJson
+  queryGraphCommit g1 @?= Just (T.pack "deadbeef")
+  queryGraphCommit g1 @?= QT.qgCommit g1
+  g2 <- loadFixture (fixtureJson [jsonNode "A" "A" "a.hs"] [])
+  queryGraphCommit g2 @?= Nothing
+  queryGraphCommit g2 @?= QT.qgCommit g2
+
+-- | G-E008 L2–L5,Examples 1–3:'freshnessNoteLines' 是純函數,三個參數依序是
+-- 圖記的 commit、當前 HEAD、工作區是否有未提交的 .hs 改動。
+testG8FreshnessNoteLines :: TestTree
+testG8FreshnessNoteLines = testCase "test_g8_freshness_note_lines" $ do
+  -- Example 1:commit 不同、截斷為 12 碼
+  freshnessNoteLines (Just (T.pack "aaaaaaaaaaaaaaaa")) (Just (T.pack "bbbbbbbbbbbbbbbb")) False
+    @?= [T.pack "query: graph is stale: built at aaaaaaaaaaaa, HEAD is bbbbbbbbbbbb; rerun knot extract"]
+  -- Example 2:同 commit、工作區有未提交的 .hs 改動
+  freshnessNoteLines (Just (T.pack "aaaaaaaaaaaaaaaa")) (Just (T.pack "aaaaaaaaaaaaaaaa")) True
+    @?= [T.pack "query: graph may be stale: uncommitted Haskell changes since it was built; rerun knot extract"]
+  -- Example 3:圖沒記 commit,無從判斷就不出聲(即使工作區髒)
+  freshnessNoteLines Nothing (Just (T.pack "bbbbbbbbbbbbbbbb")) True @?= []
+  -- L4:HEAD 偵測不到(非 repo / git 不在 PATH)一樣不出聲
+  freshnessNoteLines (Just (T.pack "aaaaaaaaaaaaaaaa")) Nothing True  @?= []
+  freshnessNoteLines Nothing Nothing True                              @?= []
+  freshnessNoteLines Nothing Nothing False                             @?= []
+  -- L4:相同且乾淨 → 零行(Example 7 的核心斷言)
+  freshnessNoteLines (Just (T.pack "aaaaaaaaaaaaaaaa")) (Just (T.pack "aaaaaaaaaaaaaaaa")) False @?= []
+  -- L5:sha 長度不足 12 時原樣輸出(不驗證是不是合法 sha)
+  freshnessNoteLines (Just (T.pack "abc")) (Just (T.pack "xyz")) False
+    @?= [T.pack "query: graph is stale: built at abc, HEAD is xyz; rerun knot extract"]
+  -- 兩種情形不會同時出現:commit 已經不同時,髒不髒不影響結論(仍是 stale 文案)
+  freshnessNoteLines (Just (T.pack "aaaaaaaaaaaaaaaa")) (Just (T.pack "bbbbbbbbbbbbbbbb")) True
+    @?= [T.pack "query: graph is stale: built at aaaaaaaaaaaa, HEAD is bbbbbbbbbbbb; rerun knot extract"]
+
+-- | G-E008 R3:'restrictLevel' / 'restrictScope' 以 record update 建誘導子圖,
+-- 'qgCommit' 不在被覆寫的欄位之列,原樣帶過(不論 Just 或 Nothing)。
+testG8RestrictPreservesCommit :: TestTree
+testG8RestrictPreservesCommit = testCase "test_g8_restrict_preserves_commit" $ do
+  g <- loadFixture okGraphJson   -- qgCommit = Just "deadbeef"
+  QT.qgCommit (KQ.restrictLevel QT.LevelModule g)  @?= QT.qgCommit g
+  QT.qgCommit (KQ.restrictLevel QT.LevelDecl g)    @?= QT.qgCommit g
+  QT.qgCommit (KQ.restrictLevel QT.LevelAll g)     @?= QT.qgCommit g
+  QT.qgCommit (KQ.restrictScope QT.ScopeProduct g) @?= QT.qgCommit g
+  gs <- loadFixture scopeFixtureJson   -- qgCommit = Nothing(fixtureJson 不帶這個鍵)
+  QT.qgCommit (KQ.restrictScope QT.ScopeProduct gs) @?= QT.qgCommit gs
+  QT.qgCommit (KQ.restrictScope QT.ScopeTests gs)   @?= QT.qgCommit gs
+  QT.qgCommit (KQ.restrictScope QT.ScopeAll gs)     @?= QT.qgCommit gs
+
+-- | G-E008 L6/L7:'detectDirtySources' 只看未提交的 @.hs@ 改動。
+testG8DetectDirtySources :: TestTree
+testG8DetectDirtySources = testCase "test_g8_detect_dirty_sources" $ do
+  -- L6:非 git repo、路徑不存在 → False,不拋例外
+  tmp <- getTemporaryDirectory
+  nonRepo <- withExportDir "g8-nonrepo" detectDirtySources
+  nonRepo @?= False
+  missing <- detectDirtySources (tmp </> "knot-hs-g8-missing-dir")
+  missing @?= False
+  -- L7:乾淨 repo → False
+  withGitRepo "l7" $ \dir -> do
+    writeUtf8 (dir </> "A.hs") "module A where\n"
+    writeUtf8 (dir </> "README.md") "hi\n"
+    writeUtf8 (dir </> ".gitignore") "Ignored.hs\n"
+    gitCommitAll dir "init"
+    detectDirtySources dir >>= (@?= False)
+    -- 已追蹤的 .hs 被修改(未 commit) → True
+    writeUtf8 (dir </> "A.hs") "module A where\nx = 1\n"
+    detectDirtySources dir >>= (@?= True)
+    gitCommitAll dir "modify a"
+    detectDirtySources dir >>= (@?= False)
+    -- 未追蹤的新 .hs 檔 → True
+    writeUtf8 (dir </> "B.hs") "module B where\n"
+    detectDirtySources dir >>= (@?= True)
+    gitCommitAll dir "add b"
+    detectDirtySources dir >>= (@?= False)
+    -- 已追蹤的 .hs 被刪除(未 commit) → True
+    removePathForcibly (dir </> "B.hs")
+    detectDirtySources dir >>= (@?= True)
+    gitCommitAll dir "remove b"
+    detectDirtySources dir >>= (@?= False)
+    -- 只有非 .hs 檔改動(README.md)→ 不算
+    writeUtf8 (dir </> "README.md") "hi again\n"
+    detectDirtySources dir >>= (@?= False)
+    -- 被 .gitignore 排除的新 .hs 檔 → 不算
+    writeUtf8 (dir </> "Ignored.hs") "module Ignored where\n"
+    detectDirtySources dir >>= (@?= False)
+
+-- | G-E008 L8/L9,Examples 5/6:@knot extract@ 的測試旗標預設翻轉、
+-- @--exclude-tests@ 與互斥檢查。
+testG8ExtractTestFlagsDefault :: TestTree
+testG8ExtractTestFlagsDefault = testCase "test_g8_extract_test_flags_default" $ do
+  -- L8 / Example 5:不帶任何測試旗標 → ecIncludeTests 是「最終判定」,預設 True
+  d <- expectExtractCmd ["extract"]
+  ecIncludeTests d @?= True
+  toMetaOptions d @?= MetaOptions { root = ".", includeTests = True }
+  d2 <- expectExtractCmd ["extract", "proj"]
+  toMetaOptions d2 @?= MetaOptions { root = "proj", includeTests = True }
+  -- L8:--exclude-tests → False
+  e <- expectExtractCmd ["extract", "--exclude-tests"]
+  ecIncludeTests e @?= False
+  toMetaOptions e @?= MetaOptions { root = ".", includeTests = False }
+  -- R7:--include-tests 單獨給時行為與改動前相同(旗標仍存在、仍表示納入)
+  i <- expectExtractCmd ["extract", "--include-tests"]
+  ecIncludeTests i @?= True
+  -- L9 / Example 6:兩者同時給 → exit 非 0、訊息指出旗標問題(law 沒有規定逐字文案,
+  -- 只要求「指出旗標問題」——點名其中一個旗標即可,不強求兩個都出現)
+  (mutexMsg, mutexCode) <- expectParseFailure ["extract", "--include-tests", "--exclude-tests"]
+  assertBool "mutually exclusive flags must fail to parse" (mutexCode /= ExitSuccess)
+  assertBool ("mutex flag error should name a test-scope flag: " <> mutexMsg)
+    (hasText "--include-tests" (T.pack mutexMsg) || hasText "--exclude-tests" (T.pack mutexMsg))
+  -- Example 6 的後半:解析既已失敗,管線根本不會被觸發,codegraph.json 不會出現
+  -- (與 retiredFlags 的既有慣例同一個結構性保證,這裡另外用真實檔案系統釘住)
+  withExportDir "g8-mutex" $ \dir -> do
+    let out = dir </> "codegraph.json"
+    case parseCli ["extract", dir, "--include-tests", "--exclude-tests"] of
+      Failure _ -> pure ()
+      other     -> assertFailure ("expected a parse failure, got: " <> show other)
+    doesFileExist out >>= (@?= False)
+
+-- | G-E008 L11,Example 7:新鮮度提示的 CLI 接上點——載入成功後、印既有四條提示
+-- 之前,先做一次新鮮度比對;五個子命令一律成立,且完全不影響 exit code(R4)。
+testG8RunQueryFreshnessAllSubcommands :: TestTree
+testG8RunQueryFreshnessAllSubcommands = testCase "test_g8_run_query_freshness_all_subcommands" $
+  withGitRepo "l11" $ \dir -> do
+    writeUtf8 (dir </> "A.hs") "module A where\n"
+    gitCommitAll dir "init"
+    mTrueHead <- gitHeadOf dir
+    trueHead <- case mTrueHead of
+      Just h  -> pure h
+      Nothing -> assertFailure "expected a HEAD sha in the freshly-committed repo"
+    let staleCommit =
+          if T.pack "0" `T.isPrefixOf` trueHead
+            then T.pack (replicate 40 '1')
+            else T.pack (replicate 40 '0')
+        twoNodes = [jsonNode "A" "A" "src/A.hs", jsonNode "B" "B" "src/B.hs"]
+        rawJsonWith c = "{\"directed\":true,\"built_at_commit\":\"" <> T.unpack c <> "\",\"nodes\":["
+          <> intercalate "," twoNodes <> "],\"links\":[" <> jsonLink "A" "B" "imports" <> "]}"
+        stalePath = dir </> "stale.json"
+        freshPath = dir </> "fresh.json"
+    writeUtf8 stalePath (rawJsonWith staleCommit)
+    writeUtf8 freshPath (rawJsonWith trueHead)
+    let mkCmd file cmd =
+          QueryCmd { qcFile = file, qcLevel = QT.LevelAll, qcScope = QT.ScopeProduct, qcCommand = cmd }
+        expectedStale = "query: graph is stale: built at " <> T.unpack (T.take 12 staleCommit)
+          <> ", HEAD is " <> T.unpack (T.take 12 trueHead) <> "; rerun knot extract"
+        cmds =
+          [ QT.FindNodes (T.pack "A")
+          , QT.Reachable (qid "A") QT.Forward Nothing
+          , QT.ShortestPath (qid "A") (qid "B")
+          , QT.RankConnectivity 10
+          , QT.TestsOf (qid "A")
+          ]
+    -- L11:五個子命令,不新鮮的圖上都要看到同一行提示,exit 仍是 0
+    forM_ cmds $ \c -> do
+      (code, _, err) <- withCaptured dir (\hO hE -> runQueryCmd hO hE (mkCmd stalePath c))
+      code @?= ExitSuccess
+      assertHasAll ("stale hint for " <> show c) err [expectedStale]
+    -- Example 7:commit 相同、工作區乾淨(只多了兩份 fixture json,無 .hs 改動)→ 零誤報
+    (codeF, _, errF) <- withCaptured dir (\hO hE -> runQueryCmd hO hE
+      (mkCmd freshPath (QT.RankConnectivity 10)))
+    codeF @?= ExitSuccess
+    assertBool ("fresh graph must have no staleness hint: " <> show errF)
+      (not (hasText "is stale" errF) && not (hasText "may be stale" errF))
+
+-- | G-E008 L12:@--exclude-tests@ 與新鮮度提示的存在,三份文件都查得到
+-- (比照 test_e002_docs_mention_version / test_e003_docs_mention_clean 的既有慣例)。
+-- 新鮮度提示的錨點用 @built_at_commit@——三份文件都直接點名這個頂層欄位;
+-- 逐字的提示文案(@is stale@ \/ @may be stale@)只有 README 與 export-query/design.md
+-- 引述,system.md 只用中文描述同一件事,不是 law 要求的逐字文案,不能拿來當錨點。
+testG8DocsMentionFreshnessAndExcludeTests :: TestTree
+testG8DocsMentionFreshnessAndExcludeTests =
+  testCase "test_g8_docs_mention_freshness_and_exclude_tests" $
+    forM_ [".design/system.md", ".design/subsystems/export-query/design.md", "README.md"] $ \p -> do
+      s <- readUtf8 p
+      assertBool (p <> " mentions --exclude-tests") (hasText "--exclude-tests" s)
+      assertBool (p <> " mentions the freshness hint's data source (built_at_commit)")
+        (hasText "built_at_commit" s)

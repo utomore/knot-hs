@@ -78,6 +78,7 @@ inScope s n = case s of
 -- * @qgOutDeg@ \/ @qgInDeg@ 是依賴類__邊數__(__不__去重),與下游
 --   @scan-graph.mjs@ 的 hub 計算同語意(假設 A4)
 -- * @qgNotes@ 是未知 relation 名 + 邊數,依名升序;結構類__不__入列
+-- * @qgCommit@ 是圖檔頂層的 @built_at_commit@(G-E008),誘導子圖原樣帶過
 data QueryGraph = QueryGraph
   { qgNodes   :: [QueryNode]
   , qgIndex   :: Map NodeId QueryNode
@@ -88,6 +89,8 @@ data QueryGraph = QueryGraph
   , qgNotes   :: [(Text, Int)]
   , qgDeclNodes :: Set NodeId           -- ^ E001:任一 @contains@ 邊的目標 = decl 層節點;其餘為 module 層
   , qgDepEdges  :: [(NodeId, NodeId)]   -- ^ E001:依賴類邊原始清單(含重複、依檔序),'restrictLevel' 重算度數用
+  , qgCommit    :: Maybe Text           -- ^ G-E008:頂層 @built_at_commit@ 的原文;缺鍵與型別不對皆為 'Nothing'。
+                                        --   對外只經 'Knot.Query.Load.queryGraphCommit' 讀取
   }
   deriving (Eq, Show)
 
