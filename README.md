@@ -60,7 +60,7 @@ cabal install exe:knot
 
 ```
 $ knot --version
-knot 0.1.0.0 (GHC 9.14.1)
+knot 0.1.1.0 (GHC 9.14.1)
 ```
 
 括號裡是**建置這份 knot 的 GHC**——它只掃得了同版 GHC 建的專案(見上面的版本鎖)。
@@ -221,7 +221,9 @@ query: graph is stale: built at 1508fcb9f425, HEAD is 957ad5bd7677; rerun knot e
 query: graph may be stale: uncommitted Haskell changes since it was built; rerun knot extract
 ```
 
-第一行是 commit 對不上,第二行是 commit 相同但有沒提交的 `.hs` 改動。圖是新鮮的、或者
+第一行是 commit 對不上,第二行是 commit 相同但有未提交的 `.hs` 改動——**工作區側與
+index 側都算**:改過的、刪掉的、`git add` 過的新檔、`git mv` 改名的、還有沒追蹤的新檔,
+任何一種都會出聲(被 `.gitignore` 排除的不算,非 `.hs` 的改動也不算)。圖是新鮮的、或者
 根本判斷不了(圖裡沒有 `built_at_commit`、專案不是 git repo、`git` 不在 PATH)時,
 **一個字都不印**——寧可沉默也不誤報。
 
@@ -286,6 +288,12 @@ git 在 `--graph` 指向的檔案所在目錄執行,而且全程唯讀。
 外部專案的數字量自 2026-08-23(Windows / GHC 9.14.1),cold 與 warm 產出的
 `codegraph.json` byte 相同,標的的 `git status` 前後皆為空。細節見
 `.design/system.md`「開發階段」。
+
+**0.1.1.0 起測試層預設納入**,上表兩個外部專案的「第一次」是在舊預設(排除測試)下量的,
+現在的第一次會多花建 test-suite / benchmark 的時間;「之後」那一欄不受影響。真正要避開的
+不是這筆一次性成本,而是**來回切換旗標**——帶不帶測試層是兩個 cabal 組態,切換會觸發
+重新設定。knot-hs 自身實測:同組態重跑 **1.4 秒**,切換 `--include-tests` / `--exclude-tests`
+要 **17–92 秒**。預設納入就是為了讓你永遠不必付這筆錢。
 
 ## 已知限制
 

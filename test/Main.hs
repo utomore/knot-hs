@@ -7162,10 +7162,10 @@ exportQueryE002Tests = testGroup "export-query/E002 version-flag"
   ]
 
 -- E002 T1:--version 是頂層 abort option——exit 0、輸出 = versionText;
--- 數字來自 Paths_knot_hs(0.1.0.0)、GHC 版本來自 System.Info;子命令之後不接受
+-- 數字來自 Paths_knot_hs(0.1.1.0)、GHC 版本來自 System.Info;子命令之後不接受
 testE002VersionFlag :: TestTree
 testE002VersionFlag = testCase "test_e002_version_flag" $ do
-  assertBool ("versionText prefix: " <> versionText) ("knot 0.1.0.0 (GHC " `isPrefixOf` versionText)
+  assertBool ("versionText prefix: " <> versionText) ("knot 0.1.1.0 (GHC " `isPrefixOf` versionText)
   assertBool ("versionText suffix: " <> versionText) (")" `isSuffixOf` versionText)
   (msg, code) <- expectParseFailure ["--version"]
   code @?= ExitSuccess
@@ -7189,7 +7189,7 @@ testE002DocsMentionVersion = testCase "test_e002_docs_mention_version" $ do
   assertBool "README: knot --version example" (hasText "knot --version" r)
   assertBool "README: release section" (hasText "### 發版" r)
   c <- readUtf8 "knot-hs.cabal"
-  assertBool "cabal version 0.1.0.0" (hasText "version:            0.1.0.0" c)
+  assertBool "cabal version 0.1.1.0" (hasText "version:            0.1.1.0" c)
 
 --------------------------------------------------------------------------------
 -- export-query/E003 clean-command
