@@ -17,6 +17,7 @@ module Knot.Query.Load
     queryGraphNotes
   , queryGraphHasNode
   , queryGraphHasTests
+  , queryGraphCommit   -- G-E008:圖記錄的 built_at_commit
     -- * 非契約面(1-to-1 測試與 F003 取用)
   , parseQueryGraph
   , RelationClass (..)
@@ -123,6 +124,24 @@ queryGraphHasTests :: QueryGraph -> Bool
 queryGraphHasTests = any isTestNode . qgNodes
 
 --------------------------------------------------------------------------------
+-- 對外契約:圖的新鮮度來源(G-E008)
+--------------------------------------------------------------------------------
+
+-- | 圖被建立時記錄的 commit(G-E008,契約原文簽名)。
+--
+-- 值是 @codegraph.json@ 頂層 @built_at_commit@ 的__原文__:knot 產的圖恆有
+-- (ADR-003 選填、'Knot.Export.Commit.detectCommit' 在 git repo 內恆填),
+-- 其他產生器的圖或非 repo 產出的圖回 'Nothing'。
+--
+-- 與 'queryGraphHasNode' \/ 'queryGraphHasTests' 同一個理由存在:CLI 要拿它
+-- 與當前 HEAD 比對,而不必繞過 'QueryGraph' 的抽象直接讀內部欄位。
+--
+-- __本函式不判斷新不新鮮__——它只回報圖自己記了什麼;比對是 CLI 層的事
+-- ('Knot.App.Report.freshnessNoteLines')。
+queryGraphCommit :: QueryGraph -> Maybe Text
+queryGraphCommit = qgCommit
+
+--------------------------------------------------------------------------------
 -- 錯誤訊息
 --------------------------------------------------------------------------------
 
@@ -185,6 +204,11 @@ parseQueryGraph path bs = do
     , qgNotes   = Map.toAscList (accUnknown acc)
     , qgDeclNodes = accDecl acc
     , qgDepEdges  = reverse (accEdges acc)   -- 倒序累積 → 回到 links 的檔序
+    -- G-E008:頂層 @built_at_commit@ 的選填字串解析。__缺鍵與型別不對都是
+    -- 'Nothing'__,兩者皆不影響載入成敗(law R1)——刻意不比照 @component@ 的
+    -- 壞檔慣例:@component@ 會改變 @--scope@ 的判定,而這個欄位只餵新鮮度提示,
+    -- 拿不到就退化成靜默,走 'looseOptionalString' 而非 'optionalString'。
+    , qgCommit    = looseOptionalString top "built_at_commit"
     }
 
 key :: String -> K.Key
@@ -219,6 +243,14 @@ optionalString path locus obj k = case KM.lookup (key k) obj of
   Nothing         -> Right Nothing
   Just (String t) -> Right (Just t)
   Just _          -> schemaErr path [locus, "field " ++ show k ++ " is not a string"]
+
+-- | 頂層選填字串欄位,__型別不對比照缺鍵處理__(law L1,@built_at_commit@ 專用)。
+-- 與 'optionalString' 相反:那邊型別不對是壞檔(@component@ 會改變 @--scope@
+-- 判定),這裡型別不對只是退化成 'Nothing',不讓整份圖拒收。
+looseOptionalString :: KM.KeyMap Value -> String -> Maybe Text
+looseOptionalString obj k = case KM.lookup (key k) obj of
+  Just (String t) -> Just t
+  _               -> Nothing
 
 -- | 步驟 5:重複 id 是壞檔(不做「後者覆蓋」,假設 A3)。
 buildIndex :: FilePath -> [(Int, QueryNode)] -> Either LoadError (Map NodeId QueryNode)

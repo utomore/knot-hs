@@ -5,7 +5,7 @@ title: project-meta
 description: 專案發現子系統:cabal component 解析、檔案歸類與排除判定
 status: active
 created: 2026-08-20
-updated: 2026-08-23
+updated: 2026-08-26
 parent: system
 related-adr: [ADR-001, ADR-006]
 code-paths: [src/Knot/Meta, src/Knot/Meta.hs]
@@ -34,7 +34,9 @@ loadProjectMeta :: MetaOptions -> IO ProjectMeta
 ```haskell
 data MetaOptions = MetaOptions
   { root         :: FilePath        -- 專案根目錄
-  , includeTests :: Bool            -- 納入 test-suite 與 benchmark(預設 False)
+  , includeTests :: Bool            -- 納入 test-suite 與 benchmark。本欄位**沒有預設值**,
+                                    -- 呼叫者一律明確給值;CLI 的預設是 True(G-E008,
+                                    -- `--exclude-tests` 才給 False)
   }
   -- S5 移除:hieDirOverride(--hiedir 旗標已廢除,ADR-006)
 

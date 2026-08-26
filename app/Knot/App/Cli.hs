@@ -31,7 +31,7 @@ module Knot.App.Cli
   , defaultOutputPath
   ) where
 
-import Control.Applicative (optional)
+import Control.Applicative (optional, (<|>))
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Version (showVersion)
@@ -42,6 +42,7 @@ import Options.Applicative
   , auto
   , command
   , eitherReader
+  , flag'
   , fullDesc
   , header
   , help
@@ -101,7 +102,8 @@ newtype CleanCmd = CleanCmd
 data ExtractCmd = ExtractCmd
   { ecPath         :: FilePath           -- ^ 位置參數 PATH,預設 "."
   , ecOutput       :: Maybe FilePath     -- ^ --output
-  , ecIncludeTests :: Bool               -- ^ --include-tests
+  , ecIncludeTests :: Bool               -- ^ 最終判定,預設 'True'(G-E008 law L8);
+                                          --   @--exclude-tests@ 轉 'False'
   , ecStrict       :: Bool               -- ^ --strict
   , ecSummary      :: Maybe SummaryMode  -- ^ --summary;Nothing = 寫 codegraph.json
   }
@@ -175,9 +177,7 @@ extractParser = ExtractCmd
         (strOption
           (long "output" <> short 'o' <> metavar "FILE"
             <> help "output path (default: <PATH>/codegraph.json)"))
-  <*> switch
-        (long "include-tests"
-          <> help "include test-suite and benchmark components")
+  <*> includeTestsFlag
   <*> switch
         (long "strict"
           <> help "exit 1 when there is any warning")
@@ -185,6 +185,20 @@ extractParser = ExtractCmd
         (option summaryReader
           (long "summary" <> metavar "meta|facts|graph"
             <> help "print a read-only summary instead of writing codegraph.json"))
+
+-- | @--include-tests@ \/ @--exclude-tests@(G-E008,law L8\/L9):test-suite 與
+-- benchmark 預設納入,@--exclude-tests@ 反過來排除;兩者互斥,同時給屬未消化的
+-- 殘留旗標,optparse-applicative 會回報 parse 失敗(exit 非 0、印訊息、不執行任何
+-- 子命令,因此不會寫 codegraph.json——L9 三個要求同時滿足)。
+includeTestsFlag :: Parser Bool
+includeTestsFlag = fromMaybe True <$> optional (includeFlag <|> excludeFlag)
+ where
+  includeFlag = flag' True
+    (long "include-tests"
+      <> help "include test-suite and benchmark components (default)")
+  excludeFlag = flag' False
+    (long "exclude-tests"
+      <> help "exclude test-suite and benchmark components; mutually exclusive with --include-tests")
 
 queryParser :: Parser QueryCmd
 queryParser = QueryCmd

@@ -102,7 +102,7 @@ knot extract .
 這一行做了四件事:
 
 1. **project-meta**:解析 `.cabal` / `cabal.project`,列出 component 與原始碼檔、判定
-   test-suite / benchmark 的排除(預設排除,`--include-tests` 納入)
+   test-suite / benchmark 的納入(**預設納入**,`--exclude-tests` 排除)
 2. **extraction**:對你的專案跑一次 `cabal build all --builddir=.knot/build`(帶
    `-fwrite-ide-info`),讓每個 component 的 `.hie` 落在 cabal 自己的輸出目錄;再用內嵌的
    hiedb 建 `.knot/hiedb.sqlite` 索引;同時掃 import 行。兩者都成功才往下
@@ -135,12 +135,14 @@ knot 對目標目錄下 `--project-dir=<PATH>`:有 `cabal.project` 就用它,沒
 ### `knot extract`
 
 ```
-Usage: knot extract [PATH] [-o|--output FILE] [--include-tests] [--strict]
+Usage: knot extract [PATH] [-o|--output FILE] [--include-tests | --exclude-tests]
+                    [--strict]
                     [--summary meta|facts|graph]
 
   PATH                     要掃的專案根目錄(預設 ".")
   -o,--output FILE         輸出路徑(預設 <PATH>/codegraph.json)
-  --include-tests          納入 test-suite 與 benchmark component(預設排除)
+  --include-tests          納入 test-suite 與 benchmark component(**這是預設**)
+  --exclude-tests          反過來排除它們;與 --include-tests 互斥,同時給是錯誤
   --strict                 有任何警告就 exit 1
   --summary meta|facts|graph
                            改印該站的唯讀摘要到 stdout,不寫 codegraph.json
@@ -191,11 +193,15 @@ knot clean [PATH]    # 刪掉 <PATH>/.knot(預設 .);只動快取,不碰 codegra
 
 #### 測試碼:`--scope` 與 `tests-of`
 
-`knot extract --include-tests` 會把 test-suite / benchmark 也建起來納入圖中,每個節點以
+`knot extract` **預設**就會把 test-suite / benchmark 建起來納入圖中,每個節點以
 選填欄位 `component`(`<套件>:<component>`,如 `knot-hs:test:knot-test`)標記所屬。查詢時
 **預設 `--scope product`**:測試節點被收斂掉,`rank` / `reachable` 不會被「什麼都 import」
-的測試檔灌水——輸出與不帶 `--include-tests` 的圖相同。`--scope tests` 只看測試碼,
+的測試檔灌水——輸出與帶 `--exclude-tests` 抽取的圖相同。`--scope tests` 只看測試碼,
 `--scope all` 兩者都看。
+
+**範圍在查詢期換就好,不必重跑 `extract`。** 帶不帶測試層是兩個 cabal 組態,切換會觸發
+重新設定(本 repo 實測:同組態重跑 1.4 s,切換旗標 17–92 s)。預設納入就是為了讓你永遠
+不用付這筆錢;真的只要架構圖、想省掉建 test-suite 的時間,才用 `--exclude-tests`。
 
 ```bash
 knot query tests-of Knot.Query.Load.restrictLevel   # 改它會壞哪些測試(反向可達、只留測試節點)
@@ -203,7 +209,24 @@ knot query --scope tests rank --top 5                # 測試碼自己的 hub
 ```
 
 `tests-of` 永遠在整張圖上找(不受 `--scope` 影響);圖裡沒有任何測試節點時會在 stderr
-提示重跑 `knot extract --include-tests`。
+提示重跑 `knot extract` 且不要帶 `--exclude-tests`。
+
+#### 這張圖還算數嗎:新鮮度提示
+
+每個 `knot query` 子命令在載入圖之後,會拿圖裡的 `built_at_commit` 跟你專案**當前的
+HEAD 與工作區**比一次,不新鮮就在 stderr 給一行:
+
+```
+query: graph is stale: built at 1508fcb9f425, HEAD is 957ad5bd7677; rerun knot extract
+query: graph may be stale: uncommitted Haskell changes since it was built; rerun knot extract
+```
+
+第一行是 commit 對不上,第二行是 commit 相同但有沒提交的 `.hs` 改動。圖是新鮮的、或者
+根本判斷不了(圖裡沒有 `built_at_commit`、專案不是 git repo、`git` 不在 PATH)時,
+**一個字都不印**——寧可沉默也不誤報。
+
+這是**提示,不是錯誤**:exit code 完全不受影響,`knot query` 也沒有 `--strict`。
+git 在 `--graph` 指向的檔案所在目錄執行,而且全程唯讀。
 
 節點 id 的長相:module 是裸名(`Demo.Core`),值宣告是 `<module>.<occ>`
 (`Demo.Core.render`),型別宣告多一個 `#t`(`Demo.Core.Foo#t`,與建構子 `Demo.Core.Foo`

@@ -14,6 +14,7 @@ module Knot.Query
   , queryGraphNotes
   , queryGraphHasNode
   , queryGraphHasTests
+  , queryGraphCommit
   , restrictLevel
   , restrictScope
   , runQuery
@@ -37,6 +38,7 @@ import System.IO.Error (isDoesNotExistError)
 import Knot.Query.Engine (runQuery)
 import Knot.Query.Load
   ( parseQueryGraph
+  , queryGraphCommit
   , queryGraphHasNode
   , queryGraphHasTests
   , queryGraphNotes

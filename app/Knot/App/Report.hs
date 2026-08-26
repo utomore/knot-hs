@@ -25,6 +25,7 @@ module Knot.App.Report
   , graphNoteLines
   , exportNoteLines
   , queryNoteLines
+  , freshnessNoteLines   -- G-E008
     -- * 唯一的列印函式
   , emitNotes
   ) where
@@ -108,6 +109,45 @@ queryNoteLines g =
       ]
   | (rel, n) <- queryGraphNotes g
   ]
+
+-- | 通道 6(G-E008):圖的新鮮度 → 最多__一行__提示;新鮮或無從判斷時回 @[]@。
+--
+-- 三個參數依序是:圖記錄的 commit('Knot.Query.queryGraphCommit')、目標專案
+-- 當前的 HEAD('Knot.Export.detectCommit')、工作區是否有未提交的 @.hs@ 改動
+-- ('Knot.Export.detectDirtySources')。
+--
+-- 判定與文案(逐字,law L2\/L3\/L4):
+--
+-- * 兩個 commit 都有值且__不同__ →
+--   @query: graph is stale: built at \<圖 commit 前 12 碼\>, HEAD is \<HEAD 前 12 碼\>; rerun knot extract@
+-- * 兩個 commit 相同、但有未提交的 @.hs@ 改動 →
+--   @query: graph may be stale: uncommitted Haskell changes since it was built; rerun knot extract@
+-- * 其餘(相同且乾淨、圖沒記 commit、HEAD 偵測不到)→ @[]@
+--
+-- 兩種情形__不會同時出現__:commit 已經不同時,髒不髒不影響結論。
+-- sha 一律取前 12 個字元(不足 12 就原樣)——@built_at_commit@ 是圖檔裡的字串,
+-- 本函式不驗證它是不是合法 sha。
+--
+-- __不影響 exit code__:圖不新鮮是提示不是錯誤,'Knot.App.Run.runQueryCmd' 的
+-- 回傳值不因本通道改變(law R4)。
+freshnessNoteLines :: Maybe Text -> Maybe Text -> Bool -> [Text]
+freshnessNoteLines mGraphCommit mHead dirty = case (mGraphCommit, mHead) of
+  (Just g, Just h)
+    | g /= h ->
+        [ T.concat
+            [ T.pack "query: graph is stale: built at ", shortSha g
+            , T.pack ", HEAD is ", shortSha h
+            , T.pack "; rerun knot extract"
+            ]
+        ]
+    | dirty ->
+        [ T.pack
+            "query: graph may be stale: uncommitted Haskell changes since it was built; rerun knot extract"
+        ]
+    | otherwise -> []
+  _ -> []
+ where
+  shortSha = T.take 12
 
 -- | 唯一的列印函式;空清單__不寫任何 byte__,每行以 @\\n@ 結尾。
 emitNotes :: Handle -> [Text] -> IO ()
