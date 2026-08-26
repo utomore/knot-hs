@@ -300,6 +300,7 @@ tests = testGroup "knot-hs"
   , extractionB001Tests
   , extractionB002Tests
   , exportQueryB001Tests
+  , exportQueryB002Tests
   , extractionE002Tests
   , graphCoreF001Tests
   , graphCoreF002Tests
@@ -6825,6 +6826,48 @@ testB001HandlesEncodeReplacementChar = testCase "test_b001_handles_encode_replac
     Left (e :: IOException) -> assertFailure ("BuildFailed report failed: " <> show e)
     Right ()                -> pure ()
   removePathForcibly dir
+
+--------------------------------------------------------------------------------
+-- export-query/B002 dirty-sources-misses-index-changes
+--------------------------------------------------------------------------------
+
+exportQueryB002Tests :: TestTree
+exportQueryB002Tests = testGroup "export-query/B002 dirty-sources-misses-index-changes"
+  [ testB002DirtySourcesIndexAndQuotedPaths ]   -- T1
+
+-- B002 T1:三種「該髒卻回 False」的重現。前兩種是 index 側的狀態碼
+-- (@A@ 新增 / @R@ 改名),第三種是 git 對非 ASCII 路徑的引號轉義。
+-- 三者都是未提交的 @.hs@ 改動,圖必然對不上,提示卻沉默。
+testB002DirtySourcesIndexAndQuotedPaths :: TestTree
+testB002DirtySourcesIndexAndQuotedPaths =
+  testCase "test_b002_dirty_sources_index_and_quoted_paths" $
+    withGitRepo "b002" $ \dir -> do
+      writeUtf8 (dir </> "A.hs") "module A where\n"
+      gitCommitAll dir "init"
+      detectDirtySources dir >>= (@?= False)   -- 前提:乾淨
+
+      -- (a) staged 新增的 .hs(git status --porcelain 回 "A  New.hs")
+      writeUtf8 (dir </> "New.hs") "module New where\n"
+      (cAdd, _, eAdd) <- gitAt dir ["add", "New.hs"]
+      assertBool ("git add failed: " <> eAdd) (cAdd == ExitSuccess)
+      dirtyAdd <- detectDirtySources dir
+      assertBool "staged new .hs must count as an uncommitted change" dirtyAdd
+      gitCommitAll dir "add new"
+      detectDirtySources dir >>= (@?= False)
+
+      -- (b) staged 改名(回 "R  New.hs -> Renamed.hs";currentPath 該取新路徑)
+      (cMv, _, eMv) <- gitAt dir ["mv", "New.hs", "Renamed.hs"]
+      assertBool ("git mv failed: " <> eMv) (cMv == ExitSuccess)
+      dirtyMv <- detectDirtySources dir
+      assertBool "staged rename of a .hs must count as an uncommitted change" dirtyMv
+      gitCommitAll dir "rename"
+      detectDirtySources dir >>= (@?= False)
+
+      -- (c) 非 ASCII 檔名的未追蹤 .hs(git 預設 core.quotePath=true 會輸出
+      --     "\344\270\255\346\226\207.hs",前後多一對引號,.hs 後綴比對落空)
+      writeUtf8 (dir </> "\20013\25991.hs") "module Zh where\n"
+      dirtyCjk <- detectDirtySources dir
+      assertBool "untracked .hs with a non-ASCII name must count" dirtyCjk
 
 --------------------------------------------------------------------------------
 -- extraction/E002 skip-autogen-modules

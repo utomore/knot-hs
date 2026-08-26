@@ -150,7 +150,8 @@ subsystems: [export-query, project-meta]
 - L4: 任一 commit 為 `Nothing` 時回 `[]`(不論第三參數);兩者相同且第三參數為 `False` 時回 `[]`
 - L5: sha 一律取**前 12 個字元**;長度不足 12 時原樣輸出(`built_at_commit` 是圖檔裡的字串,本層不驗證它是不是合法 sha)
 - L6: `detectDirtySources` 對非 git repo、git 不在 PATH、路徑不存在、以及任何 git 失敗,一律回 `False` 且不印任何訊息
-- L7: `detectDirtySources` 只看 Haskell 原始碼:未提交的 `.hs` 改動(tracked 檔的修改或刪除、未追蹤的新 `.hs` 檔)回 `True`;非 `.hs` 檔的改動、以及被 `.gitignore` 排除的檔案,一律不算
+- L7: `detectDirtySources` 只看 Haskell 原始碼:**任何一種未提交狀態的 `.hs` 檔**都回 `True`——工作區側與 index 側皆算,涵蓋修改、刪除、新增(已 `git add`)、改名、複製、衝突未解,以及未追蹤的新檔;**路徑含非 ASCII 字元不影響判定**。非 `.hs` 檔的改動、以及被 `.gitignore` 排除的檔案,一律不算
+  (原本這一條只列舉「tracked 檔的修改或刪除、未追蹤的新 `.hs` 檔」,漏掉 index 側的狀態與非 ASCII 路徑,實作照字面做因而漏報 → export-query/B002 修正並回填)
 - L8: `knot extract` 不帶任何測試旗標時 `ecIncludeTests == True`;帶 `--exclude-tests` 時 `False`;帶 `--include-tests` 時 `True`
 - L9: `--include-tests` 與 `--exclude-tests` 同時給定時,exit 非 0、訊息指出旗標問題,且**不寫** `codegraph.json`
 - L10: `tests-of` 在沒有任何測試節點的圖上執行時,提示為
